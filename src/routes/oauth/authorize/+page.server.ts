@@ -9,6 +9,14 @@ import type { OAuthClientRecord } from '$lib/server/oauth/clients';
 
 const CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
+/**
+ * Upper bound on the opaque `state` parameter, in bytes.
+ *
+ * `state` is the client's own value and is never interpreted here, so it is bounded by
+ * size alone — never trimmed, normalised, or inspected.
+ */
+const MAX_STATE_BYTES = 1024;
+
 interface AuthorizeParams {
   client: OAuthClientRecord;
   redirectUri: string;
@@ -24,22 +32,21 @@ type ValidationResult =
   | { ok: true; params: AuthorizeParams }
   | { ok: false; error: string };
 
-async function validateAuthorizeParams(
-  source: URLSearchParams | FormData,
-  fallback?: URLSearchParams
-): Promise<ValidationResult> {
+/**
+ * Validates one authorization request.
+ *
+ * The single `source` is always the request URL's query string — the authorization
+ * request is defined by the URL the consent screen was rendered for, and nothing else.
+ * Consent submissions re-validate that same URL rather than trusting anything the POST
+ * body carries, so a tampered body cannot swap the client, redirect target, resource,
+ * scopes, PKCE challenge, or state out from under an approval the operator saw.
+ */
+async function validateAuthorizeParams(source: URLSearchParams): Promise<ValidationResult> {
   const getParam = (key: string): string | null => {
-    const val = source.get(key);
-    if (val !== null && typeof val === 'string' && val.trim().length > 0) {
-      return val.trim();
-    }
-    if (fallback) {
-      const fb = fallback.get(key);
-      if (fb !== null && fb.trim().length > 0) {
-        return fb.trim();
-      }
-    }
-    return null;
+    const value = source.get(key);
+    if (value === null) return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
   };
 
   const clientId = getParam('client_id');
@@ -115,8 +122,10 @@ async function validateAuthorizeParams(
     return { ok: false, error: 'Requested scope is not registered for this client' };
   }
 
-  const state = getParam('state');
-  if (state && state.length > 1024) {
+  // `state` is read raw: present-but-empty stays present, and surrounding whitespace is
+  // part of the client's value. Only its size is our business.
+  const state = source.get('state');
+  if (state !== null && Buffer.byteLength(state, 'utf8') > MAX_STATE_BYTES) {
     return { ok: false, error: 'State parameter too long' };
   }
 
@@ -130,9 +139,46 @@ async function validateAuthorizeParams(
       scopes,
       codeChallenge,
       codeChallengeMethod,
-      state: state || null
+      state
     }
   };
+}
+
+/**
+ * Re-validates the authorization request a consent submission refers to, and checks the
+ * session-bound CSRF token carried in the POST body.
+ *
+ * The body contributes the CSRF token and nothing else.
+ */
+async function authorizeConsent(event: {
+  request: Request;
+  url: URL;
+  locals: App.Locals;
+}): Promise<{ ok: true; params: AuthorizeParams } | { ok: false; failure: ReturnType<typeof fail> }> {
+  if (!event.locals.admin || !event.locals.sessionToken) {
+    return { ok: false, failure: fail(401, { error: 'Unauthorized' }) };
+  }
+
+  let submittedCsrf = event.request.headers.get('x-csrf-token');
+  if (!submittedCsrf) {
+    try {
+      const formData = await event.request.formData();
+      submittedCsrf = (formData.get('csrfToken') as string | null) ?? null;
+    } catch {
+      submittedCsrf = null;
+    }
+  }
+
+  if (!verifyCsrfToken(submittedCsrf, event.locals.sessionToken, runtime.sessionSecret)) {
+    return { ok: false, failure: fail(403, { error: 'Invalid or missing CSRF token' }) };
+  }
+
+  const validation = await validateAuthorizeParams(event.url.searchParams);
+  if (!validation.ok) {
+    return { ok: false, failure: fail(400, { error: validation.error }) };
+  }
+
+  return { ok: true, params: validation.params };
 }
 
 export const load: PageServerLoad = async ({ url, locals }) => {
@@ -160,6 +206,9 @@ export const load: PageServerLoad = async ({ url, locals }) => {
     codeChallenge: validation.params.codeChallenge,
     codeChallengeMethod: validation.params.codeChallengeMethod,
     state: validation.params.state,
+    // The consent forms post back to this exact query string, which is what binds the
+    // approval to the request the operator was shown.
+    requestQuery: url.search,
     csrfToken: locals.csrfToken,
     adminUsername: locals.admin.username
   };
@@ -167,22 +216,12 @@ export const load: PageServerLoad = async ({ url, locals }) => {
 
 export const actions: Actions = {
   approve: async ({ request, url, locals }) => {
-    if (!locals.admin || !locals.sessionToken) {
-      return fail(401, { error: 'Unauthorized' });
+    const consent = await authorizeConsent({ request, url, locals });
+    if (!consent.ok) {
+      return consent.failure;
     }
 
-    const formData = await request.formData();
-    const submittedCsrf = (formData.get('csrfToken') || request.headers.get('x-csrf-token')) as string | null;
-    if (!verifyCsrfToken(submittedCsrf, locals.sessionToken, runtime.sessionSecret)) {
-      return fail(403, { error: 'Invalid or missing CSRF token' });
-    }
-
-    const validation = await validateAuthorizeParams(formData, url.searchParams);
-    if (!validation.ok) {
-      return fail(400, { error: validation.error });
-    }
-
-    const { client, redirectUri, resource, scopes, codeChallenge, state } = validation.params;
+    const { client, redirectUri, resource, scopes, codeChallenge, state } = consent.params;
     const issued = await runtime.oauthAuth.issueAuthorizationCode({
       clientId: client.clientId,
       redirectUri,
@@ -197,49 +236,22 @@ export const actions: Actions = {
   },
 
   deny: async ({ request, url, locals }) => {
-    if (!locals.admin || !locals.sessionToken) {
-      return fail(401, { error: 'Unauthorized' });
+    // Denial is bound to the same validated request as approval: a denial that redirected
+    // on weaker checks would itself be an open redirect.
+    const consent = await authorizeConsent({ request, url, locals });
+    if (!consent.ok) {
+      return consent.failure;
     }
 
-    const formData = await request.formData();
-    const submittedCsrf = (formData.get('csrfToken') || request.headers.get('x-csrf-token')) as string | null;
-    if (!verifyCsrfToken(submittedCsrf, locals.sessionToken, runtime.sessionSecret)) {
-      return fail(403, { error: 'Invalid or missing CSRF token' });
-    }
-
-    // Denial still requires a valid active client and exact registered redirect URI
-    const clientId = (formData.get('client_id') as string | null)?.trim() || url.searchParams.get('client_id')?.trim();
-    if (!clientId) {
-      return fail(400, { error: 'Missing client_id parameter' });
-    }
-    const client = await runtime.oauthClients.findActive(clientId);
-    if (!client) {
-      return fail(400, { error: 'Unknown or inactive OAuth client' });
-    }
-
-    const redirectUri = (formData.get('redirect_uri') as string | null)?.trim() || url.searchParams.get('redirect_uri')?.trim();
-    if (!redirectUri || !redirectUriMatches(redirectUri, client.redirectUris)) {
-      return fail(400, { error: 'Redirect URI does not match client registration' });
-    }
-
-    const state = (formData.get('state') as string | null)?.trim() || url.searchParams.get('state')?.trim();
+    const { redirectUri, state } = consent.params;
 
     const target = new URL(redirectUri);
     target.searchParams.set('error', 'access_denied');
     target.searchParams.set('error_description', 'The resource owner denied the authorization request');
-    if (state) {
+    if (state !== null) {
       target.searchParams.set('state', state);
     }
 
     throw redirect(303, target.href);
-  },
-
-  default: async (event) => {
-    const formData = await event.request.clone().formData();
-    const actionType = formData.get('action');
-    if (actionType === 'deny') {
-      return (actions.deny as any)(event);
-    }
-    return (actions.approve as any)(event);
   }
 };

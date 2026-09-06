@@ -3,70 +3,14 @@ import type { Actions, PageServerLoad } from './$types';
 import { runtime } from '$lib/server/runtime';
 import { ADMIN_SESSION_COOKIE, verifyCsrfToken } from '$lib/server/security/http';
 
-export function _safeRedirect(target: unknown): string {
-  if (typeof target !== 'string' || !target) {
-    return '/admin';
-  }
+import { safeLoginRedirect } from '$lib/server/oauth/continuation';
 
-  // Reject backslashes, control characters, and protocol-relative URLs
-  if (target.includes('\\') || target.startsWith('//') || /[\r\n\t\0]/.test(target)) {
-    return '/admin';
-  }
-
-  // Must start with /admin or /oauth/authorize
-  const isAdmin =
-    target === '/admin' ||
-    target.startsWith('/admin/') ||
-    target.startsWith('/admin?');
-  const isOAuthAuthorize =
-    target === '/oauth/authorize' ||
-    target.startsWith('/oauth/authorize?') ||
-    target.startsWith('/oauth/authorize/');
-
-  if (!isAdmin && !isOAuthAuthorize) {
-    return '/admin';
-  }
-
-  // Parse against a dummy base to strictly enforce relative path, no credentials, no authority override
-  try {
-    const dummyBase = 'http://localhost.internal';
-    const parsed = new URL(target, dummyBase);
-
-    // Host/origin must match dummy base
-    if (parsed.origin !== dummyBase) {
-      return '/admin';
-    }
-
-    // Must not contain credentials
-    if (parsed.username || parsed.password) {
-      return '/admin';
-    }
-
-    // Normalized pathname must still start with /admin or /oauth/authorize
-    const p = parsed.pathname;
-    const pathValid =
-      p === '/admin' ||
-      p.startsWith('/admin/') ||
-      p === '/oauth/authorize' ||
-      p.startsWith('/oauth/authorize/');
-
-    if (!pathValid) {
-      return '/admin';
-    }
-
-    return parsed.pathname + parsed.search + parsed.hash;
-  } catch {
-    return '/admin';
-  }
-}
-
-export const _safeAdminRedirect = _safeRedirect;
-const safeRedirect = _safeRedirect;
-const safeAdminRedirect = _safeAdminRedirect;
+/** Re-exported under SvelteKit's private-export prefix so tests can reach it via this route. */
+export { safeLoginRedirect as _safeRedirect };
 
 export const load: PageServerLoad = async ({ locals, url }) => {
   if (locals.admin) {
-    const target = safeRedirect(url.searchParams.get('redirectTo'));
+    const target = safeLoginRedirect(url.searchParams.get('redirectTo'));
     throw redirect(303, target);
   }
   return {};
@@ -106,7 +50,7 @@ export const actions: Actions = {
       maxAge: 30 * 24 * 60 * 60
     });
 
-    const target = safeAdminRedirect(url.searchParams.get('redirectTo') ?? formData.get('redirectTo'));
+    const target = safeLoginRedirect(url.searchParams.get('redirectTo') ?? formData.get('redirectTo'));
     throw redirect(303, target);
   },
 

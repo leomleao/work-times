@@ -2,38 +2,15 @@ import { json, type RequestHandler } from '@sveltejs/kit';
 import { runtime } from '$lib/server/runtime';
 import { authenticateOAuthClient } from '$lib/server/oauth/client-auth';
 import { OAuthTokenReuseError } from '$lib/server/oauth/authorization';
-
-const PROTOCOL_HEADERS = {
-  'cache-control': 'no-store',
-  pragma: 'no-cache'
-};
+import { readAndValidateFormBody, PROTOCOL_HEADERS } from '$lib/server/oauth/form';
 
 export const POST: RequestHandler = async ({ request }) => {
-  const contentType = request.headers.get('content-type') ?? '';
-  if (!contentType.toLowerCase().startsWith('application/x-www-form-urlencoded')) {
-    return json(
-      {
-        error: 'invalid_request',
-        error_description: 'Content-Type must be application/x-www-form-urlencoded'
-      },
-      { status: 400, headers: PROTOCOL_HEADERS }
-    );
+  const parsedForm = await readAndValidateFormBody(request);
+  if (!parsedForm.ok) {
+    return parsedForm.response;
   }
 
-  let bodyText: string;
-  try {
-    bodyText = await request.text();
-  } catch {
-    return json(
-      {
-        error: 'invalid_request',
-        error_description: 'Failed to read request body'
-      },
-      { status: 400, headers: PROTOCOL_HEADERS }
-    );
-  }
-
-  const formParams = new URLSearchParams(bodyText);
+  const formParams = parsedForm.params;
 
   // Authenticate the client (public or confidential: client_secret_post / client_secret_basic)
   const auth = await authenticateOAuthClient(request, formParams, runtime.oauthClients);

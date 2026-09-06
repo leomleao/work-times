@@ -15,13 +15,39 @@ export type ClientAuthResult =
       readonly headers?: Record<string, string>;
     };
 
+const CONTROL_CHAR_PATTERN = /[\x00-\x1f\x7f-\x9f]/;
+
+/**
+ * Decodes one `application/x-www-form-urlencoded` component of a Basic credential
+ * (RFC 6749 Section 2.3.1), returning `null` rather than a best-effort value.
+ *
+ * Malformed percent escapes are refused instead of being passed through literally: a
+ * lenient decoder lets the same credential be spelled several ways.
+ */
+function strictFormUrlDecode(raw: string): string | null {
+  // Every '%' must introduce exactly two hex digits — this also covers a trailing '%'.
+  if (/%(?![0-9A-Fa-f]{2})/.test(raw)) {
+    return null;
+  }
+
+  try {
+    const decoded = decodeURIComponent(raw.replace(/\+/g, ' '));
+    if (CONTROL_CHAR_PATTERN.test(decoded)) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
 export async function authenticateOAuthClient(
   request: Request,
   bodyParams: URLSearchParams,
   clientService: OAuthClientService
 ): Promise<ClientAuthResult> {
   const authHeader = request.headers.get('authorization');
-  const hasBasicHeader = Boolean(authHeader && authHeader.trim().toLowerCase().startsWith('basic '));
+  const hasBasicHeader = Boolean(authHeader && /^\s*Basic\s+/i.test(authHeader));
 
   const bodyClientId = bodyParams.get('client_id')?.trim();
   const bodyClientSecret = bodyParams.get('client_secret');
@@ -42,16 +68,53 @@ export async function authenticateOAuthClient(
 
   if (hasBasicHeader && authHeader) {
     authMethod = 'client_secret_basic';
-    const credentials = authHeader.trim().slice(6).trim();
-    let decoded: string;
-    try {
-      decoded = Buffer.from(credentials, 'base64').toString('utf-8');
-    } catch {
+    const match = authHeader.match(/^\s*Basic\s+(.+)$/i);
+    if (!match) {
       return {
         ok: false,
         status: 401,
         error: 'invalid_client',
         errorDescription: 'Invalid Basic authentication header',
+        headers: { 'www-authenticate': 'Basic realm="OAuth"' }
+      };
+    }
+
+    // Canonical Base64 only: the standard alphabet, correct padding, and no internal
+    // whitespace. Node's decoder accepts all three deviations and would let one credential
+    // be spelled many ways; the round-trip check below rejects the rest.
+    const credentials = match[1].trim();
+    if (
+      credentials.length === 0 ||
+      credentials.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(credentials)
+    ) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'invalid_client',
+        errorDescription: 'Invalid Basic authentication header',
+        headers: { 'www-authenticate': 'Basic realm="OAuth"' }
+      };
+    }
+
+    const buf = Buffer.from(credentials, 'base64');
+    if (buf.toString('base64') !== credentials) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'invalid_client',
+        errorDescription: 'Invalid Basic authentication header',
+        headers: { 'www-authenticate': 'Basic realm="OAuth"' }
+      };
+    }
+
+    const decoded = buf.toString('utf-8');
+    if (CONTROL_CHAR_PATTERN.test(decoded)) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'invalid_client',
+        errorDescription: 'Invalid client credentials',
         headers: { 'www-authenticate': 'Basic realm="OAuth"' }
       };
     }
@@ -69,17 +132,31 @@ export async function authenticateOAuthClient(
 
     const rawId = decoded.slice(0, colonIndex);
     const rawSecret = decoded.slice(colonIndex + 1);
-    try {
-      clientId = decodeURIComponent(rawId);
-    } catch {
-      clientId = rawId;
+
+    const parsedId = strictFormUrlDecode(rawId);
+    const parsedSecret = strictFormUrlDecode(rawSecret);
+
+    if (parsedId === null || parsedSecret === null || parsedId.length === 0) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'invalid_client',
+        errorDescription: 'Invalid client credentials',
+        headers: { 'www-authenticate': 'Basic realm="OAuth"' }
+      };
     }
-    try {
-      clientSecret = decodeURIComponent(rawSecret);
-    } catch {
-      clientSecret = rawSecret;
-    }
+
+    clientId = parsedId;
+    clientSecret = parsedSecret;
   } else if (bodyClientId) {
+    if (CONTROL_CHAR_PATTERN.test(bodyClientId) || (bodyClientSecret && CONTROL_CHAR_PATTERN.test(bodyClientSecret))) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'invalid_client',
+        errorDescription: 'Invalid client credentials'
+      };
+    }
     clientId = bodyClientId;
     if (bodyClientSecret !== null) {
       clientSecret = bodyClientSecret;

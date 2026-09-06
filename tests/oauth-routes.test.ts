@@ -170,15 +170,71 @@ describe('OAuth Protocol Routes', () => {
   });
 
   describe('/oauth/authorize POST Actions (Approve & Deny)', () => {
-    it('rejects unauthenticated consent submission with 401', async () => {
-      const formData = new FormData();
-      formData.set('client_id', publicClient.metadata.clientId);
-      formData.set('redirect_uri', redirectUri);
+    const sessionToken = 'admin-session';
+    const adminLocals = {
+      admin: { username: 'admin', sessionExpiresAt: '2026-12-01' },
+      sessionToken
+    };
 
-      const { event } = createMockEvent({
-        url: 'http://localhost:3002/oauth/authorize?/approve',
+    /** Builds the query string that defines one authorization request. */
+    function authorizeQuery(overrides: Record<string, string | null> = {}): string {
+      const params: Record<string, string | null> = {
+        client_id: publicClient.metadata.clientId,
+        redirect_uri: redirectUri,
+        response_type: 'code',
+        resource: mcpResource,
+        scope: 'activity:read',
+        code_challenge: validChallenge,
+        code_challenge_method: 'S256',
+        ...overrides
+      };
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== null) search.set(key, value);
+      }
+      return search.toString();
+    }
+
+    /** Posts a consent decision to the action URL that carries the authorization request. */
+    function consentEvent(options: {
+      action: 'approve' | 'deny';
+      query: string;
+      body?: FormData;
+      csrf?: string | null;
+      locals?: Record<string, unknown>;
+    }) {
+      const formData = options.body ?? new FormData();
+      const csrf =
+        options.csrf === undefined
+          ? csrfTokenForSession(sessionToken, runtime.sessionSecret)
+          : options.csrf;
+      if (csrf !== null) formData.set('csrfToken', csrf);
+
+      return createMockEvent({
+        url: `http://localhost:3002/oauth/authorize?${options.query}&/${options.action}`,
         method: 'POST',
+        headers: { origin: 'http://localhost:3002' },
+        locals: (options.locals ?? adminLocals) as Partial<App.Locals>,
         body: formData
+      }).event;
+    }
+
+    /** Runs a consent action, returning the redirect location or the returned failure. */
+    async function runConsent(action: 'approve' | 'deny', event: unknown) {
+      try {
+        const result = await (authorizeActions[action] as any)(event);
+        return { location: null as string | null, failure: result };
+      } catch (err: any) {
+        expect(err.status).toBe(303);
+        return { location: err.location as string, failure: null };
+      }
+    }
+
+    it('rejects unauthenticated consent submission with 401', async () => {
+      const event = consentEvent({
+        action: 'approve',
+        query: authorizeQuery(),
+        locals: {}
       });
 
       const res = await (authorizeActions.approve as any)(event);
@@ -186,21 +242,10 @@ describe('OAuth Protocol Routes', () => {
     });
 
     it('rejects consent submission with missing or invalid CSRF with 403', async () => {
-      const sessionToken = 'admin-session';
-      const formData = new FormData();
-      formData.set('client_id', publicClient.metadata.clientId);
-      formData.set('redirect_uri', redirectUri);
-      formData.set('csrfToken', 'invalid-token');
-
-      const { event } = createMockEvent({
-        url: 'http://localhost:3002/oauth/authorize?/approve',
-        method: 'POST',
-        headers: { origin: 'http://localhost:3002' },
-        locals: {
-          admin: { username: 'admin', sessionExpiresAt: '2026-12-01' },
-          sessionToken
-        },
-        body: formData
+      const event = consentEvent({
+        action: 'approve',
+        query: authorizeQuery(),
+        csrf: 'invalid-token'
       });
 
       const res = await (authorizeActions.approve as any)(event);
@@ -208,104 +253,167 @@ describe('OAuth Protocol Routes', () => {
     });
 
     it('approves request, generates one-time code, and redirects to exact redirect_uri preserving state', async () => {
-      const sessionToken = 'admin-session';
-      const csrfToken = csrfTokenForSession(sessionToken, runtime.sessionSecret);
-
-      const formData = new FormData();
-      formData.set('csrfToken', csrfToken);
-      formData.set('client_id', publicClient.metadata.clientId);
-      formData.set('redirect_uri', redirectUri);
-      formData.set('response_type', 'code');
-      formData.set('resource', mcpResource);
-      formData.set('scope', 'activity:read');
-      formData.set('code_challenge', validChallenge);
-      formData.set('code_challenge_method', 'S256');
-      formData.set('state', 'client-state-abc');
-
-      const { event } = createMockEvent({
-        url: 'http://localhost:3002/oauth/authorize?/approve',
-        method: 'POST',
-        headers: { origin: 'http://localhost:3002' },
-        locals: {
-          admin: { username: 'admin', sessionExpiresAt: '2026-12-01' },
-          sessionToken
-        },
-        body: formData
+      const event = consentEvent({
+        action: 'approve',
+        query: authorizeQuery({ state: 'client-state-abc' })
       });
 
-      let location = '';
-      try {
-        await (authorizeActions.approve as any)(event);
-      } catch (err: any) {
-        expect(err.status).toBe(303);
-        location = err.location;
-      }
-
+      const { location } = await runConsent('approve', event);
       expect(location).toBeTruthy();
-      const redirectUrl = new URL(location);
+      const redirectUrl = new URL(location!);
       expect(redirectUrl.origin + redirectUrl.pathname).toBe(redirectUri);
       expect(redirectUrl.searchParams.get('code')).toMatch(/^wac_/);
       expect(redirectUrl.searchParams.get('state')).toBe('client-state-abc');
     });
 
     it('denies request and redirects to exact redirect_uri with access_denied preserving state', async () => {
-      const sessionToken = 'admin-session';
-      const csrfToken = csrfTokenForSession(sessionToken, runtime.sessionSecret);
-
-      const formData = new FormData();
-      formData.set('csrfToken', csrfToken);
-      formData.set('client_id', publicClient.metadata.clientId);
-      formData.set('redirect_uri', redirectUri);
-      formData.set('state', 'client-state-xyz');
-
-      const { event } = createMockEvent({
-        url: 'http://localhost:3002/oauth/authorize?/deny',
-        method: 'POST',
-        headers: { origin: 'http://localhost:3002' },
-        locals: {
-          admin: { username: 'admin', sessionExpiresAt: '2026-12-01' },
-          sessionToken
-        },
-        body: formData
+      const event = consentEvent({
+        action: 'deny',
+        query: authorizeQuery({ state: 'client-state-xyz' })
       });
 
-      let location = '';
-      try {
-        await (authorizeActions.deny as any)(event);
-      } catch (err: any) {
-        expect(err.status).toBe(303);
-        location = err.location;
-      }
-
+      const { location } = await runConsent('deny', event);
       expect(location).toBeTruthy();
-      const redirectUrl = new URL(location);
+      const redirectUrl = new URL(location!);
       expect(redirectUrl.origin + redirectUrl.pathname).toBe(redirectUri);
       expect(redirectUrl.searchParams.get('error')).toBe('access_denied');
       expect(redirectUrl.searchParams.get('state')).toBe('client-state-xyz');
     });
 
     it('denial with invalid redirect_uri returns 400 and never redirects', async () => {
-      const sessionToken = 'admin-session';
-      const csrfToken = csrfTokenForSession(sessionToken, runtime.sessionSecret);
-
-      const formData = new FormData();
-      formData.set('csrfToken', csrfToken);
-      formData.set('client_id', publicClient.metadata.clientId);
-      formData.set('redirect_uri', 'https://evil.attacker.com');
-
-      const { event } = createMockEvent({
-        url: 'http://localhost:3002/oauth/authorize?/deny',
-        method: 'POST',
-        headers: { origin: 'http://localhost:3002' },
-        locals: {
-          admin: { username: 'admin', sessionExpiresAt: '2026-12-01' },
-          sessionToken
-        },
-        body: formData
+      const event = consentEvent({
+        action: 'deny',
+        query: authorizeQuery({ redirect_uri: 'https://evil.attacker.com' })
       });
 
-      const res = await (authorizeActions.deny as any)(event);
-      expect(res.status).toBe(400);
+      const { location, failure } = await runConsent('deny', event);
+      expect(location).toBeNull();
+      expect(failure.status).toBe(400);
+    });
+
+    it('binds approval to the action URL and ignores every authorization parameter in the POST body', async () => {
+      const tampered = new FormData();
+      tampered.set('client_id', confidentialClient.metadata.clientId);
+      tampered.set('redirect_uri', 'https://evil.attacker.com/callback');
+      tampered.set('response_type', 'token');
+      tampered.set('resource', 'https://evil.attacker.com/mcp');
+      tampered.set('scope', 'activity:read activity:detail operations:read');
+      tampered.set('code_challenge', 'A'.repeat(43));
+      tampered.set('code_challenge_method', 'plain');
+      tampered.set('state', 'attacker-state');
+
+      const event = consentEvent({
+        action: 'approve',
+        query: authorizeQuery({ state: 'genuine-state' }),
+        body: tampered
+      });
+
+      const { location } = await runConsent('approve', event);
+      expect(location).toBeTruthy();
+      const redirectUrl = new URL(location!);
+      expect(redirectUrl.origin + redirectUrl.pathname).toBe(redirectUri);
+      expect(redirectUrl.origin).not.toBe('https://evil.attacker.com');
+      expect(redirectUrl.searchParams.get('state')).toBe('genuine-state');
+
+      // The issued code carries the URL's client, resource, and scope — not the body's.
+      const code = redirectUrl.searchParams.get('code')!;
+      const tokens = await runtime.oauthAuth.exchangeAuthorizationCode({
+        code,
+        clientId: publicClient.metadata.clientId,
+        redirectUri,
+        resource: mcpResource,
+        codeVerifier: validVerifier
+      });
+      expect(tokens).not.toBeNull();
+      expect(tokens!.scope).toBe('activity:read');
+    });
+
+    it('binds denial to the action URL and ignores redirect_uri and state in the POST body', async () => {
+      const tampered = new FormData();
+      tampered.set('redirect_uri', 'https://evil.attacker.com/callback');
+      tampered.set('state', 'attacker-state');
+
+      const event = consentEvent({
+        action: 'deny',
+        query: authorizeQuery({ state: 'genuine-state' }),
+        body: tampered
+      });
+
+      const { location } = await runConsent('deny', event);
+      expect(location).toBeTruthy();
+      const redirectUrl = new URL(location!);
+      expect(redirectUrl.origin + redirectUrl.pathname).toBe(redirectUri);
+      expect(redirectUrl.searchParams.get('state')).toBe('genuine-state');
+    });
+
+    it('refuses a consent submission whose action URL carries no authorization request', async () => {
+      for (const action of ['approve', 'deny'] as const) {
+        const body = new FormData();
+        body.set('client_id', publicClient.metadata.clientId);
+        body.set('redirect_uri', redirectUri);
+        body.set('response_type', 'code');
+        body.set('resource', mcpResource);
+        body.set('scope', 'activity:read');
+        body.set('code_challenge', validChallenge);
+        body.set('code_challenge_method', 'S256');
+
+        const event = consentEvent({ action, query: '', body });
+        const { location, failure } = await runConsent(action, event);
+        expect(location).toBeNull();
+        expect(failure.status).toBe(400);
+      }
+    });
+
+    it('treats state as opaque: preserved byte-for-byte, untrimmed, and never re-encoded', async () => {
+      const state = '  pad ded/+%20 ünïcode&=?  ';
+      const event = consentEvent({
+        action: 'approve',
+        query: authorizeQuery({ state })
+      });
+
+      const { location } = await runConsent('approve', event);
+      expect(new URL(location!).searchParams.get('state')).toBe(state);
+    });
+
+    it('preserves a present-but-empty state on approval and denial', async () => {
+      const approveEvent = consentEvent({
+        action: 'approve',
+        query: `${authorizeQuery()}&state=`
+      });
+      const approved = await runConsent('approve', approveEvent);
+      expect(new URL(approved.location!).searchParams.get('state')).toBe('');
+
+      const denyEvent = consentEvent({
+        action: 'deny',
+        query: `${authorizeQuery()}&state=`
+      });
+      const denied = await runConsent('deny', denyEvent);
+      expect(new URL(denied.location!).searchParams.get('state')).toBe('');
+    });
+
+    it('omits state entirely when the request carried none', async () => {
+      const event = consentEvent({ action: 'approve', query: authorizeQuery() });
+      const { location } = await runConsent('approve', event);
+      expect(new URL(location!).searchParams.has('state')).toBe(false);
+    });
+
+    it('rejects a state that exceeds the byte bound, counting bytes not characters', async () => {
+      // 1024 multi-byte characters are well under the character count but over 1024 bytes.
+      const event = consentEvent({
+        action: 'approve',
+        query: authorizeQuery({ state: 'é'.repeat(1024) })
+      });
+
+      const { location, failure } = await runConsent('approve', event);
+      expect(location).toBeNull();
+      expect(failure.status).toBe(400);
+
+      const atBound = consentEvent({
+        action: 'approve',
+        query: authorizeQuery({ state: 'a'.repeat(1024) })
+      });
+      const accepted = await runConsent('approve', atBound);
+      expect(accepted.location).toBeTruthy();
     });
   });
 
@@ -1070,6 +1178,434 @@ describe('OAuth Protocol Routes', () => {
       expect(safeRedirect('/')).toBe('/admin');
       expect(safeRedirect('/api/health')).toBe('/admin');
       expect(safeRedirect('/mcp')).toBe('/admin');
+    });
+  });
+
+  describe('Protocol Endpoint Body Parsing', () => {
+    const daemonRedirect = 'https://daemon.example.corp/callback';
+
+    function tokenRequest(options: {
+      body: string;
+      contentType?: string | null;
+      contentLength?: string;
+    }) {
+      const headers: Record<string, string> = {};
+      if (options.contentType !== null) {
+        headers['content-type'] = options.contentType ?? 'application/x-www-form-urlencoded';
+      }
+      if (options.contentLength !== undefined) {
+        headers['content-length'] = options.contentLength;
+      }
+      return createMockEvent({
+        url: 'http://localhost:3002/oauth/token',
+        method: 'POST',
+        headers,
+        body: options.body
+      }).event;
+    }
+
+    /** Every rejection is a generic, uncacheable `invalid_request`. */
+    async function expectGenericRejection(response: Response) {
+      expect(response.status).toBe(400);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('pragma')).toBe('no-cache');
+      const json = await response.json();
+      expect(json.error).toBe('invalid_request');
+      return json;
+    }
+
+    it('accepts a form-urlencoded content type that carries parameters', async () => {
+      const response = await tokenPost(
+        tokenRequest({
+          body: new URLSearchParams({
+            grant_type: 'refresh_token',
+            client_id: publicClient.metadata.clientId,
+            refresh_token: 'wrt_unknown'
+          }).toString(),
+          contentType: 'application/x-www-form-urlencoded; charset=UTF-8'
+        })
+      );
+
+      // Parsed and dispatched: rejected on the grant, not on the media type.
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('invalid_grant');
+    });
+
+    it('rejects media types other than form-urlencoded, including multipart and none', async () => {
+      for (const contentType of [
+        'application/json',
+        'multipart/form-data; boundary=x',
+        'text/plain',
+        'application/x-www-form-urlencoded-extra',
+        null
+      ]) {
+        const response = await tokenPost(
+          tokenRequest({ body: 'grant_type=refresh_token', contentType })
+        );
+        await expectGenericRejection(response);
+      }
+    });
+
+    it('rejects a Content-Length the body does not actually match', async () => {
+      const body = 'grant_type=refresh_token&refresh_token=wrt_x';
+
+      for (const declared of [String(body.length - 5), String(body.length + 5)]) {
+        const response = await tokenPost(tokenRequest({ body, contentLength: declared }));
+        await expectGenericRejection(response);
+      }
+
+      // The honest length is accepted and the request reaches grant handling.
+      const honest = await tokenPost(
+        tokenRequest({ body, contentLength: String(Buffer.byteLength(body, 'utf-8')) })
+      );
+      expect((await honest.json()).error).not.toBe('invalid_request');
+    });
+
+    it('counts Content-Length in bytes, so a multi-byte body is not mistaken for a mismatch', async () => {
+      const body = `grant_type=refresh_token&refresh_token=${encodeURIComponent('ünïcode')}`;
+      const response = await tokenPost(
+        tokenRequest({ body, contentLength: String(Buffer.byteLength(body, 'utf-8')) })
+      );
+      expect((await response.json()).error).not.toBe('invalid_request');
+    });
+
+    it('rejects a malformed Content-Length rather than coercing it', async () => {
+      for (const declared of ['abc', '-1', '1.5', '0x10', '1e3', ' ', '12, 12', '+12']) {
+        const response = await tokenPost(
+          tokenRequest({ body: 'grant_type=refresh_token', contentLength: declared })
+        );
+        await expectGenericRejection(response);
+      }
+    });
+
+    it('rejects an oversized body whether or not it declares its length', async () => {
+      const oversized = `grant_type=refresh_token&refresh_token=${'a'.repeat(64 * 1024)}`;
+
+      const declared = await tokenPost(
+        tokenRequest({
+          body: oversized,
+          contentLength: String(Buffer.byteLength(oversized, 'utf-8'))
+        })
+      );
+      await expectGenericRejection(declared);
+
+      // Without a declared length the cap has to be enforced while reading.
+      const undeclared = await tokenPost(tokenRequest({ body: oversized }));
+      await expectGenericRejection(undeclared);
+    });
+
+    it('rejects a duplicated security-critical parameter instead of silently taking the first', async () => {
+      for (const body of [
+        'grant_type=refresh_token&grant_type=authorization_code&refresh_token=wrt_x',
+        `client_id=${publicClient.metadata.clientId}&client_id=attacker&grant_type=refresh_token`,
+        'grant_type=refresh_token&refresh_token=wrt_a&refresh_token=wrt_b',
+        `grant_type=authorization_code&code=abc&redirect_uri=${encodeURIComponent(redirectUri)}&redirect_uri=${encodeURIComponent('https://evil.attacker.com/cb')}`
+      ]) {
+        const response = await tokenPost(tokenRequest({ body }));
+        const json = await expectGenericRejection(response);
+        expect(json.error_description).toBe('Duplicate parameter in request');
+      }
+    });
+
+    it('rejects a duplicate even when both copies carry the same value', async () => {
+      const response = await tokenPost(
+        tokenRequest({
+          body: `grant_type=refresh_token&client_id=${publicClient.metadata.clientId}&client_id=${publicClient.metadata.clientId}`
+        })
+      );
+      await expectGenericRejection(response);
+    });
+
+    it('applies the same body rules to /oauth/revoke', async () => {
+      const jsonBody = await revokePost(
+        createMockEvent({
+          url: 'http://localhost:3002/oauth/revoke',
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: 'wat_x', client_id: publicClient.metadata.clientId })
+        }).event
+      );
+      await expectGenericRejection(jsonBody);
+
+      const duplicated = await revokePost(
+        createMockEvent({
+          url: 'http://localhost:3002/oauth/revoke',
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: `client_id=${publicClient.metadata.clientId}&token=wat_a&token=wat_b`
+        }).event
+      );
+      await expectGenericRejection(duplicated);
+
+      const dishonest = await revokePost(
+        createMockEvent({
+          url: 'http://localhost:3002/oauth/revoke',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/x-www-form-urlencoded',
+            'content-length': '2'
+          },
+          body: `client_id=${publicClient.metadata.clientId}&token=wat_a`
+        }).event
+      );
+      await expectGenericRejection(dishonest);
+    });
+
+    it('still completes a well-formed revocation', async () => {
+      const issued = await runtime.oauthAuth.issueAuthorizationCode({
+        clientId: publicClient.metadata.clientId,
+        redirectUri,
+        resource: mcpResource,
+        scopes: ['activity:read'],
+        codeChallenge: validChallenge,
+        codeChallengeMethod: 'S256'
+      });
+      const tokens = await runtime.oauthAuth.exchangeAuthorizationCode({
+        code: issued.code,
+        clientId: publicClient.metadata.clientId,
+        redirectUri,
+        resource: mcpResource,
+        codeVerifier: validVerifier
+      });
+
+      const body = new URLSearchParams({
+        token: tokens!.accessToken,
+        client_id: publicClient.metadata.clientId
+      }).toString();
+
+      const response = await revokePost(
+        createMockEvent({
+          url: 'http://localhost:3002/oauth/revoke',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/x-www-form-urlencoded',
+            'content-length': String(Buffer.byteLength(body, 'utf-8'))
+          },
+          body
+        }).event
+      );
+      expect(response.status).toBe(200);
+    });
+
+    it('leaves the valid DCR, authorization_code, and refresh flows intact end to end', async () => {
+      const registration = await registerPost(
+        createMockEvent({
+          url: 'http://localhost:3002/oauth/register',
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            client_name: 'Round Trip Agent',
+            redirect_uris: [daemonRedirect],
+            token_endpoint_auth_method: 'none',
+            scope: 'activity:read'
+          })
+        }).event
+      );
+      expect(registration.status).toBe(201);
+      const registered = await registration.json();
+
+      const issued = await runtime.oauthAuth.issueAuthorizationCode({
+        clientId: registered.client_id,
+        redirectUri: daemonRedirect,
+        resource: mcpResource,
+        scopes: ['activity:read'],
+        codeChallenge: validChallenge,
+        codeChallengeMethod: 'S256'
+      });
+
+      const exchangeBody = new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: registered.client_id,
+        code: issued.code,
+        redirect_uri: daemonRedirect,
+        code_verifier: validVerifier,
+        resource: mcpResource
+      }).toString();
+
+      const exchanged = await tokenPost(
+        tokenRequest({
+          body: exchangeBody,
+          contentLength: String(Buffer.byteLength(exchangeBody, 'utf-8'))
+        })
+      );
+      expect(exchanged.status).toBe(200);
+      const tokens = await exchanged.json();
+      expect(tokens.access_token).toMatch(/^wat_/);
+
+      const refreshBody = new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: registered.client_id,
+        refresh_token: tokens.refresh_token,
+        resource: mcpResource
+      }).toString();
+
+      const refreshed = await tokenPost(
+        tokenRequest({
+          body: refreshBody,
+          contentLength: String(Buffer.byteLength(refreshBody, 'utf-8'))
+        })
+      );
+      expect(refreshed.status).toBe(200);
+      expect((await refreshed.json()).access_token).toMatch(/^wat_/);
+    });
+  });
+
+  describe('HTTP Basic Client Authentication Parsing', () => {
+    const daemonRedirect = 'https://daemon.example.corp/callback';
+
+    function basicTokenEvent(credentials: string) {
+      return createMockEvent({
+        url: 'http://localhost:3002/oauth/token',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          authorization: `Basic ${credentials}`
+        },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: 'wac_placeholder',
+          redirect_uri: daemonRedirect,
+          code_verifier: validVerifier,
+          resource: mcpResource
+        }).toString()
+      }).event;
+    }
+
+    /** Asserts a generic 401 that never restates what was submitted. */
+    async function expectCredentialRejection(response: Response, submitted: string) {
+      expect(response.status).toBe(401);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('www-authenticate')).toBe('Basic realm="OAuth"');
+      const raw = await response.text();
+      expect(JSON.parse(raw).error).toBe('invalid_client');
+      expect(raw).not.toContain(submitted);
+      expect(raw).not.toContain(confidentialClient.clientSecret!);
+      expect(raw).not.toContain(confidentialClient.metadata.clientId);
+    }
+
+    const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+    /**
+     * Re-spells the last significant Base64 character with its unused trailing bits set.
+     * The result decodes to the very same bytes but is not what an encoder would emit.
+     */
+    function withTrailingBitsSet(canonical: string): string {
+      const padding = (canonical.match(/=+$/) ?? [''])[0].length;
+      const index = canonical.length - padding - 1;
+      const value = BASE64_ALPHABET.indexOf(canonical[index]);
+      const unusedBits = padding === 1 ? 0b11 : 0b1111;
+      const replacement = (value & ~unusedBits) | ((value & unusedBits) === 0 ? 1 : 0);
+      return canonical.slice(0, index) + BASE64_ALPHABET[replacement] + canonical.slice(index + 1);
+    }
+
+    it('rejects non-canonical Base64 spellings of otherwise valid credentials', async () => {
+      const raw = `${confidentialClient.metadata.clientId}:${confidentialClient.clientSecret}`;
+      const canonical = Buffer.from(raw, 'utf-8').toString('base64');
+      expect(canonical).toMatch(/=$/);
+
+      const trailingBits = withTrailingBitsSet(canonical);
+      // Node decodes it to the identical credentials; only the spelling differs.
+      expect(Buffer.from(trailingBits, 'base64').toString('utf-8')).toBe(raw);
+
+      const variants = [
+        canonical.replace(/=+$/, ''), // padding stripped
+        canonical.replace(/\+/g, '-').replace(/\//g, '_'), // base64url alphabet
+        `${canonical.slice(0, 4)} ${canonical.slice(4)}`, // internal whitespace
+        `${canonical}=`, // over-padded
+        trailingBits // unused trailing bits set
+      ].filter((variant) => variant !== canonical);
+
+      expect(variants.length).toBeGreaterThanOrEqual(4);
+      for (const variant of variants) {
+        await expectCredentialRejection(await tokenPost(basicTokenEvent(variant)), variant);
+      }
+    });
+
+    it('rejects credentials that decode without a colon separator', async () => {
+      const credentials = Buffer.from(confidentialClient.metadata.clientId, 'utf-8').toString(
+        'base64'
+      );
+      await expectCredentialRejection(await tokenPost(basicTokenEvent(credentials)), credentials);
+    });
+
+    it('rejects credentials that decode to control characters', async () => {
+      for (const control of ['\u0000', '\r', '\n', '\u007f']) {
+        const credentials = Buffer.from(
+          `${confidentialClient.metadata.clientId}${control}:${confidentialClient.clientSecret}`,
+          'utf-8'
+        ).toString('base64');
+        await expectCredentialRejection(await tokenPost(basicTokenEvent(credentials)), credentials);
+      }
+    });
+
+    it('rejects malformed percent-encoding inside a credential component', async () => {
+      for (const spelling of ['%', '%2', '%zz', '%2G', '%%41']) {
+        const credentials = Buffer.from(
+          `${confidentialClient.metadata.clientId}${spelling}:secret`,
+          'utf-8'
+        ).toString('base64');
+        await expectCredentialRejection(await tokenPost(basicTokenEvent(credentials)), credentials);
+      }
+    });
+
+    it('rejects an empty or absent credential after the scheme', async () => {
+      for (const header of ['Basic', 'Basic ', 'Basic    ']) {
+        const response = await tokenPost(
+          createMockEvent({
+            url: 'http://localhost:3002/oauth/token',
+            method: 'POST',
+            headers: {
+              'content-type': 'application/x-www-form-urlencoded',
+              authorization: header
+            },
+            body: 'grant_type=refresh_token&refresh_token=wrt_x'
+          }).event
+        );
+        expect(response.status).toBe(401);
+        expect((await response.json()).error).toBe('invalid_client');
+      }
+    });
+
+    it('accepts form-urlencoded credentials, as RFC 6749 Section 2.3.1 requires', async () => {
+      const percentEncode = (value: string) =>
+        [...Buffer.from(value, 'utf-8')]
+          .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`)
+          .join('');
+
+      const issued = await runtime.oauthAuth.issueAuthorizationCode({
+        clientId: confidentialClient.metadata.clientId,
+        redirectUri: daemonRedirect,
+        resource: mcpResource,
+        scopes: ['activity:read'],
+        codeChallenge: validChallenge,
+        codeChallengeMethod: 'S256'
+      });
+
+      const credentials = Buffer.from(
+        `${percentEncode(confidentialClient.metadata.clientId)}:${percentEncode(confidentialClient.clientSecret!)}`,
+        'utf-8'
+      ).toString('base64');
+
+      const response = await tokenPost(
+        createMockEvent({
+          url: 'http://localhost:3002/oauth/token',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/x-www-form-urlencoded',
+            authorization: `Basic ${credentials}`
+          },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            code: issued.code,
+            redirect_uri: daemonRedirect,
+            code_verifier: validVerifier,
+            resource: mcpResource
+          }).toString()
+        }).event
+      );
+
+      expect(response.status).toBe(200);
+      expect((await response.json()).access_token).toMatch(/^wat_/);
     });
   });
 });

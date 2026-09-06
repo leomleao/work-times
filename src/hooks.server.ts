@@ -7,7 +7,7 @@ import {
   setSecurityHeaders,
   verifyCsrfToken
 } from '$lib/server/security/http';
-import { _safeRedirect as safeRedirect } from './routes/login/+page.server';
+import { safeLoginRedirect as safeRedirect } from '$lib/server/oauth/continuation';
 
 export const handle: Handle = async ({ event, resolve }) => {
   const { pathname } = event.url;

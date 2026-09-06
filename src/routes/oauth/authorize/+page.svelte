@@ -13,6 +13,8 @@
     codeChallenge: string;
     codeChallengeMethod: string;
     state: string | null;
+    /** Query string of the validated authorization request, leading `?` included. */
+    requestQuery: string;
     csrfToken: string;
     adminUsername: string;
   }
@@ -116,34 +118,26 @@
       </div>
     </div>
 
-    <!-- Approval & Denial Forms -->
+    <!--
+      Approval & Denial Forms.
+
+      The authorization request travels in the action URL, not in hidden fields: the
+      server re-validates that query string and ignores everything the body carries apart
+      from the CSRF token, so the decision the operator saw cannot be re-pointed at a
+      different request.
+    -->
     <div class="actions-wrapper">
-      <form method="POST" action="?/approve" class="action-form">
+      <form method="POST" action="{data.requestQuery}&/approve" class="action-form">
         <input type="hidden" name="csrfToken" value={data.csrfToken} />
-        <input type="hidden" name="client_id" value={data.client.clientId} />
-        <input type="hidden" name="redirect_uri" value={data.redirectUri} />
-        <input type="hidden" name="response_type" value="code" />
-        <input type="hidden" name="resource" value={data.resource} />
-        <input type="hidden" name="scope" value={data.scopes.join(' ')} />
-        <input type="hidden" name="code_challenge" value={data.codeChallenge} />
-        <input type="hidden" name="code_challenge_method" value={data.codeChallengeMethod} />
-        {#if data.state}
-          <input type="hidden" name="state" value={data.state} />
-        {/if}
-        <button type="submit" name="action" value="approve" class="button primary approve-button">
+        <button type="submit" class="button primary approve-button">
           <ShieldCheck size={16} />
           <span>Approve & Authorize</span>
         </button>
       </form>
 
-      <form method="POST" action="?/deny" class="action-form">
+      <form method="POST" action="{data.requestQuery}&/deny" class="action-form">
         <input type="hidden" name="csrfToken" value={data.csrfToken} />
-        <input type="hidden" name="client_id" value={data.client.clientId} />
-        <input type="hidden" name="redirect_uri" value={data.redirectUri} />
-        {#if data.state}
-          <input type="hidden" name="state" value={data.state} />
-        {/if}
-        <button type="submit" name="action" value="deny" class="button secondary deny-button">
+        <button type="submit" class="button secondary deny-button">
           <X size={16} />
           <span>Deny Access</span>
         </button>

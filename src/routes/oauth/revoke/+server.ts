@@ -1,39 +1,15 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
 import { runtime } from '$lib/server/runtime';
 import { authenticateOAuthClient } from '$lib/server/oauth/client-auth';
-
-const PROTOCOL_HEADERS = {
-  'cache-control': 'no-store',
-  pragma: 'no-cache'
-};
+import { readAndValidateFormBody, PROTOCOL_HEADERS } from '$lib/server/oauth/form';
 
 export const POST: RequestHandler = async ({ request }) => {
-  let formParams = new URLSearchParams();
-  const contentType = request.headers.get('content-type') ?? '';
-
-  try {
-    if (contentType.toLowerCase().includes('application/json')) {
-      const jsonBody = await request.json();
-      if (jsonBody && typeof jsonBody === 'object') {
-        for (const [key, value] of Object.entries(jsonBody)) {
-          if (typeof value === 'string') {
-            formParams.set(key, value);
-          }
-        }
-      }
-    } else {
-      const text = await request.text();
-      formParams = new URLSearchParams(text);
-    }
-  } catch {
-    return json(
-      {
-        error: 'invalid_request',
-        error_description: 'Failed to parse request payload'
-      },
-      { status: 400, headers: PROTOCOL_HEADERS }
-    );
+  const parsedForm = await readAndValidateFormBody(request);
+  if (!parsedForm.ok) {
+    return parsedForm.response;
   }
+
+  const formParams = parsedForm.params;
 
   // RFC 7009 Section 2.1: Client authentication is required
   const auth = await authenticateOAuthClient(request, formParams, runtime.oauthClients);
@@ -53,7 +29,7 @@ export const POST: RequestHandler = async ({ request }) => {
     );
   }
 
-  const token = formParams.get('token')?.trim();
+  const token = formParams.get('token');
   if (!token) {
     return json(
       {
