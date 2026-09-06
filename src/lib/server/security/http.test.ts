@@ -1,0 +1,47 @@
+import { describe, expect, it } from 'vitest';
+import {
+  csrfTokenForSession,
+  requestHasTrustedOrigin,
+  setSecurityHeaders,
+  verifyCsrfToken
+} from './http';
+
+describe('browser HTTP security', () => {
+  it('derives and verifies a session-bound CSRF token', () => {
+    const token = csrfTokenForSession('session-one', 'a sufficiently long secret');
+    expect(verifyCsrfToken(token, 'session-one', 'a sufficiently long secret')).toBe(true);
+    expect(verifyCsrfToken(token, 'session-two', 'a sufficiently long secret')).toBe(false);
+    expect(verifyCsrfToken('wrong', 'session-one', 'a sufficiently long secret')).toBe(false);
+  });
+
+  it('requires an exact configured browser origin', () => {
+    const publicUrl = new URL('https://work-times.home');
+    expect(
+      requestHasTrustedOrigin(
+        new Request('https://work-times.home/admin', {
+          method: 'POST',
+          headers: { origin: 'https://work-times.home' }
+        }),
+        publicUrl
+      )
+    ).toBe(true);
+    expect(
+      requestHasTrustedOrigin(
+        new Request('https://work-times.home/admin', {
+          method: 'POST',
+          headers: { origin: 'https://evil.example' }
+        }),
+        publicUrl
+      )
+    ).toBe(false);
+    expect(requestHasTrustedOrigin(new Request('https://work-times.home/admin'), publicUrl)).toBe(false);
+  });
+
+  it('sets restrictive security headers', () => {
+    const headers = new Headers();
+    setSecurityHeaders(headers);
+    expect(headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    expect(headers.get('x-content-type-options')).toBe('nosniff');
+    expect(headers.get('permissions-policy')).toContain('microphone=()');
+  });
+});
