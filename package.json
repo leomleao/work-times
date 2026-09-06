@@ -16,7 +16,8 @@
     "test:e2e": "playwright test",
     "db:migrate": "tsx scripts/migrate.ts",
     "import:dumps": "tsx scripts/import-dumps.ts",
-    "admin:hash-password": "tsx scripts/hash-password.ts"
+    "admin:hash-password": "tsx scripts/hash-password.ts",
+    "wakatime:discover": "tsx scripts/wakatime-discover.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.0.0",
