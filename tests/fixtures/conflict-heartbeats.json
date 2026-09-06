@@ -1,0 +1,85 @@
+{
+  "user": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "email": "fixture@example.invalid",
+    "display_name": "Fixture Person",
+    "full_name": "Fixture Q. Person",
+    "photo": "https://example.invalid/avatar.png",
+    "profile_url": "https://example.invalid/@fixture",
+    "github_username": "fixture",
+    "username": "fixture",
+    "timezone": "Europe/Lisbon",
+    "timeout": 15,
+    "weekday_start": 1,
+    "writes_only": false,
+    "plan": "premium",
+    "has_premium_features": true
+  },
+  "range": {
+    "start": 1769904000,
+    "end": 1769990399
+  },
+  "days": [
+    {
+      "date": "2026-02-01",
+      "heartbeats": [
+        {
+          "id": "hb-conflict-0001",
+          "user_id": "00000000-0000-4000-8000-000000000001",
+          "entity": "/fixtures/alpha/src/index.ts",
+          "type": "file",
+          "category": "Coding",
+          "project": "alpha",
+          "branch": "main",
+          "language": "TypeScript",
+          "dependencies": [],
+          "lines": 120,
+          "lineno": null,
+          "cursorpos": null,
+          "is_write": false,
+          "time": 1769940000,
+          "created_at": "2026-02-01T10:00:00Z",
+          "machine_name_id": "machine-aaaa",
+          "user_agent_id": "agent/1.0 (fixture) vscode/1.0 vscode-wakatime/1.0",
+          "project_root_count": 1,
+          "ai_session": null,
+          "ai_subscription_plan": null,
+          "ai_line_changes": null,
+          "human_line_changes": null,
+          "ai_input_tokens": 0,
+          "ai_cached_input_tokens": 0,
+          "ai_output_tokens": 0,
+          "ai_prompt_length": 0
+        },
+        {
+          "id": "hb-conflict-0001",
+          "user_id": "00000000-0000-4000-8000-000000000001",
+          "entity": "/fixtures/alpha/src/other.ts",
+          "type": "file",
+          "category": "Coding",
+          "project": "alpha",
+          "branch": "main",
+          "language": "TypeScript",
+          "dependencies": [],
+          "lines": 120,
+          "lineno": null,
+          "cursorpos": null,
+          "is_write": false,
+          "time": 1769940000,
+          "created_at": "2026-02-01T10:00:00Z",
+          "machine_name_id": "machine-aaaa",
+          "user_agent_id": "agent/1.0 (fixture) vscode/1.0 vscode-wakatime/1.0",
+          "project_root_count": 1,
+          "ai_session": null,
+          "ai_subscription_plan": null,
+          "ai_line_changes": null,
+          "human_line_changes": null,
+          "ai_input_tokens": 0,
+          "ai_cached_input_tokens": 0,
+          "ai_output_tokens": 0,
+          "ai_prompt_length": 0
+        }
+      ]
+    }
+  ]
+}
