@@ -6,8 +6,7 @@ import {
   type SummariesResponse,
   type DurationsResponse,
   type HeartbeatsResponse,
-  type DumpListResponse,
-  type DumpItem
+  type DumpListResponse
 } from "./schemas.js";
 import {
   WakaTimeAuthError,
@@ -18,7 +17,30 @@ import {
 import { getYesterdayDate, type SyncCapability, type CapabilityStatus } from "../sync/capabilities.js";
 import { getRuntimeConfig } from "../config.js";
 
+/** Maximum number of dump items included in discovery output. */
+export const MAX_DUMP_ITEMS = 10;
+/** Maximum number of categories/types/statuses included in aggregate lists. */
+export const MAX_CATEGORIES = 10;
+/** Maximum number of schema field names recorded per endpoint. */
+export const MAX_FIELD_NAMES = 30;
+/** Maximum number of error items recorded. */
+export const MAX_ERRORS = 10;
+/** Maximum string length for sanitized fields. */
+export const MAX_STRING_LENGTH = 120;
+
+export const KNOWN_DUMP_TYPES = ["daily", "heartbeats"] as const;
+export type KnownDumpType = (typeof KNOWN_DUMP_TYPES)[number] | "unknown";
+
+export const KNOWN_DUMP_STATUSES = [
+  "pending",
+  "processing",
+  "completed",
+  "failed"
+] as const;
+export type KnownDumpStatus = (typeof KNOWN_DUMP_STATUSES)[number] | "unknown";
+
 export interface PlanFeatures {
+  hasBasicFeatures?: boolean;
   hasPremiumFeatures?: boolean;
   writesOnly?: boolean;
 }
@@ -29,14 +51,15 @@ export interface DiscoveredCapability {
 }
 
 export interface DiscoveredDumpItem {
-  type: string;
-  status: string;
+  type: KnownDumpType;
+  status: KnownDumpStatus;
 }
 
 export interface DiscoveredDumps {
   count: number;
-  types: string[];
-  statuses: string[];
+  truncated: boolean;
+  types: KnownDumpType[];
+  statuses: KnownDumpStatus[];
   items: DiscoveredDumpItem[];
 }
 
@@ -68,8 +91,208 @@ export interface DiscoveryOptions {
 }
 
 /**
+ * Explicit allowlists of recognized WakaTime API schema field names.
+ * Property keys not listed here are strictly excluded to prevent echoing
+ * unexpected keys containing PII, tokens, or arbitrary payload names.
+ */
+export const RECOGNIZED_RESPONSE_FIELDS: Record<string, readonly string[]> = {
+  currentUser: ["data", "message", "error"],
+  currentUserData: [
+    "bio",
+    "city",
+    "country_code",
+    "created_at",
+    "date_format",
+    "default_dashboard_range",
+    "display_name",
+    "durations_slice_by",
+    "email",
+    "full_name",
+    "has_basic_features",
+    "has_premium_features",
+    "human_readable_website",
+    "id",
+    "invoice_id_format",
+    "is_email_confirmed",
+    "is_email_public",
+    "is_hireable",
+    "languages_used_public",
+    "last_heartbeat_at",
+    "last_plugin",
+    "last_plugin_name",
+    "last_project",
+    "location",
+    "logged_time_public",
+    "modified_at",
+    "needs_payment_method",
+    "photo",
+    "photo_public",
+    "plan",
+    "profile_url",
+    "profile_url_escaped",
+    "public_email",
+    "share_all_time_badge",
+    "share_last_year_days",
+    "time_format",
+    "timezone",
+    "timeout",
+    "username",
+    "website",
+    "weekday_start",
+    "writes_only"
+  ],
+  summaries: [
+    "branches",
+    "categories",
+    "cumulative_total",
+    "daily_average",
+    "data",
+    "dependencies",
+    "editors",
+    "end",
+    "languages",
+    "machines",
+    "operating_systems",
+    "projects",
+    "range",
+    "start"
+  ],
+  durations: [
+    "branches",
+    "data",
+    "end",
+    "start",
+    "timezone"
+  ],
+  heartbeats: [
+    "data",
+    "end",
+    "start",
+    "timezone"
+  ],
+  dumps: [
+    "data",
+    "page",
+    "total",
+    "total_pages"
+  ]
+} as const;
+
+export function boundedString(val: unknown, maxLength = MAX_STRING_LENGTH): string {
+  if (typeof val !== "string") {
+    return "";
+  }
+  return val.slice(0, maxLength);
+}
+
+export class InvalidCalendarDateError extends Error {
+  constructor(message = "Invalid calendar date") {
+    super(message);
+    this.name = "InvalidCalendarDateError";
+  }
+}
+
+export function sanitizeErrorName(err: unknown): string {
+  if (!err) return "UnknownError";
+  if (err instanceof CapabilityRestrictedError) return "CapabilityRestrictedError";
+  if (err instanceof WakaTimeAuthError) return "WakaTimeAuthError";
+  if (err instanceof WakaTimeError) return "WakaTimeError";
+  if (err instanceof Error) {
+    const name = err.name;
+    if (typeof name === "string" && /^[A-Za-z0-9_$]{1,50}$/.test(name)) {
+      return name;
+    }
+    return "Error";
+  }
+  return "UnknownError";
+}
+
+export function safeDumpType(raw: unknown): KnownDumpType {
+  if (typeof raw === "string") {
+    const norm = raw.trim().toLowerCase();
+    if ((KNOWN_DUMP_TYPES as readonly string[]).includes(norm)) {
+      return norm as KnownDumpType;
+    }
+  }
+  return "unknown";
+}
+
+export function safeDumpStatus(raw: unknown): KnownDumpStatus {
+  if (typeof raw === "string") {
+    const norm = raw.trim().toLowerCase();
+    if ((KNOWN_DUMP_STATUSES as readonly string[]).includes(norm)) {
+      return norm as KnownDumpStatus;
+    }
+  }
+  return "unknown";
+}
+
+export function extractRecognizedFields(
+  target: unknown,
+  endpointName: string
+): string[] {
+  if (!target || typeof target !== "object") {
+    return [];
+  }
+  const allowlist = RECOGNIZED_RESPONSE_FIELDS[endpointName];
+  if (!allowlist) {
+    return [];
+  }
+  const allowedSet = new Set(allowlist);
+  return Object.keys(target)
+    .filter((k) => allowedSet.has(k))
+    .slice(0, MAX_FIELD_NAMES)
+    .sort();
+}
+
+/**
+ * Strictly validate that a date string is a real, valid UTC calendar date.
+ * Enforces YYYY-MM-DD format and verifies leap years, days-in-month, and year/month/day bounds.
+ */
+export function isValidCalendarDate(dateStr: string): boolean {
+  if (typeof dateStr !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return false;
+  }
+  const parts = dateStr.split("-");
+  const year = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10);
+  const day = parseInt(parts[2], 10);
+
+  if (month < 1 || month > 12) {
+    return false;
+  }
+  if (day < 1 || day > 31) {
+    return false;
+  }
+
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return (
+    d.getUTCFullYear() === year &&
+    d.getUTCMonth() === month - 1 &&
+    d.getUTCDate() === day
+  );
+}
+
+function pushSafeError(
+  errors: DiscoveredError[],
+  endpoint: string,
+  status: number | undefined,
+  err: unknown
+): void {
+  if (errors.length >= MAX_ERRORS) {
+    return;
+  }
+  errors.push({
+    endpoint: boundedString(sanitizeEndpoint(endpoint), MAX_STRING_LENGTH),
+    status,
+    errorName: boundedString(sanitizeErrorName(err), MAX_STRING_LENGTH)
+  });
+}
+
+/**
  * Validate that CLI arguments do not attempt to pass an API key.
  * Strictly rejects flags like --api-key, -k, --key, or flags containing "apikey" / "api_key".
+ * Also strictly validates that --probe-date is a real UTC calendar date.
  */
 export function validateDiscoveryArgs(argv: readonly string[]): {
   json: boolean;
@@ -108,14 +331,26 @@ export function validateDiscoveryArgs(argv: readonly string[]): {
       help = true;
     } else if (arg === "--probe-date" || arg === "--probeDate") {
       const next = argv[++i];
-      if (!next || !/^\d{4}-\d{2}-\d{2}$/.test(next)) {
-        throw new Error("Expected --probe-date YYYY-MM-DD");
+      if (!next || !isValidCalendarDate(next)) {
+        throw new Error(
+          "Expected --probe-date YYYY-MM-DD (must be a valid UTC calendar date)"
+        );
       }
       probeDate = next;
     } else if (arg.startsWith("--probe-date=")) {
       const val = arg.slice("--probe-date=".length);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) {
-        throw new Error("Expected --probe-date=YYYY-MM-DD");
+      if (!isValidCalendarDate(val)) {
+        throw new Error(
+          "Expected --probe-date=YYYY-MM-DD (must be a valid UTC calendar date)"
+        );
+      }
+      probeDate = val;
+    } else if (arg.startsWith("--probeDate=")) {
+      const val = arg.slice("--probeDate=".length);
+      if (!isValidCalendarDate(val)) {
+        throw new Error(
+          "Expected --probeDate=YYYY-MM-DD (must be a valid UTC calendar date)"
+        );
       }
       probeDate = val;
     } else {
@@ -135,16 +370,18 @@ export function validateDiscoveryArgs(argv: readonly string[]): {
  * - Single currentUser check avoids duplicate verification calls.
  * - Soft-degraded optional capabilities (402/403) do not fail the discovery when summaries succeed.
  * - Absolutely zero PII, entity paths, download URLs, or raw bodies in output.
+ * - Output is strictly bounded: dumps capped to MAX_DUMP_ITEMS with truncation indicator.
+ * - Types and statuses mapped to known safe enums or "unknown".
+ * - Response fields filtered against explicit schema allowlist.
  */
 export async function runWakaTimeDiscovery(
   options: DiscoveryOptions
 ): Promise<DiscoveryResult> {
   const now = options.now ?? new Date();
-  const probeDate = options.probeDate ?? getYesterdayDate(now);
 
   const result: DiscoveryResult = {
     ok: false,
-    probeDate,
+    probeDate: "",
     credentialStatus: "missing",
     planFeatures: {},
     capabilities: {
@@ -154,6 +391,7 @@ export async function runWakaTimeDiscovery(
     },
     dumps: {
       count: 0,
+      truncated: false,
       types: [],
       statuses: [],
       items: []
@@ -161,6 +399,20 @@ export async function runWakaTimeDiscovery(
     responseFields: {},
     errors: []
   };
+
+  let probeDate: string;
+  if (options.probeDate !== undefined) {
+    if (!isValidCalendarDate(options.probeDate)) {
+      result.probeDate = boundedString(options.probeDate, 10);
+      result.ok = false;
+      pushSafeError(result.errors, "probeDate", undefined, new InvalidCalendarDateError());
+      return result;
+    }
+    probeDate = options.probeDate;
+  } else {
+    probeDate = getYesterdayDate(now);
+  }
+  result.probeDate = probeDate;
 
   const apiKey = options.apiKey?.trim();
   if (!apiKey) {
@@ -183,25 +435,37 @@ export async function runWakaTimeDiscovery(
   try {
     const userRes: CurrentUserResponse = await client.getCurrentUser();
     result.credentialStatus = "accepted";
-    result.responseFields.currentUser = Object.keys(userRes).sort();
+    result.responseFields.currentUser = extractRecognizedFields(userRes, "currentUser");
 
     if (userRes.data && typeof userRes.data === "object") {
-      result.responseFields.currentUserData = Object.keys(userRes.data).sort();
-      if (typeof userRes.data.has_premium_features === "boolean") {
-        result.planFeatures.hasPremiumFeatures = userRes.data.has_premium_features;
+      const data = userRes.data as Record<string, unknown>;
+      result.responseFields.currentUserData = extractRecognizedFields(
+        data,
+        "currentUserData"
+      );
+
+      if (typeof data.has_basic_features === "boolean") {
+        result.planFeatures.hasBasicFeatures = data.has_basic_features;
+      } else if (typeof data.hasBasicFeatures === "boolean") {
+        result.planFeatures.hasBasicFeatures = data.hasBasicFeatures;
       }
-      if (typeof userRes.data.writes_only === "boolean") {
-        result.planFeatures.writesOnly = userRes.data.writes_only;
+
+      if (typeof data.has_premium_features === "boolean") {
+        result.planFeatures.hasPremiumFeatures = data.has_premium_features;
+      } else if (typeof data.hasPremiumFeatures === "boolean") {
+        result.planFeatures.hasPremiumFeatures = data.hasPremiumFeatures;
+      }
+
+      if (typeof data.writes_only === "boolean") {
+        result.planFeatures.writesOnly = data.writes_only;
+      } else if (typeof data.writesOnly === "boolean") {
+        result.planFeatures.writesOnly = data.writesOnly;
       }
     }
   } catch (err) {
     if (err instanceof WakaTimeAuthError) {
       result.credentialStatus = "rejected";
-      result.errors.push({
-        endpoint: "/users/current",
-        status: 401,
-        errorName: "WakaTimeAuthError"
-      });
+      pushSafeError(result.errors, "/users/current", 401, err);
       result.ok = false;
       return result;
     }
@@ -209,11 +473,7 @@ export async function runWakaTimeDiscovery(
     const status = err instanceof WakaTimeError ? err.status : undefined;
     const endpoint =
       err instanceof WakaTimeError ? err.endpoint ?? "/users/current" : "/users/current";
-    result.errors.push({
-      endpoint: sanitizeEndpoint(endpoint),
-      status,
-      errorName: err instanceof Error ? err.name : "UnknownError"
-    });
+    pushSafeError(result.errors, endpoint, status, err);
     result.ok = false;
     return result;
   }
@@ -222,18 +482,19 @@ export async function runWakaTimeDiscovery(
   try {
     const summariesRes: SummariesResponse = await client.getSummaries(probeDate, probeDate);
     result.capabilities.summaries = { status: "available" };
-    result.responseFields.summaries = Object.keys(summariesRes).sort();
+    result.responseFields.summaries = extractRecognizedFields(summariesRes, "summaries");
   } catch (err) {
     if (err instanceof CapabilityRestrictedError) {
       result.capabilities.summaries = {
         status: "restricted",
-        restrictionCode: `HTTP_${err.statusCode}`
+        restrictionCode: boundedString(`HTTP_${err.statusCode}`, 20)
       };
-      result.errors.push({
-        endpoint: sanitizeEndpoint(err.endpoint ?? "/users/current/summaries"),
-        status: err.statusCode,
-        errorName: "CapabilityRestrictedError"
-      });
+      pushSafeError(
+        result.errors,
+        err.endpoint ?? "/users/current/summaries",
+        err.statusCode,
+        err
+      );
     } else {
       result.capabilities.summaries = { status: "error" };
       const status = err instanceof WakaTimeError ? err.status : undefined;
@@ -241,11 +502,7 @@ export async function runWakaTimeDiscovery(
         err instanceof WakaTimeError
           ? err.endpoint ?? "/users/current/summaries"
           : "/users/current/summaries";
-      result.errors.push({
-        endpoint: sanitizeEndpoint(endpoint),
-        status,
-        errorName: err instanceof Error ? err.name : "UnknownError"
-      });
+      pushSafeError(result.errors, endpoint, status, err);
     }
   }
 
@@ -253,18 +510,19 @@ export async function runWakaTimeDiscovery(
   try {
     const durationsRes: DurationsResponse = await client.getDurations(probeDate);
     result.capabilities.durations = { status: "available" };
-    result.responseFields.durations = Object.keys(durationsRes).sort();
+    result.responseFields.durations = extractRecognizedFields(durationsRes, "durations");
   } catch (err) {
     if (err instanceof CapabilityRestrictedError) {
       result.capabilities.durations = {
         status: "restricted",
-        restrictionCode: `HTTP_${err.statusCode}`
+        restrictionCode: boundedString(`HTTP_${err.statusCode}`, 20)
       };
-      result.errors.push({
-        endpoint: sanitizeEndpoint(err.endpoint ?? "/users/current/durations"),
-        status: err.statusCode,
-        errorName: "CapabilityRestrictedError"
-      });
+      pushSafeError(
+        result.errors,
+        err.endpoint ?? "/users/current/durations",
+        err.statusCode,
+        err
+      );
     } else {
       result.capabilities.durations = { status: "error" };
       const status = err instanceof WakaTimeError ? err.status : undefined;
@@ -272,11 +530,7 @@ export async function runWakaTimeDiscovery(
         err instanceof WakaTimeError
           ? err.endpoint ?? "/users/current/durations"
           : "/users/current/durations";
-      result.errors.push({
-        endpoint: sanitizeEndpoint(endpoint),
-        status,
-        errorName: err instanceof Error ? err.name : "UnknownError"
-      });
+      pushSafeError(result.errors, endpoint, status, err);
     }
   }
 
@@ -284,18 +538,19 @@ export async function runWakaTimeDiscovery(
   try {
     const heartbeatsRes: HeartbeatsResponse = await client.getHeartbeats(probeDate);
     result.capabilities.heartbeats = { status: "available" };
-    result.responseFields.heartbeats = Object.keys(heartbeatsRes).sort();
+    result.responseFields.heartbeats = extractRecognizedFields(heartbeatsRes, "heartbeats");
   } catch (err) {
     if (err instanceof CapabilityRestrictedError) {
       result.capabilities.heartbeats = {
         status: "restricted",
-        restrictionCode: `HTTP_${err.statusCode}`
+        restrictionCode: boundedString(`HTTP_${err.statusCode}`, 20)
       };
-      result.errors.push({
-        endpoint: sanitizeEndpoint(err.endpoint ?? "/users/current/heartbeats"),
-        status: err.statusCode,
-        errorName: "CapabilityRestrictedError"
-      });
+      pushSafeError(
+        result.errors,
+        err.endpoint ?? "/users/current/heartbeats",
+        err.statusCode,
+        err
+      );
     } else {
       result.capabilities.heartbeats = { status: "error" };
       const status = err instanceof WakaTimeError ? err.status : undefined;
@@ -303,28 +558,38 @@ export async function runWakaTimeDiscovery(
         err instanceof WakaTimeError
           ? err.endpoint ?? "/users/current/heartbeats"
           : "/users/current/heartbeats";
-      result.errors.push({
-        endpoint: sanitizeEndpoint(endpoint),
-        status,
-        errorName: err instanceof Error ? err.name : "UnknownError"
-      });
+      pushSafeError(result.errors, endpoint, status, err);
     }
   }
 
   // 5. List existing dumps read-only (never create a dump)
   try {
     const dumpsRes: DumpListResponse = await client.listDumps();
-    result.responseFields.dumps = Object.keys(dumpsRes).sort();
+    result.responseFields.dumps = extractRecognizedFields(dumpsRes, "dumps");
 
-    const items: DiscoveredDumpItem[] = (dumpsRes.data ?? []).map((d: DumpItem) => ({
-      type: String(d.type),
-      status: String(d.status)
-    }));
+    const rawList = Array.isArray(dumpsRes.data) ? dumpsRes.data : [];
+    const totalCount = rawList.length;
+    const truncated = totalCount > MAX_DUMP_ITEMS;
+
+    const items: DiscoveredDumpItem[] = rawList
+      .slice(0, MAX_DUMP_ITEMS)
+      .map((d: any) => ({
+        type: safeDumpType(d?.type),
+        status: safeDumpStatus(d?.status)
+      }));
+
+    const typesSet = new Set<KnownDumpType>();
+    const statusesSet = new Set<KnownDumpStatus>();
+    for (const d of rawList) {
+      typesSet.add(safeDumpType(d?.type));
+      statusesSet.add(safeDumpStatus(d?.status));
+    }
 
     result.dumps = {
-      count: items.length,
-      types: [...new Set(items.map((i) => i.type))].sort(),
-      statuses: [...new Set(items.map((i) => i.status))].sort(),
+      count: totalCount,
+      truncated,
+      types: [...typesSet].sort().slice(0, MAX_CATEGORIES),
+      statuses: [...statusesSet].sort().slice(0, MAX_CATEGORIES),
       items
     };
   } catch (err) {
@@ -333,11 +598,7 @@ export async function runWakaTimeDiscovery(
       err instanceof WakaTimeError
         ? err.endpoint ?? "/users/current/data_dumps"
         : "/users/current/data_dumps";
-    result.errors.push({
-      endpoint: sanitizeEndpoint(endpoint),
-      status,
-      errorName: err instanceof Error ? err.name : "UnknownError"
-    });
+    pushSafeError(result.errors, endpoint, status, err);
   }
 
   // Baseline evaluation:
@@ -351,11 +612,24 @@ export async function runWakaTimeDiscovery(
 }
 
 export function formatDiscoveryText(result: DiscoveryResult): string {
+  const basicStr =
+    result.planFeatures.hasBasicFeatures !== undefined
+      ? String(result.planFeatures.hasBasicFeatures)
+      : "unknown";
+  const premiumStr =
+    result.planFeatures.hasPremiumFeatures !== undefined
+      ? String(result.planFeatures.hasPremiumFeatures)
+      : "unknown";
+  const writesStr =
+    result.planFeatures.writesOnly !== undefined
+      ? String(result.planFeatures.writesOnly)
+      : "unknown";
+
   const lines: string[] = [
     "=== WakaTime API Discovery ===",
     `Probe Date:        ${result.probeDate}`,
     `Credential Status: ${result.credentialStatus}`,
-    `Plan Features:     hasPremiumFeatures=${result.planFeatures.hasPremiumFeatures ?? "unknown"}, writesOnly=${result.planFeatures.writesOnly ?? "unknown"}`,
+    `Plan Features:     hasBasicFeatures=${basicStr}, hasPremiumFeatures=${premiumStr}, writesOnly=${writesStr}`,
     "",
     "Capabilities:"
   ];
@@ -367,9 +641,16 @@ export function formatDiscoveryText(result: DiscoveryResult): string {
 
   lines.push("");
   lines.push("Data Dumps:");
-  lines.push(`  - Total Count:   ${result.dumps.count}`);
-  lines.push(`  - Types:         ${result.dumps.types.length > 0 ? result.dumps.types.join(", ") : "none"}`);
-  lines.push(`  - Statuses:      ${result.dumps.statuses.length > 0 ? result.dumps.statuses.join(", ") : "none"}`);
+  const truncStr = result.dumps.truncated
+    ? ` (truncated to first ${result.dumps.items.length})`
+    : "";
+  lines.push(`  - Total Count:   ${result.dumps.count}${truncStr}`);
+  lines.push(
+    `  - Types:         ${result.dumps.types.length > 0 ? result.dumps.types.join(", ") : "none"}`
+  );
+  lines.push(
+    `  - Statuses:      ${result.dumps.statuses.length > 0 ? result.dumps.statuses.join(", ") : "none"}`
+  );
 
   lines.push("");
   lines.push("Response Schema Fields:");

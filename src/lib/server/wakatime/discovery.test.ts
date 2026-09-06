@@ -4,7 +4,11 @@ import {
   runDiscoveryCli,
   validateDiscoveryArgs,
   formatDiscoveryText,
-  formatDiscoveryJson
+  formatDiscoveryJson,
+  isValidCalendarDate,
+  safeDumpType,
+  safeDumpStatus,
+  MAX_DUMP_ITEMS
 } from "./discovery.js";
 
 describe("WakaTime API Discovery", () => {
@@ -23,6 +27,7 @@ describe("WakaTime API Discovery", () => {
       email: "engineer@secretcorp.internal",
       username: "secret_leomleao",
       plan: "basic",
+      has_basic_features: false,
       has_premium_features: false,
       writes_only: true,
       timezone: "Europe/London"
@@ -95,7 +100,7 @@ describe("WakaTime API Discovery", () => {
     ]
   };
 
-  // Requirement 1 & 6: Missing key causes zero fetch calls and safe error
+  // Requirement 1 & 7: Missing key causes zero fetch calls and safe error
   it("missing-key makes zero network calls and exits non-zero", async () => {
     const fetchMock = vi.fn();
     const stdoutMock = vi.fn();
@@ -127,7 +132,7 @@ describe("WakaTime API Discovery", () => {
     expect(errText).toContain("WAKATIME_API_KEY_FILE");
   });
 
-  // Requirement 6: CLI args cannot carry a key
+  // Requirement: CLI args cannot carry a key
   it("strictly rejects any CLI argument attempting to pass an API key", async () => {
     const forbiddenArgs = [
       ["--api-key", "some-key"],
@@ -158,7 +163,7 @@ describe("WakaTime API Discovery", () => {
     }
   });
 
-  // Requirement 4 & 6: API key absent from output/errors/JSON
+  // API key absent from output/errors/JSON
   it("guarantees API key is absent from text output, JSON, and errors", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes("/users/current/summaries")) {
@@ -200,7 +205,7 @@ describe("WakaTime API Discovery", () => {
     }
   });
 
-  // Requirement 4 & 6: PII and entity/path values absent
+  // PII and entity/path values absent
   it("guarantees PII, entity paths, usernames, project names, and download URLs are absent from report", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes("/users/current/summaries")) {
@@ -250,9 +255,11 @@ describe("WakaTime API Discovery", () => {
     expect(jsonOutput).not.toContain("dump_uuid_888");
 
     // Verify only safe metadata is preserved
+    expect(result.planFeatures.hasBasicFeatures).toBe(false);
     expect(result.planFeatures.hasPremiumFeatures).toBe(false);
     expect(result.planFeatures.writesOnly).toBe(true);
     expect(result.dumps.count).toBe(2);
+    expect(result.dumps.truncated).toBe(false);
     expect(result.dumps.types).toEqual(["daily", "heartbeats"]);
     expect(result.dumps.statuses).toEqual(["completed"]);
     expect(result.dumps.items).toEqual([
@@ -261,7 +268,7 @@ describe("WakaTime API Discovery", () => {
     ]);
   });
 
-  // Requirement 3 & 6: Soft-degraded heartbeat/duration restrictions do not fail discovery
+  // Soft-degraded heartbeat/duration restrictions do not fail discovery
   it("soft-degraded heartbeat and duration restrictions (HTTP 402/403) do not fail discovery when summaries work", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes("/users/current/summaries")) {
@@ -307,7 +314,7 @@ describe("WakaTime API Discovery", () => {
     expect(stdoutMock.mock.calls[0][0]).toContain("heartbeats  : restricted (HTTP_403)");
   });
 
-  // Requirement 6: Auth rejection is non-zero
+  // Auth rejection is non-zero
   it("auth rejection (HTTP 401) results in rejected credential status and non-zero exit code", async () => {
     const fetchMock = vi.fn(async () => {
       return createJsonResponse(401, { error: "Unauthorized" });
@@ -337,7 +344,7 @@ describe("WakaTime API Discovery", () => {
     expect(exitCode).toBe(1);
   });
 
-  // Requirement 3 & 5: Read-only dump listing, no dump creation, and avoids duplicate getCurrentUser calls
+  // Read-only dump listing, no dump creation, and avoids duplicate getCurrentUser calls
   it("lists dumps read-only with GET and avoids duplicate getCurrentUser calls", async () => {
     const requestedEndpoints: Array<{ method: string; url: string }> = [];
 
@@ -383,5 +390,303 @@ describe("WakaTime API Discovery", () => {
     const dumpRequests = requestedEndpoints.filter((r) => r.url.includes("/data_dumps"));
     expect(dumpRequests.length).toBe(1);
     expect(dumpRequests[0].method).toBe("GET");
+  });
+
+  // Requirement 1 & 6: Adversarial test for hundreds of dumps with truncation indicator
+  it("adversarially bounds hundreds of dumps to MAX_DUMP_ITEMS with aggregate total count and truncation indicator", async () => {
+    // Generate 250 upstream dump items
+    const manyDumps = Array.from({ length: 250 }, (_, i) => ({
+      id: `dump_${i}`,
+      type: i % 2 === 0 ? "daily" : "heartbeats",
+      status: "completed",
+      created_at: "2026-09-01T00:00:00Z"
+    }));
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/users/current/data_dumps")) {
+        return createJsonResponse(200, { data: manyDumps });
+      }
+      if (url.includes("/users/current/summaries")) {
+        return createJsonResponse(200, mockSummariesPayload);
+      }
+      if (url.includes("/users/current/durations")) {
+        return createJsonResponse(200, mockDurationsPayload);
+      }
+      if (url.includes("/users/current/heartbeats")) {
+        return createJsonResponse(200, mockHeartbeatsPayload);
+      }
+      if (url.includes("/users/current")) {
+        return createJsonResponse(200, mockUserPayload);
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const result = await runWakaTimeDiscovery({
+      apiKey: secretApiKey,
+      fetch: fetchMock as unknown as typeof fetch
+    });
+
+    expect(result.dumps.count).toBe(250);
+    expect(result.dumps.truncated).toBe(true);
+    expect(result.dumps.items.length).toBe(MAX_DUMP_ITEMS);
+    expect(result.dumps.items.length).toBe(10);
+    expect(result.dumps.types).toEqual(["daily", "heartbeats"]);
+    expect(result.dumps.statuses).toEqual(["completed"]);
+
+    const text = formatDiscoveryText(result);
+    expect(text).toContain("Total Count:   250 (truncated to first 10)");
+
+    const json = JSON.parse(formatDiscoveryJson(result));
+    expect(json.dumps.count).toBe(250);
+    expect(json.dumps.truncated).toBe(true);
+    expect(json.dumps.items).toHaveLength(10);
+  });
+
+  // Requirement 2 & 6: Adversarial test for overlong/arbitrary dump type/status mapped to safe known values plus unknown
+  it("adversarially maps overlong, unexpected, or malicious dump types and statuses to safe values or 'unknown'", async () => {
+    const maliciousDumps = [
+      {
+        id: "d1",
+        type: "OVERLONG_ARBITRARY_TYPE_CONTAINING_EXPLOIT_PAYLOAD_AND_SECRETS_abcdef123456",
+        status: "MALICIOUS_SQL_STATUS_DROP_TABLE_USERS",
+        created_at: "2026-09-01T00:00:00Z"
+      },
+      {
+        id: "d2",
+        type: "daily",
+        status: "ATTACKER_SERVER_IP_10_0_0_1",
+        created_at: "2026-09-01T00:00:00Z"
+      },
+      {
+        id: "d3",
+        type: "UNKNOWN_DUMP_TYPE",
+        status: "pending",
+        created_at: "2026-09-01T00:00:00Z"
+      }
+    ];
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/users/current/data_dumps")) {
+        return createJsonResponse(200, { data: maliciousDumps });
+      }
+      if (url.includes("/users/current/summaries")) {
+        return createJsonResponse(200, mockSummariesPayload);
+      }
+      if (url.includes("/users/current/durations")) {
+        return createJsonResponse(200, mockDurationsPayload);
+      }
+      if (url.includes("/users/current/heartbeats")) {
+        return createJsonResponse(200, mockHeartbeatsPayload);
+      }
+      if (url.includes("/users/current")) {
+        return createJsonResponse(200, mockUserPayload);
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const result = await runWakaTimeDiscovery({
+      apiKey: secretApiKey,
+      fetch: fetchMock as unknown as typeof fetch
+    });
+
+    expect(result.dumps.items[0]).toEqual({ type: "unknown", status: "unknown" });
+    expect(result.dumps.items[1]).toEqual({ type: "daily", status: "unknown" });
+    expect(result.dumps.items[2]).toEqual({ type: "unknown", status: "pending" });
+
+    // Types and statuses arrays only contain known safe values plus "unknown"
+    expect(result.dumps.types).toEqual(["daily", "unknown"]);
+    expect(result.dumps.statuses).toEqual(["pending", "unknown"]);
+
+    // The arbitrary strings must not leak in text or json
+    const text = formatDiscoveryText(result);
+    const json = formatDiscoveryJson(result);
+
+    expect(text).not.toContain("OVERLONG_ARBITRARY_TYPE");
+    expect(text).not.toContain("DROP_TABLE_USERS");
+    expect(text).not.toContain("ATTACKER_SERVER_IP");
+    expect(json).not.toContain("OVERLONG_ARBITRARY_TYPE");
+    expect(json).not.toContain("DROP_TABLE_USERS");
+    expect(json).not.toContain("ATTACKER_SERVER_IP");
+
+    // Unit test safeDumpType and safeDumpStatus directly
+    expect(safeDumpType("daily")).toBe("daily");
+    expect(safeDumpType("DAILY ")).toBe("daily");
+    expect(safeDumpType("heartbeats")).toBe("heartbeats");
+    expect(safeDumpType("anything-else")).toBe("unknown");
+    expect(safeDumpType(null)).toBe("unknown");
+
+    expect(safeDumpStatus("pending")).toBe("pending");
+    expect(safeDumpStatus("COMPLETED")).toBe("completed");
+    expect(safeDumpStatus("processing")).toBe("processing");
+    expect(safeDumpStatus("failed")).toBe("failed");
+    expect(safeDumpStatus("injected_status")).toBe("unknown");
+    expect(safeDumpStatus(undefined)).toBe("unknown");
+  });
+
+  // Requirement 3 & 4 & 6: Adversarial test for property keys containing emails/secrets
+  it("adversarially redacts unallowlisted property keys containing emails or secrets from responseFields", async () => {
+    const maliciousUserPayload = {
+      data: {
+        id: "usr_safe_123",
+        has_basic_features: true,
+        has_premium_features: false,
+        writes_only: true,
+        // Adversarial property names:
+        "victim_email_address@secretcorp.internal": "stolen_email_value",
+        "api_key_leak_secret_998877": "stolen_key",
+        "__proto__": "polluted",
+        "nested_exploit_key": { leak: true }
+      }
+    };
+
+    const maliciousSummariesPayload = {
+      data: [],
+      start: "2026-09-05",
+      end: "2026-09-05",
+      "internal_db_connection_string": "postgres://user:pass@internal:5432/db",
+      "confidential_contractor@domain.com": 123
+    };
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/users/current/summaries")) {
+        return createJsonResponse(200, maliciousSummariesPayload);
+      }
+      if (url.includes("/users/current/durations")) {
+        return createJsonResponse(200, mockDurationsPayload);
+      }
+      if (url.includes("/users/current/heartbeats")) {
+        return createJsonResponse(200, mockHeartbeatsPayload);
+      }
+      if (url.includes("/users/current/data_dumps")) {
+        return createJsonResponse(200, mockDumpsPayload);
+      }
+      if (url.includes("/users/current")) {
+        return createJsonResponse(200, maliciousUserPayload);
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const result = await runWakaTimeDiscovery({
+      apiKey: secretApiKey,
+      fetch: fetchMock as unknown as typeof fetch
+    });
+
+    // Verify hasBasicFeatures is recognized and recorded
+    expect(result.planFeatures.hasBasicFeatures).toBe(true);
+    expect(result.planFeatures.hasPremiumFeatures).toBe(false);
+    expect(result.planFeatures.writesOnly).toBe(true);
+
+    // Verify responseFields only contains allowlisted keys
+    expect(result.responseFields.currentUserData).toEqual([
+      "has_basic_features",
+      "has_premium_features",
+      "id",
+      "writes_only"
+    ]);
+
+    expect(result.responseFields.currentUserData).not.toContain(
+      "victim_email_address@secretcorp.internal"
+    );
+    expect(result.responseFields.currentUserData).not.toContain("api_key_leak_secret_998877");
+    expect(result.responseFields.currentUserData).not.toContain("__proto__");
+
+    expect(result.responseFields.summaries).toEqual(["data", "end", "start"]);
+    expect(result.responseFields.summaries).not.toContain("internal_db_connection_string");
+    expect(result.responseFields.summaries).not.toContain("confidential_contractor@domain.com");
+
+    // Formatted outputs do not leak unexpected property keys
+    const text = formatDiscoveryText(result);
+    const json = formatDiscoveryJson(result);
+
+    expect(text).not.toContain("victim_email_address@secretcorp.internal");
+    expect(text).not.toContain("api_key_leak_secret_998877");
+    expect(text).not.toContain("internal_db_connection_string");
+    expect(text).not.toContain("confidential_contractor@domain.com");
+
+    expect(json).not.toContain("victim_email_address@secretcorp.internal");
+    expect(json).not.toContain("api_key_leak_secret_998877");
+    expect(json).not.toContain("internal_db_connection_string");
+    expect(json).not.toContain("confidential_contractor@domain.com");
+
+    expect(text).toContain("hasBasicFeatures=true");
+  });
+
+  // Requirement 5 & 6: Strictly validate --probe-date as a real UTC calendar date
+  it("strictly validates probe-date as a real UTC calendar date and rejects invalid dates without network calls", async () => {
+    // 1. Unit validation of isValidCalendarDate
+    // Leap year checks
+    expect(isValidCalendarDate("2024-02-29")).toBe(true); // 2024 is leap
+    expect(isValidCalendarDate("2020-02-29")).toBe(true); // 2020 is leap
+    expect(isValidCalendarDate("2000-02-29")).toBe(true); // 2000 is leap (divisible by 400)
+    expect(isValidCalendarDate("2026-02-29")).toBe(false); // 2026 is non-leap
+    expect(isValidCalendarDate("2023-02-29")).toBe(false); // 2023 is non-leap
+    expect(isValidCalendarDate("1900-02-29")).toBe(false); // 1900 is non-leap (century non-400)
+
+    // Month boundary checks
+    expect(isValidCalendarDate("2026-04-30")).toBe(true);
+    expect(isValidCalendarDate("2026-04-31")).toBe(false); // April has 30 days
+    expect(isValidCalendarDate("2026-06-31")).toBe(false); // June has 30 days
+    expect(isValidCalendarDate("2026-09-31")).toBe(false); // Sept has 30 days
+    expect(isValidCalendarDate("2026-11-31")).toBe(false); // Nov has 30 days
+    expect(isValidCalendarDate("2026-01-31")).toBe(true); // Jan has 31 days
+    expect(isValidCalendarDate("2026-02-28")).toBe(true); // Feb has 28 days
+
+    // Month / day ranges
+    expect(isValidCalendarDate("2026-00-10")).toBe(false); // Month 0
+    expect(isValidCalendarDate("2026-13-01")).toBe(false); // Month 13
+    expect(isValidCalendarDate("2026-05-00")).toBe(false); // Day 0
+    expect(isValidCalendarDate("2026-05-32")).toBe(false); // Day 32
+
+    // Format errors
+    expect(isValidCalendarDate("2026-9-5")).toBe(false);
+    expect(isValidCalendarDate("not-a-date")).toBe(false);
+    expect(isValidCalendarDate("")).toBe(false);
+    expect(isValidCalendarDate("2026/09/05")).toBe(false);
+
+    // 2. CLI argument validator strictly rejects invalid calendar dates
+    expect(() => validateDiscoveryArgs(["--probe-date", "2026-02-31"])).toThrow(
+      /must be a valid UTC calendar date/
+    );
+    expect(() => validateDiscoveryArgs(["--probe-date=2026-04-31"])).toThrow(
+      /must be a valid UTC calendar date/
+    );
+    expect(() => validateDiscoveryArgs(["--probeDate=2026-13-01"])).toThrow(
+      /must be a valid UTC calendar date/
+    );
+    expect(() => validateDiscoveryArgs(["--probe-date", "invalid-str"])).toThrow(
+      /must be a valid UTC calendar date/
+    );
+
+    // Valid dates pass CLI validation
+    const validParsed = validateDiscoveryArgs(["--probe-date", "2024-02-29"]);
+    expect(validParsed.probeDate).toBe("2024-02-29");
+
+    // 3. CLI runner prints error and exits 1 on invalid date without network calls
+    const fetchMock = vi.fn();
+    const stderrMock = vi.fn();
+    const cliExit = await runDiscoveryCli(["--probe-date", "2026-02-31"], {
+      apiKey: secretApiKey,
+      fetch: fetchMock as unknown as typeof fetch,
+      stderr: stderrMock
+    });
+
+    expect(cliExit).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(stderrMock.mock.calls[0][0]).toContain("must be a valid UTC calendar date");
+
+    // 4. Direct runner rejects invalid calendar date without network calls
+    const directResult = await runWakaTimeDiscovery({
+      apiKey: secretApiKey,
+      probeDate: "2026-02-31",
+      fetch: fetchMock as unknown as typeof fetch
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(directResult.ok).toBe(false);
+    expect(directResult.errors).toContainEqual({
+      endpoint: "probeDate",
+      status: undefined,
+      errorName: "InvalidCalendarDateError"
+    });
   });
 });
