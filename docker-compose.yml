@@ -1,0 +1,33 @@
+services:
+  work-times:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: work-times:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/work-times.sqlite
+      HOST: 0.0.0.0
+      PORT: 3002
+    ports:
+      - "127.0.0.1:${WORK_TIMES_PORT:-3002}:3002"
+    volumes:
+      - work-times-data:/data
+    networks:
+      - default
+      - traefik-net
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.work-times.rule: "Host(`work-times.home`)"
+      traefik.http.routers.work-times.entrypoints: "websecure"
+      traefik.http.routers.work-times.tls: "true"
+      traefik.http.services.work-times.loadbalancer.server.port: "3002"
+
+volumes:
+  work-times-data:
+
+networks:
+  traefik-net:
+    external: true
