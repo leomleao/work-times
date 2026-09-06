@@ -693,4 +693,408 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       expect(svelteSrc).toContain('Suggestions never auto-apply');
     });
   });
+
+  describe('Requirement: Strict Proposal JSON Parsing and Structure Validation', () => {
+    it('rejects malformed JSON with HTTP 400 action failure and does NOT throw 500 or fall back to loose fields', async () => {
+      const formData = new FormData();
+      formData.set('proposal', '{ malformed json: true');
+      // Loose fields that should NOT be fallen back to
+      formData.set('type', 'create');
+      formData.set('name', 'Fallback Proposal');
+      formData.set('classification', 'work');
+      formData.set('selectorType', 'project');
+      formData.set('selectorValue', 'fallback-proj');
+
+      const { event } = createAuthenticatedEvent({ formData });
+      const res = await (actions.previewRule as any)(event);
+
+      expect(res.status).toBe(400);
+      expect(res.data.error).toMatch(/malformed proposal json/i);
+
+      // Verify rule was not created or previewed
+      const rules = runtime.classification.getRules();
+      expect(rules.some((r) => r.name === 'Fallback Proposal')).toBe(false);
+    });
+
+    it('rejects empty or whitespace-only proposal field with HTTP 400', async () => {
+      const formData = new FormData();
+      formData.set('proposal', '   ');
+
+      const { event } = createAuthenticatedEvent({ formData });
+      const res = await (actions.previewRule as any)(event);
+
+      expect(res.status).toBe(400);
+      expect(res.data.error).toMatch(/empty/i);
+    });
+
+    it('rejects malformed proposal JSON on confirmRule with HTTP 400', async () => {
+      const formData = new FormData();
+      formData.set('previewDigest', 'prev-12345-abcdef');
+      formData.set('proposal', 'not-valid-json');
+
+      const { event } = createAuthenticatedEvent({ formData });
+      const res = await (actions.confirmRule as any)(event);
+
+      expect(res.status).toBe(400);
+      expect(res.data.error).toMatch(/malformed proposal json/i);
+    });
+
+    it('rejects structurally invalid proposals (missing type, bad type, missing rule object) with HTTP 400', async () => {
+      // Missing type
+      const fd1 = new FormData();
+      fd1.set('proposal', JSON.stringify({ name: 'No Type' }));
+      const { event: ev1 } = createAuthenticatedEvent({ formData: fd1 });
+      const res1 = await (actions.previewRule as any)(ev1);
+      expect(res1.status).toBe(400);
+      expect(res1.data.error).toMatch(/invalid proposal type/i);
+
+      // Unsupported type
+      const fd2 = new FormData();
+      fd2.set('proposal', JSON.stringify({ type: 'destroy', id: '123' }));
+      const { event: ev2 } = createAuthenticatedEvent({ formData: fd2 });
+      const res2 = await (actions.previewRule as any)(ev2);
+      expect(res2.status).toBe(400);
+      expect(res2.data.error).toMatch(/invalid proposal type/i);
+
+      // Create without rule object
+      const fd3 = new FormData();
+      fd3.set('proposal', JSON.stringify({ type: 'create' }));
+      const { event: ev3 } = createAuthenticatedEvent({ formData: fd3 });
+      const res3 = await (actions.previewRule as any)(ev3);
+      expect(res3.status).toBe(400);
+      expect(res3.data.error).toMatch(/rule/i);
+
+      // Create with empty rule name
+      const fd4 = new FormData();
+      fd4.set(
+        'proposal',
+        JSON.stringify({
+          type: 'create',
+          rule: {
+            name: '',
+            classification: 'work',
+            selectorType: 'project',
+            selectorValue: 'proj'
+          }
+        })
+      );
+      const { event: ev4 } = createAuthenticatedEvent({ formData: fd4 });
+      const res4 = await (actions.previewRule as any)(ev4);
+      expect(res4.status).toBe(400);
+      expect(res4.data.error).toMatch(/name cannot be empty/i);
+
+      // Update without id
+      const fd5 = new FormData();
+      fd5.set('proposal', JSON.stringify({ type: 'update', rule: { name: 'New Name' } }));
+      const { event: ev5 } = createAuthenticatedEvent({ formData: fd5 });
+      const res5 = await (actions.previewRule as any)(ev5);
+      expect(res5.status).toBe(400);
+      expect(res5.data.error).toMatch(/missing rule id/i);
+
+      // Delete without id
+      const fd6 = new FormData();
+      fd6.set('proposal', JSON.stringify({ type: 'delete' }));
+      const { event: ev6 } = createAuthenticatedEvent({ formData: fd6 });
+      const res6 = await (actions.previewRule as any)(ev6);
+      expect(res6.status).toBe(400);
+      expect(res6.data.error).toMatch(/missing rule id/i);
+    });
+  });
+
+  describe('Requirement: Refusal of replaceExisting Bypass on createAllocation', () => {
+    beforeEach(() => {
+      runtime.db.prepare(`INSERT OR IGNORE INTO projects (id, name) VALUES (301, 'alloc-project')`).run();
+      runtime.db.prepare(
+        `INSERT OR IGNORE INTO source_imports (id, source_type, source_hash, byte_size)
+         VALUES (99, 'daily_dump', 'hash-alloc-test', 500)`
+      ).run();
+      runtime.db.prepare(
+        `INSERT OR REPLACE INTO daily_totals (date, total_seconds, grand_total_json, source_import_id, source_hash)
+         VALUES ('2026-05-01', 5400, '{}', 99, 'hash-alloc-test')`
+      ).run();
+      runtime.db.prepare(
+        `INSERT OR REPLACE INTO day_project_entity_slices (id, date, project_id, entity, entity_type, total_seconds, source_import_id)
+         VALUES (9903, '2026-05-01', 301, 'src/hotfix.ts', 'file', 5400, 99)`
+      ).run();
+    });
+
+    it('refuses to replace existing allocation even when form provides replaceExisting: true or 1', async () => {
+      // 1. Initial allocation as WORK
+      runtime.classification.createAllocation({
+        date: '2026-05-01',
+        projectId: 301,
+        entity: 'src/hotfix.ts',
+        classification: 'work'
+      });
+
+      // 2. Attempt to bypass conflict check with replaceExisting: true on createAllocation
+      const bypassFormData = new FormData();
+      bypassFormData.set('date', '2026-05-01');
+      bypassFormData.set('projectId', '301');
+      bypassFormData.set('entity', 'src/hotfix.ts');
+      bypassFormData.set('classification', 'personal');
+      bypassFormData.set('replaceExisting', 'true'); // ATTACK: attempt bypass
+
+      const { event: bypassEvent } = createAuthenticatedEvent({ formData: bypassFormData });
+      const bypassRes = await (actions.createAllocation as any)(bypassEvent);
+
+      expect(bypassRes.status).toBe(409);
+      expect(bypassRes.data.conflict).toBe(true);
+      expect(bypassRes.data.existingClassification).toBe('work');
+      expect(bypassRes.data.proposedClassification).toBe('personal');
+
+      // Verify the allocation was NOT replaced
+      const existing = runtime.classification.getAllocationBySlice('2026-05-01', 301, 'src/hotfix.ts');
+      expect(existing?.classification).toBe('work');
+
+      // 3. Same attempt with replaceExisting: '1'
+      const bypassFormData2 = new FormData();
+      bypassFormData2.set('date', '2026-05-01');
+      bypassFormData2.set('projectId', '301');
+      bypassFormData2.set('entity', 'src/hotfix.ts');
+      bypassFormData2.set('classification', 'personal');
+      bypassFormData2.set('replaceExisting', '1');
+
+      const { event: bypassEvent2 } = createAuthenticatedEvent({ formData: bypassFormData2 });
+      const bypassRes2 = await (actions.createAllocation as any)(bypassEvent2);
+
+      expect(bypassRes2.status).toBe(409);
+      expect(bypassRes2.data.conflict).toBe(true);
+      const existing2 = runtime.classification.getAllocationBySlice('2026-05-01', 301, 'src/hotfix.ts');
+      expect(existing2?.classification).toBe('work');
+    });
+  });
+
+  describe('Requirement: Strict Integer Validation & parseInt Trailing Junk Rejection', () => {
+    it('rejects expectedRevision with trailing junk, negative numbers, or invalid syntax on confirmRule', async () => {
+      const testCases = ['12junk', '-1', 'rev-1', '12.5', '1e5', '0123'];
+
+      for (const badRevision of testCases) {
+        const formData = new FormData();
+        formData.set('previewDigest', 'prev-digest-12345');
+        formData.set('expectedRevision', badRevision);
+        formData.set(
+          'proposal',
+          JSON.stringify({
+            type: 'create',
+            rule: {
+              name: 'Valid Rule',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'proj'
+            }
+          })
+        );
+
+        const { event } = createAuthenticatedEvent({ formData });
+        const res = await (actions.confirmRule as any)(event);
+
+        expect(res.status).toBe(400);
+        expect(res.data.error).toMatch(/expectedRevision/i);
+      }
+    });
+
+    it('rejects priority with trailing junk or non-integer syntax in loose form and proposal JSON', async () => {
+      // Loose form priority with trailing junk
+      const fd1 = new FormData();
+      fd1.set('type', 'create');
+      fd1.set('name', 'Bad Priority Rule');
+      fd1.set('classification', 'work');
+      fd1.set('selectorType', 'project');
+      fd1.set('selectorValue', 'val');
+      fd1.set('priority', '15junk');
+
+      const { event: ev1 } = createAuthenticatedEvent({ formData: fd1 });
+      const res1 = await (actions.previewRule as any)(ev1);
+      expect(res1.status).toBe(400);
+      expect(res1.data.error).toMatch(/priority/i);
+
+      // Proposal JSON priority with trailing junk
+      const fd2 = new FormData();
+      fd2.set(
+        'proposal',
+        JSON.stringify({
+          type: 'create',
+          rule: {
+            name: 'Bad JSON Priority Rule',
+            classification: 'work',
+            selectorType: 'project',
+            selectorValue: 'val',
+            priority: '20junk'
+          }
+        })
+      );
+
+      const { event: ev2 } = createAuthenticatedEvent({ formData: fd2 });
+      const res2 = await (actions.previewRule as any)(ev2);
+      expect(res2.status).toBe(400);
+      expect(res2.data.error).toMatch(/priority/i);
+    });
+
+    it('rejects projectId with trailing junk or invalid syntax on createAllocation and replaceAllocation', async () => {
+      const fdCreate = new FormData();
+      fdCreate.set('date', '2026-05-01');
+      fdCreate.set('projectId', '301junk'); // Trailing junk!
+      fdCreate.set('entity', 'src/hotfix.ts');
+      fdCreate.set('classification', 'work');
+
+      const { event: evCreate } = createAuthenticatedEvent({ formData: fdCreate });
+      const resCreate = await (actions.createAllocation as any)(evCreate);
+      expect(resCreate.status).toBe(400);
+      expect(resCreate.data.error).toMatch(/projectId/i);
+
+      const fdReplace = new FormData();
+      fdReplace.set('date', '2026-05-01');
+      fdReplace.set('projectId', '301junk');
+      fdReplace.set('entity', 'src/hotfix.ts');
+      fdReplace.set('classification', 'personal');
+
+      const { event: evReplace } = createAuthenticatedEvent({ formData: fdReplace });
+      const resReplace = await (actions.replaceAllocation as any)(evReplace);
+      expect(resReplace.status).toBe(400);
+      expect(resReplace.data.error).toMatch(/projectId/i);
+    });
+  });
+
+  describe('Requirement: Loader Populates Recent Slices from Slice-Bearing Dates', () => {
+    it('populates recentSlices from day_project_entity_slices dates rather than empty daily_totals calendar rows', async () => {
+      // Seed project
+      runtime.db.prepare(`INSERT OR IGNORE INTO projects (id, name) VALUES (501, 'slice-date-test')`).run();
+      runtime.db.prepare(
+        `INSERT OR IGNORE INTO source_imports (id, source_type, source_hash, byte_size)
+         VALUES (99, 'daily_dump', 'hash-slice-dates', 500)`
+      ).run();
+
+      // Seed real slices on 2026-02-10 and 2026-02-15
+      runtime.db.prepare(
+        `INSERT OR REPLACE INTO day_project_entity_slices (id, date, project_id, entity, entity_type, total_seconds, source_import_id)
+         VALUES (9910, '2026-02-10', 501, 'src/slice1.ts', 'file', 3600, 99)`
+      ).run();
+      runtime.db.prepare(
+        `INSERT OR REPLACE INTO day_project_entity_slices (id, date, project_id, entity, entity_type, total_seconds, source_import_id)
+         VALUES (9911, '2026-02-15', 501, 'src/slice2.ts', 'file', 7200, 99)`
+      ).run();
+
+      // Seed newer daily_totals days that have NO slices (e.g. 2026-08-01 through 2026-08-10)
+      for (let day = 1; day <= 10; day++) {
+        const d = `2026-08-${String(day).padStart(2, '0')}`;
+        runtime.db.prepare(
+          `INSERT OR REPLACE INTO daily_totals (date, total_seconds, grand_total_json, source_import_id, source_hash)
+           VALUES (?, 0, '{}', 99, 'hash-empty-days')`
+        ).run(d);
+      }
+
+      const { event } = createAuthenticatedEvent({ url: 'http://localhost:3002/admin/classify' });
+      const data: any = await load(event);
+
+      // Even though daily_totals has 10 newer empty days, recentSlices must be loaded from slice-bearing dates
+      expect(data.recentSlices.length).toBeGreaterThanOrEqual(2);
+      const datesWithSlices = new Set(data.recentSlices.map((s: any) => s.date));
+      expect(datesWithSlices.has('2026-02-15')).toBe(true);
+      expect(datesWithSlices.has('2026-02-10')).toBe(true);
+    });
+  });
+
+  describe('Requirement: Full Update Rule Workflow & UI Integration', () => {
+    it('executes rule update workflow through previewRule, surfaces work↔personal shift, and confirms with exact digest', async () => {
+      // 1. Seed project and slice
+      runtime.db.prepare(`INSERT OR IGNORE INTO projects (id, name) VALUES (601, 'update-shift-proj')`).run();
+      runtime.db.prepare(
+        `INSERT OR IGNORE INTO source_imports (id, source_type, source_hash, byte_size)
+         VALUES (99, 'daily_dump', 'hash-update-test', 500)`
+      ).run();
+      runtime.db.prepare(
+        `INSERT OR REPLACE INTO day_project_entity_slices (id, date, project_id, entity, entity_type, total_seconds, source_import_id)
+         VALUES (9920, '2026-03-20', 601, 'src/service.ts', 'file', 4800, 99)`
+      ).run();
+
+      // 2. Create initial rule: project is WORK
+      const seedPrev = runtime.classification.previewRuleChange({
+        type: 'create',
+        rule: {
+          name: 'Update Target Rule',
+          classification: 'work',
+          selectorType: 'project',
+          selectorValue: 'update-shift-proj',
+          priority: 5
+        }
+      });
+      const { rule: createdRule } = runtime.classification.createRule(
+        {
+          name: 'Update Target Rule',
+          classification: 'work',
+          selectorType: 'project',
+          selectorValue: 'update-shift-proj',
+          priority: 5
+        },
+        { expectedDigest: seedPrev.previewDigest, actor: 'admin' }
+      );
+
+      // Verify slice starts as work
+      const beforeSlices = runtime.classification.classifySlices({ date: '2026-03-20' });
+      expect(beforeSlices[0].decision.classification).toBe('work');
+
+      // 3. Preview updating the rule from WORK to PERSONAL
+      const updateFormData = new FormData();
+      updateFormData.set('type', 'update');
+      updateFormData.set('id', createdRule.id);
+      updateFormData.set('name', 'Updated Rule Name');
+      updateFormData.set('classification', 'personal'); // FLIP TO PERSONAL
+      updateFormData.set('priority', '30');
+
+      const { event: updatePrevEvt } = createAuthenticatedEvent({ formData: updateFormData });
+      const updatePrevRes = await (actions.previewRule as any)(updatePrevEvt);
+
+      expect(updatePrevRes.success).toBe(true);
+      expect(updatePrevRes.proposal.type).toBe('update');
+      expect(updatePrevRes.proposal.id).toBe(createdRule.id);
+      expect(updatePrevRes.preview).toBeDefined();
+
+      // Surfacing visible work↔personal shifted seconds
+      expect(updatePrevRes.preview.shiftedSeconds.workToPersonal).toBe(4800);
+      expect(updatePrevRes.preview.affectedSliceCount).toBe(1);
+      expect(updatePrevRes.preview.affectedDates).toEqual(['2026-03-20']);
+
+      // 4. Confirm update
+      const confirmUpdateFormData = new FormData();
+      confirmUpdateFormData.set('previewDigest', updatePrevRes.preview.previewDigest);
+      confirmUpdateFormData.set('previewRevision', String(updatePrevRes.preview.previewRevision));
+      confirmUpdateFormData.set('proposal', JSON.stringify(updatePrevRes.proposal));
+
+      const { event: confirmUpdateEvt } = createAuthenticatedEvent({ formData: confirmUpdateFormData });
+      const confirmUpdateRes = await (actions.confirmRule as any)(confirmUpdateEvt);
+
+      expect(confirmUpdateRes.success).toBe(true);
+      expect(confirmUpdateRes.confirmed).toBe(true);
+      expect(confirmUpdateRes.result.rule.name).toBe('Updated Rule Name');
+      expect(confirmUpdateRes.result.rule.classification).toBe('personal');
+      expect(confirmUpdateRes.result.rule.priority).toBe(30);
+
+      // Verify slice now evaluates to personal
+      const afterSlices = runtime.classification.classifySlices({ date: '2026-03-20' });
+      expect(afterSlices[0].decision.classification).toBe('personal');
+
+      // Verify audit revision logged
+      const revisions = runtime.classification.getRevisions(10);
+      expect(
+        revisions.some((rev) => rev.target_id === createdRule.id && rev.mutation_type === 'rule_updated')
+      ).toBe(true);
+    });
+
+    it('verifies update rule workflow integration in +page.svelte', () => {
+      const svelteSrc = loadClassifySvelte();
+
+      // Verify Edit button and modal bindings
+      expect(svelteSrc).toContain('openEditRule');
+      expect(svelteSrc).toContain('editRuleModalOpen');
+      expect(svelteSrc).toContain('Edit Classification Rule');
+      expect(svelteSrc).toContain('action="?/previewRule"');
+
+      // Verify update action handling in modal
+      expect(svelteSrc).toContain('value="update"');
+      expect(svelteSrc).toContain('proposal.type === \'update\'');
+      expect(svelteSrc).toContain('shiftedSeconds.workToPersonal');
+      expect(svelteSrc).toContain('shiftedSeconds.personalToWork');
+    });
+  });
 });

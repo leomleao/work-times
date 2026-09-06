@@ -2,7 +2,7 @@
   import AppShell from '$lib/components/AppShell.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import type { PageData, ActionData } from './$types';
-  import type { SelectorType } from '$lib/server/classification/model';
+  import { SELECTOR_TYPES, type SelectorType } from '$lib/server/classification/model';
   import type {
     ClassificationCoverage,
     ClassificationRevisionRecord,
@@ -24,6 +24,7 @@
     Info,
     Laptop,
     Layers,
+    Pencil,
     SlidersHorizontal,
     Terminal,
     Trash2,
@@ -80,6 +81,29 @@
   let overrideTimesheetCode = $state('');
   let overrideNote = $state('');
 
+  // Rule editing state
+  let editRuleModalOpen = $state(false);
+  let editRuleId = $state('');
+  let editRuleName = $state('');
+  let editRuleClassification = $state<'work' | 'personal'>('work');
+  let editRuleSelectorType = $state<SelectorType>('project');
+  let editRuleSelectorValue = $state('');
+  let editRulePriority = $state(0);
+  let editRuleEnabled = $state(true);
+  let editRuleTimesheetCode = $state('');
+
+  function openEditRule(rule: ClassificationRuleRecord) {
+    editRuleId = rule.id;
+    editRuleName = rule.name;
+    editRuleClassification = rule.classification;
+    editRuleSelectorType = rule.selector_type;
+    editRuleSelectorValue = rule.selector_value;
+    editRulePriority = rule.priority;
+    editRuleEnabled = rule.enabled;
+    editRuleTimesheetCode = rule.timesheet_code ?? '';
+    editRuleModalOpen = true;
+  }
+
   // Two-step rule confirmation modal state
   let showConfirmModal = $state(false);
 
@@ -87,6 +111,7 @@
   $effect(() => {
     if (form?.success && form?.preview && form?.proposal) {
       showConfirmModal = true;
+      editRuleModalOpen = false;
     }
     if (form?.confirmed) {
       showConfirmModal = false;
@@ -740,12 +765,21 @@
                   <td>
                     <small>{rule.created_at.slice(0, 10)}</small>
                   </td>
-                  <td>
+                  <td style="white-space: nowrap;">
+                    <button
+                      type="button"
+                      class="button ghost sm"
+                      onclick={() => openEditRule(rule)}
+                      aria-label="Edit rule {rule.name}"
+                    >
+                      <Pencil size={13} />
+                      <span>Edit</span>
+                    </button>
                     <form method="POST" action="?/previewRule" style="display: inline;">
                       <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
                       <input type="hidden" name="type" value="delete" />
                       <input type="hidden" name="id" value={rule.id} />
-                      <button type="submit" class="button ghost sm" style="color: var(--danger);">
+                      <button type="submit" class="button ghost sm" style="color: var(--danger);" aria-label="Delete rule {rule.name}">
                         <Trash2 size={13} />
                         <span>Delete</span>
                       </button>
@@ -922,6 +956,31 @@
           </div>
         {:else if proposal.type === 'update'}
           <strong style="color: var(--text); display: block;">Update Rule #{proposal.id}</strong>
+          <div style="margin-top: 6px; font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px;">
+            {#if proposal.rule.name}
+              <div>Name: <b style="color: var(--text);">{proposal.rule.name}</b></div>
+            {/if}
+            {#if proposal.rule.classification}
+              <div>
+                Classification:
+                <span class="badge {proposal.rule.classification}" style="display: inline-block; vertical-align: middle;">
+                  {proposal.rule.classification.toUpperCase()}
+                </span>
+              </div>
+            {/if}
+            {#if proposal.rule.selectorType || proposal.rule.selectorValue}
+              <div>Selector: <code>{proposal.rule.selectorType ?? '—'}: {proposal.rule.selectorValue ?? '—'}</code></div>
+            {/if}
+            {#if proposal.rule.priority !== undefined}
+              <div>Priority: <b style="color: var(--text);">{proposal.rule.priority}</b></div>
+            {/if}
+            {#if proposal.rule.enabled !== undefined}
+              <div>Status: <span class="badge {proposal.rule.enabled ? 'safe' : 'neutral'}">{proposal.rule.enabled ? 'Active' : 'Disabled'}</span></div>
+            {/if}
+            {#if proposal.rule.timesheetCode !== undefined}
+              <div>Timesheet: <code>{proposal.rule.timesheetCode || '—'}</code></div>
+            {/if}
+          </div>
         {:else if proposal.type === 'delete'}
           <strong style="color: var(--text); display: block; color: var(--danger);">Delete Rule #{proposal.id}</strong>
         {/if}
@@ -1176,3 +1235,145 @@
     </button>
   {/snippet}
 </Modal>
+
+<!-- EDIT CLASSIFICATION RULE MODAL -->
+<Modal
+  open={editRuleModalOpen}
+  title="Edit Classification Rule"
+  description="Modify this rule's parameters. Changes will be previewed before confirmation."
+  onclose={() => (editRuleModalOpen = false)}
+  maxWidth="560px"
+>
+  <form method="POST" action="?/previewRule" id="edit-rule-form" style="display: flex; flex-direction: column; gap: 12px;">
+    <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
+    <input type="hidden" name="type" value="update" />
+    <input type="hidden" name="id" value={editRuleId} />
+    <input type="hidden" name="classification" value={editRuleClassification} />
+    <input type="hidden" name="enabled" value={editRuleEnabled ? 'true' : 'false'} />
+
+    <div class="form-group">
+      <label for="edit-rule-name" class="form-label">
+        <span>Rule Name</span>
+      </label>
+      <input
+        id="edit-rule-name"
+        name="name"
+        type="text"
+        bind:value={editRuleName}
+        class="form-input"
+        required
+      />
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Classification Assignment</span>
+      <div style="display: flex; gap: 8px; margin-top: 4px;">
+        <button
+          type="button"
+          class="button {editRuleClassification === 'work' ? 'primary' : 'secondary'}"
+          style="flex: 1;"
+          onclick={() => (editRuleClassification = 'work')}
+        >
+          Work
+        </button>
+        <button
+          type="button"
+          class="button {editRuleClassification === 'personal' ? 'primary' : 'secondary'}"
+          style="flex: 1;"
+          onclick={() => (editRuleClassification = 'personal')}
+        >
+          Personal
+        </button>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+      <div class="form-group">
+        <label for="edit-rule-selector-type" class="form-label">
+          <span>Selector Type</span>
+        </label>
+        <select
+          id="edit-rule-selector-type"
+          name="selectorType"
+          bind:value={editRuleSelectorType}
+          class="form-input"
+        >
+          {#each SELECTOR_TYPES as st}
+            <option value={st}>{st} (Rank {getSelectorSpecificity(st)})</option>
+          {/each}
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="edit-rule-selector-value" class="form-label">
+          <span>Selector Value</span>
+        </label>
+        <input
+          id="edit-rule-selector-value"
+          name="selectorValue"
+          type="text"
+          bind:value={editRuleSelectorValue}
+          class="form-input"
+          required
+        />
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+      <div class="form-group">
+        <label for="edit-rule-priority" class="form-label">
+          <span>Operator Priority</span>
+        </label>
+        <input
+          id="edit-rule-priority"
+          name="priority"
+          type="number"
+          bind:value={editRulePriority}
+          class="form-input"
+        />
+      </div>
+      <div class="form-group">
+        <label for="edit-rule-timesheet" class="form-label">
+          <span>Timesheet Code (Optional)</span>
+        </label>
+        <input
+          id="edit-rule-timesheet"
+          name="timesheetCode"
+          type="text"
+          bind:value={editRuleTimesheetCode}
+          class="form-input"
+          placeholder="e.g. CLIENT-01"
+        />
+      </div>
+    </div>
+
+    <div class="form-group" style="margin-top: 4px;">
+      <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+        <input
+          type="checkbox"
+          checked={editRuleEnabled}
+          onchange={(e) => (editRuleEnabled = e.currentTarget.checked)}
+        />
+        <span style="font-size: 13px; color: var(--text);">Rule is Active</span>
+      </label>
+    </div>
+  </form>
+
+  {#snippet footer()}
+    <button
+      type="button"
+      class="button ghost"
+      onclick={() => (editRuleModalOpen = false)}
+    >
+      Cancel
+    </button>
+    <button
+      type="submit"
+      form="edit-rule-form"
+      class="button primary"
+    >
+      <WandSparkles size={14} />
+      <span>Preview Rule Update</span>
+    </button>
+  {/snippet}
+</Modal>
+

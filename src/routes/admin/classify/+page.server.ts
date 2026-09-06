@@ -15,32 +15,87 @@ import {
   StalePreviewError
 } from '$lib/server/classification/sqlite';
 
-function parseProposal(formData: FormData): RuleChangeInput {
-  const rawProposal = formData.get('proposal');
-  if (typeof rawProposal === 'string' && rawProposal.trim().length > 0) {
-    try {
-      const parsed = JSON.parse(rawProposal);
-      if (parsed && typeof parsed === 'object' && 'type' in parsed) {
-        return parsed as RuleChangeInput;
-      }
-    } catch {
-      // Fall through to parse individual fields
+const STRICT_INTEGER_REGEX = /^(0|-?[1-9]\d*)$/;
+const STRICT_NON_NEGATIVE_INTEGER_REGEX = /^(0|[1-9]\d*)$/;
+
+function parseStrictInteger(value: unknown, name: string, options?: { nonNegative?: boolean }): number {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(`Invalid ${name}: must be a safe integer`);
     }
+    if (options?.nonNegative && value < 0) {
+      throw new Error(`Invalid ${name}: must be non-negative`);
+    }
+    return value;
   }
 
-  const type = String(formData.get('type') || formData.get('proposalType') || 'create').trim();
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    const regex = options?.nonNegative ? STRICT_NON_NEGATIVE_INTEGER_REGEX : STRICT_INTEGER_REGEX;
+    if (!regex.test(trimmed)) {
+      throw new Error(`Invalid ${name}: '${value}' is not a valid integer`);
+    }
+    const num = Number(trimmed);
+    if (!Number.isSafeInteger(num)) {
+      throw new Error(`Invalid ${name}: '${value}' exceeds safe integer range`);
+    }
+    if (options?.nonNegative && num < 0) {
+      throw new Error(`Invalid ${name}: must be non-negative`);
+    }
+    return num;
+  }
+
+  throw new Error(`Invalid ${name}: expected integer value`);
+}
+
+function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
+  const type = obj.type;
+  if (type !== 'create' && type !== 'update' && type !== 'delete') {
+    throw new Error(`Invalid proposal type: '${String(type)}'. Must be 'create', 'update', or 'delete'`);
+  }
 
   if (type === 'create') {
-    const name = String(formData.get('name') ?? '').trim();
-    const classification = String(formData.get('classification') ?? '').trim() as RuleClassification;
-    const selectorType = String(formData.get('selectorType') ?? '').trim() as SelectorType;
-    const selectorValue = String(formData.get('selectorValue') ?? '').trim();
-    const priorityRaw = formData.get('priority');
-    const priority = priorityRaw !== null && priorityRaw !== '' ? Number.parseInt(String(priorityRaw), 10) : 0;
-    const enabledRaw = formData.get('enabled');
-    const enabled = enabledRaw !== null ? enabledRaw !== 'false' && enabledRaw !== '0' : true;
-    const timesheetCodeRaw = formData.get('timesheetCode');
-    const timesheetCode = timesheetCodeRaw ? String(timesheetCodeRaw).trim() : null;
+    if (!obj.rule || typeof obj.rule !== 'object' || Array.isArray(obj.rule)) {
+      throw new Error("Create proposal requires a 'rule' object");
+    }
+    const r = obj.rule as Record<string, unknown>;
+    const name = typeof r.name === 'string' ? r.name.trim() : '';
+    if (!name) {
+      throw new Error('Rule name cannot be empty');
+    }
+    const classification = String(r.classification ?? '').trim();
+    if (classification !== 'work' && classification !== 'personal') {
+      throw new Error(`Invalid classification '${classification}'. Only work or personal is supported.`);
+    }
+    const selectorType = String(r.selectorType ?? '').trim() as SelectorType;
+    if (!SELECTOR_TYPES.includes(selectorType)) {
+      throw new Error(`Invalid selector type '${selectorType}'`);
+    }
+    const selectorValue = typeof r.selectorValue === 'string' ? r.selectorValue.trim() : '';
+    if (!selectorValue) {
+      throw new Error('Selector value cannot be empty');
+    }
+
+    let priority = 0;
+    if (r.priority !== undefined && r.priority !== null && r.priority !== '') {
+      priority = parseStrictInteger(r.priority, 'priority');
+    }
+
+    let enabled = true;
+    if (r.enabled !== undefined && r.enabled !== null) {
+      if (typeof r.enabled === 'boolean') {
+        enabled = r.enabled;
+      } else if (typeof r.enabled === 'string') {
+        enabled = r.enabled !== 'false' && r.enabled !== '0';
+      } else {
+        throw new Error('Invalid enabled flag: must be boolean');
+      }
+    }
+
+    const timesheetCode =
+      typeof r.timesheetCode === 'string' && r.timesheetCode.trim().length > 0
+        ? r.timesheetCode.trim()
+        : null;
 
     return {
       type: 'create',
@@ -49,40 +104,263 @@ function parseProposal(formData: FormData): RuleChangeInput {
         classification,
         selectorType,
         selectorValue,
-        priority: Number.isSafeInteger(priority) ? priority : 0,
+        priority,
         enabled,
-        timesheetCode: timesheetCode || null
+        timesheetCode
+      }
+    };
+  }
+
+  if (type === 'update') {
+    const id = typeof obj.id === 'string' ? obj.id.trim() : '';
+    if (!id) {
+      throw new Error('Missing rule ID for update');
+    }
+    if (!obj.rule || typeof obj.rule !== 'object' || Array.isArray(obj.rule)) {
+      throw new Error("Update proposal requires a 'rule' object");
+    }
+    const r = obj.rule as Record<string, unknown>;
+
+    let name: string | undefined = undefined;
+    if (r.name !== undefined && r.name !== null) {
+      if (typeof r.name !== 'string' || r.name.trim().length === 0) {
+        throw new Error('Rule name cannot be empty');
+      }
+      name = r.name.trim();
+    }
+
+    let classification: RuleClassification | undefined = undefined;
+    if (r.classification !== undefined && r.classification !== null) {
+      const cls = String(r.classification).trim();
+      if (cls !== 'work' && cls !== 'personal') {
+        throw new Error(`Invalid classification '${cls}'. Only work or personal is supported.`);
+      }
+      classification = cls;
+    }
+
+    let selectorType: SelectorType | undefined = undefined;
+    if (r.selectorType !== undefined && r.selectorType !== null) {
+      const st = String(r.selectorType).trim() as SelectorType;
+      if (!SELECTOR_TYPES.includes(st)) {
+        throw new Error(`Invalid selector type '${st}'`);
+      }
+      selectorType = st;
+    }
+
+    let selectorValue: string | undefined = undefined;
+    if (r.selectorValue !== undefined && r.selectorValue !== null) {
+      if (typeof r.selectorValue !== 'string' || r.selectorValue.trim().length === 0) {
+        throw new Error('Selector value cannot be empty');
+      }
+      selectorValue = r.selectorValue.trim();
+    }
+
+    let priority: number | undefined = undefined;
+    if (r.priority !== undefined && r.priority !== null && r.priority !== '') {
+      priority = parseStrictInteger(r.priority, 'priority');
+    }
+
+    let enabled: boolean | undefined = undefined;
+    if (r.enabled !== undefined && r.enabled !== null) {
+      if (typeof r.enabled === 'boolean') {
+        enabled = r.enabled;
+      } else if (typeof r.enabled === 'string') {
+        enabled = r.enabled !== 'false' && r.enabled !== '0';
+      } else {
+        throw new Error('Invalid enabled flag: must be boolean');
+      }
+    }
+
+    let timesheetCode: string | null | undefined = undefined;
+    if (r.timesheetCode !== undefined) {
+      if (r.timesheetCode === null) {
+        timesheetCode = null;
+      } else if (typeof r.timesheetCode === 'string') {
+        timesheetCode = r.timesheetCode.trim() || null;
+      }
+    }
+
+    return {
+      type: 'update',
+      id,
+      rule: {
+        name,
+        classification,
+        selectorType,
+        selectorValue,
+        priority,
+        enabled,
+        timesheetCode
+      }
+    };
+  }
+
+  if (type === 'delete') {
+    const id = typeof obj.id === 'string' ? obj.id.trim() : '';
+    if (!id) {
+      throw new Error('Missing rule ID for delete');
+    }
+    return {
+      type: 'delete',
+      id
+    };
+  }
+
+  throw new Error(`Unsupported proposal type: ${String(type)}`);
+}
+
+function parseProposal(formData: FormData): RuleChangeInput {
+  if (formData.has('proposal')) {
+    const rawProposal = formData.get('proposal');
+    if (rawProposal === null || rawProposal === undefined) {
+      throw new Error('Missing proposal payload');
+    }
+    const str = typeof rawProposal === 'string' ? rawProposal.trim() : String(rawProposal).trim();
+    if (str.length === 0) {
+      throw new Error('Proposal field was supplied but is empty');
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(str);
+    } catch {
+      throw new Error('Malformed proposal JSON');
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Proposal must be a JSON object');
+    }
+
+    return validateProposalObject(parsed as Record<string, unknown>);
+  }
+
+  // Loose form field parsing
+  const type = String(formData.get('type') || formData.get('proposalType') || 'create').trim();
+
+  if (type === 'create') {
+    const name = String(formData.get('name') ?? '').trim();
+    if (!name) {
+      throw new Error('Rule name cannot be empty');
+    }
+    const classification = String(formData.get('classification') ?? '').trim() as RuleClassification;
+    if (classification !== 'work' && classification !== 'personal') {
+      throw new Error(`Invalid classification '${classification}'. Only work or personal is supported.`);
+    }
+    const selectorType = String(formData.get('selectorType') ?? '').trim() as SelectorType;
+    if (!SELECTOR_TYPES.includes(selectorType)) {
+      throw new Error(`Invalid selector type '${selectorType}'`);
+    }
+    const selectorValue = String(formData.get('selectorValue') ?? '').trim();
+    if (!selectorValue) {
+      throw new Error('Selector value cannot be empty');
+    }
+
+    const priorityRaw = formData.get('priority');
+    let priority = 0;
+    if (priorityRaw !== null && priorityRaw !== '') {
+      priority = parseStrictInteger(priorityRaw, 'priority');
+    }
+
+    const enabledRaw = formData.get('enabled');
+    const enabled = enabledRaw !== null ? enabledRaw !== 'false' && enabledRaw !== '0' : true;
+    const timesheetCodeRaw = formData.get('timesheetCode');
+    const timesheetCode = timesheetCodeRaw ? String(timesheetCodeRaw).trim() || null : null;
+
+    return {
+      type: 'create',
+      rule: {
+        name,
+        classification,
+        selectorType,
+        selectorValue,
+        priority,
+        enabled,
+        timesheetCode
       }
     };
   }
 
   if (type === 'update') {
     const id = String(formData.get('id') || formData.get('ruleId') || '').trim();
+    if (!id) {
+      throw new Error('Missing rule ID for update');
+    }
+
     const nameRaw = formData.get('name');
+    let name: string | undefined = undefined;
+    if (nameRaw !== null) {
+      const trimmed = String(nameRaw).trim();
+      if (trimmed.length === 0) {
+        throw new Error('Rule name cannot be empty');
+      }
+      name = trimmed;
+    }
+
     const classificationRaw = formData.get('classification');
+    let classification: RuleClassification | undefined = undefined;
+    if (classificationRaw !== null && classificationRaw !== '') {
+      const cls = String(classificationRaw).trim() as RuleClassification;
+      if (cls !== 'work' && cls !== 'personal') {
+        throw new Error(`Invalid classification '${cls}'. Only work or personal is supported.`);
+      }
+      classification = cls;
+    }
+
     const selectorTypeRaw = formData.get('selectorType');
+    let selectorType: SelectorType | undefined = undefined;
+    if (selectorTypeRaw !== null && selectorTypeRaw !== '') {
+      const st = String(selectorTypeRaw).trim() as SelectorType;
+      if (!SELECTOR_TYPES.includes(st)) {
+        throw new Error(`Invalid selector type '${st}'`);
+      }
+      selectorType = st;
+    }
+
     const selectorValueRaw = formData.get('selectorValue');
+    let selectorValue: string | undefined = undefined;
+    if (selectorValueRaw !== null) {
+      const trimmed = String(selectorValueRaw).trim();
+      if (trimmed.length === 0) {
+        throw new Error('Selector value cannot be empty');
+      }
+      selectorValue = trimmed;
+    }
+
     const priorityRaw = formData.get('priority');
+    let priority: number | undefined = undefined;
+    if (priorityRaw !== null && priorityRaw !== '') {
+      priority = parseStrictInteger(priorityRaw, 'priority');
+    }
+
     const enabledRaw = formData.get('enabled');
+    const enabled = enabledRaw !== null ? enabledRaw !== 'false' && enabledRaw !== '0' : undefined;
+
     const timesheetCodeRaw = formData.get('timesheetCode');
+    let timesheetCode: string | null | undefined = undefined;
+    if (timesheetCodeRaw !== null) {
+      timesheetCode = String(timesheetCodeRaw).trim() || null;
+    }
 
     return {
       type: 'update',
       id,
       rule: {
-        name: nameRaw !== null ? String(nameRaw).trim() : undefined,
-        classification: classificationRaw ? (String(classificationRaw).trim() as RuleClassification) : undefined,
-        selectorType: selectorTypeRaw ? (String(selectorTypeRaw).trim() as SelectorType) : undefined,
-        selectorValue: selectorValueRaw !== null ? String(selectorValueRaw).trim() : undefined,
-        priority: priorityRaw !== null && priorityRaw !== '' ? Number.parseInt(String(priorityRaw), 10) : undefined,
-        enabled: enabledRaw !== null ? enabledRaw !== 'false' && enabledRaw !== '0' : undefined,
-        timesheetCode: timesheetCodeRaw !== null ? (String(timesheetCodeRaw).trim() || null) : undefined
+        name,
+        classification,
+        selectorType,
+        selectorValue,
+        priority,
+        enabled,
+        timesheetCode
       }
     };
   }
 
   if (type === 'delete') {
     const id = String(formData.get('id') || formData.get('ruleId') || '').trim();
+    if (!id) {
+      throw new Error('Missing rule ID for delete');
+    }
     return {
       type: 'delete',
       id
@@ -119,31 +397,35 @@ export const load: PageServerLoad = async ({ locals, url }) => {
   const archiveMaxDate = maxDateRow?.max_date ?? null;
 
   let recentSlices: EvaluatedSlice[] = [];
-  if (archiveMaxDate) {
-    const dateParam = url.searchParams.get('date')?.trim();
-    if (dateParam) {
-      recentSlices = runtime.classification.classifySlices({ date: dateParam });
-    } else {
-      const recentDates = runtime.db
-        .prepare('SELECT date FROM daily_totals WHERE date <= ? ORDER BY date DESC LIMIT 14')
-        .all(archiveMaxDate) as Array<{ date: string }>;
-      const startDate =
-        recentDates.length > 0 ? recentDates[recentDates.length - 1].date : archiveMaxDate;
+  const dateParam = url.searchParams.get('date')?.trim();
+  if (dateParam) {
+    recentSlices = runtime.classification.classifySlices({ date: dateParam });
+  } else {
+    // Populate recent dates from distinct dates that actually exist in day_project_entity_slices, newest first and bounded (14 dates)
+    const distinctDates = runtime.db
+      .prepare(
+        'SELECT DISTINCT date FROM day_project_entity_slices ORDER BY date DESC LIMIT 14'
+      )
+      .all() as Array<{ date: string }>;
+
+    if (distinctDates.length > 0) {
+      const newestDate = distinctDates[0].date;
+      const oldestDate = distinctDates[distinctDates.length - 1].date;
       recentSlices = runtime.classification.classifySlices({
-        startDate,
-        endDate: archiveMaxDate
+        startDate: oldestDate,
+        endDate: newestDate
       });
     }
+  }
 
-    recentSlices.sort((a, b) => {
-      const cmp = b.date.localeCompare(a.date);
-      if (cmp !== 0) return cmp;
-      return b.totalSeconds - a.totalSeconds;
-    });
+  recentSlices.sort((a, b) => {
+    const cmp = b.date.localeCompare(a.date);
+    if (cmp !== 0) return cmp;
+    return b.totalSeconds - a.totalSeconds;
+  });
 
-    if (recentSlices.length > 100) {
-      recentSlices = recentSlices.slice(0, 100);
-    }
+  if (recentSlices.length > 100) {
+    recentSlices = recentSlices.slice(0, 100);
   }
 
   return {
@@ -172,46 +454,6 @@ export const actions: Actions = {
       return fail(400, { error: err instanceof Error ? err.message : 'Invalid proposal' });
     }
 
-    if (proposal.type === 'create') {
-      if (!proposal.rule.name || proposal.rule.name.trim().length === 0) {
-        return fail(400, { error: 'Rule name cannot be empty' });
-      }
-      if (proposal.rule.classification !== 'work' && proposal.rule.classification !== 'personal') {
-        return fail(400, {
-          error: `Invalid classification '${proposal.rule.classification}'. Only work or personal is supported.`
-        });
-      }
-      if (!SELECTOR_TYPES.includes(proposal.rule.selectorType)) {
-        return fail(400, { error: `Invalid selector type '${proposal.rule.selectorType}'` });
-      }
-      if (!proposal.rule.selectorValue || proposal.rule.selectorValue.trim().length === 0) {
-        return fail(400, { error: 'Selector value cannot be empty' });
-      }
-    } else if (proposal.type === 'update') {
-      if (!proposal.id) {
-        return fail(400, { error: 'Missing rule ID for update' });
-      }
-      if (
-        proposal.rule.classification !== undefined &&
-        proposal.rule.classification !== 'work' &&
-        proposal.rule.classification !== 'personal'
-      ) {
-        return fail(400, {
-          error: `Invalid classification '${proposal.rule.classification}'. Only work or personal is supported.`
-        });
-      }
-      if (
-        proposal.rule.selectorType !== undefined &&
-        !SELECTOR_TYPES.includes(proposal.rule.selectorType)
-      ) {
-        return fail(400, { error: `Invalid selector type '${proposal.rule.selectorType}'` });
-      }
-    } else if (proposal.type === 'delete') {
-      if (!proposal.id) {
-        return fail(400, { error: 'Missing rule ID for delete' });
-      }
-    }
-
     try {
       const preview = runtime.classification.previewRuleChange(proposal);
       return {
@@ -237,10 +479,14 @@ export const actions: Actions = {
     }
 
     const previewRevisionRaw = formData.get('previewRevision') ?? formData.get('expectedRevision');
-    const expectedRevision =
-      previewRevisionRaw !== null && previewRevisionRaw !== ''
-        ? Number.parseInt(String(previewRevisionRaw), 10)
-        : undefined;
+    let expectedRevision: number | undefined = undefined;
+    if (previewRevisionRaw !== null && previewRevisionRaw !== '') {
+      try {
+        expectedRevision = parseStrictInteger(previewRevisionRaw, 'expectedRevision', { nonNegative: true });
+      } catch (err) {
+        return fail(400, { error: err instanceof Error ? err.message : 'Invalid expectedRevision' });
+      }
+    }
 
     let proposal: RuleChangeInput;
     try {
@@ -301,14 +547,17 @@ export const actions: Actions = {
     const classification = String(formData.get('classification') ?? '').trim() as RuleClassification;
     const timesheetCodeRaw = formData.get('timesheetCode');
     const noteRaw = formData.get('note');
-    const replaceExisting =
-      formData.get('replaceExisting') === 'true' || formData.get('replaceExisting') === '1';
 
     if (!date) {
       return fail(400, { error: 'Date is required for allocation' });
     }
-    const projectId = Number.parseInt(String(projectIdRaw ?? ''), 10);
-    if (!Number.isSafeInteger(projectId)) {
+    if (projectIdRaw === null || projectIdRaw === '') {
+      return fail(400, { error: 'Valid projectId is required for allocation' });
+    }
+    let projectId: number;
+    try {
+      projectId = parseStrictInteger(projectIdRaw, 'projectId', { nonNegative: true });
+    } catch {
       return fail(400, { error: 'Valid projectId is required for allocation' });
     }
     if (!entity) {
@@ -336,7 +585,7 @@ export const actions: Actions = {
         },
         {
           actor,
-          replaceExisting
+          replaceExisting: false
         }
       );
 
@@ -381,8 +630,13 @@ export const actions: Actions = {
     if (!date) {
       return fail(400, { error: 'Date is required for allocation' });
     }
-    const projectId = Number.parseInt(String(projectIdRaw ?? ''), 10);
-    if (!Number.isSafeInteger(projectId)) {
+    if (projectIdRaw === null || projectIdRaw === '') {
+      return fail(400, { error: 'Valid projectId is required for allocation' });
+    }
+    let projectId: number;
+    try {
+      projectId = parseStrictInteger(projectIdRaw, 'projectId', { nonNegative: true });
+    } catch {
       return fail(400, { error: 'Valid projectId is required for allocation' });
     }
     if (!entity) {
