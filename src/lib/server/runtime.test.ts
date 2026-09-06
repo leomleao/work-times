@@ -10,6 +10,8 @@ describe('server runtime singleton', () => {
     expect(runtime.db).toBeDefined();
     expect(runtime.db.name).toBe(':memory:');
     expect(runtime.adminAuth).toBeDefined();
+    expect(runtime.loginLimiter).toBeDefined();
+    expect(runtime.registrationLimiter).toBeDefined();
     expect(runtime.apiKeys).toBeDefined();
     expect(runtime.oauthClients).toBeDefined();
     expect(runtime.oauthAuth).toBeDefined();

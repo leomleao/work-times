@@ -18,6 +18,7 @@ import { SqliteWorkOnlyAnalytics } from '$lib/server/analytics/sqlite';
 import { WorkTimesTokenVerifier } from '$lib/server/mcp/token-verifier';
 import { createWorkTimesMcpHandler } from '$lib/server/mcp/server';
 import { createAuthenticatedMcpHandler, type AuthenticatedMcpHandler } from '$lib/server/mcp/http';
+import { RegistrationRateLimiter } from '$lib/server/oauth/rate-limit';
 
 export interface ServerRuntime {
   readonly config: RuntimeConfig;
@@ -25,6 +26,7 @@ export interface ServerRuntime {
   readonly adminSessions: SqliteAdminSessionRepository;
   readonly adminAuth: AdminAuthenticator;
   readonly loginLimiter: LoginAttemptLimiter;
+  readonly registrationLimiter: RegistrationRateLimiter;
   readonly apiKeys: ApiKeyService;
   readonly oauthClients: OAuthClientService;
   readonly oauthAuth: OAuthAuthorizationService;
@@ -54,6 +56,7 @@ export function createRuntime(customConfig?: RuntimeConfig, customDb?: Database.
   });
 
   const loginLimiter = new LoginAttemptLimiter(5, 15 * 60 * 1000);
+  const registrationLimiter = new RegistrationRateLimiter(10, 10 * 60 * 1000);
 
   const apiKeys = new ApiKeyService(apiKeyRepo);
   const oauthClients = new OAuthClientService(oauthClientRepo);
@@ -91,6 +94,7 @@ export function createRuntime(customConfig?: RuntimeConfig, customDb?: Database.
     adminSessions,
     adminAuth,
     loginLimiter,
+    registrationLimiter,
     apiKeys,
     oauthClients,
     oauthAuth,

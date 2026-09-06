@@ -3,24 +3,74 @@ import type { Actions, PageServerLoad } from './$types';
 import { runtime } from '$lib/server/runtime';
 import { ADMIN_SESSION_COOKIE, verifyCsrfToken } from '$lib/server/security/http';
 
-export const load: PageServerLoad = async ({ locals }) => {
+export function _safeRedirect(target: unknown): string {
+  if (typeof target !== 'string' || !target) {
+    return '/admin';
+  }
+
+  // Reject backslashes, control characters, and protocol-relative URLs
+  if (target.includes('\\') || target.startsWith('//') || /[\r\n\t\0]/.test(target)) {
+    return '/admin';
+  }
+
+  // Must start with /admin or /oauth/authorize
+  const isAdmin =
+    target === '/admin' ||
+    target.startsWith('/admin/') ||
+    target.startsWith('/admin?');
+  const isOAuthAuthorize =
+    target === '/oauth/authorize' ||
+    target.startsWith('/oauth/authorize?') ||
+    target.startsWith('/oauth/authorize/');
+
+  if (!isAdmin && !isOAuthAuthorize) {
+    return '/admin';
+  }
+
+  // Parse against a dummy base to strictly enforce relative path, no credentials, no authority override
+  try {
+    const dummyBase = 'http://localhost.internal';
+    const parsed = new URL(target, dummyBase);
+
+    // Host/origin must match dummy base
+    if (parsed.origin !== dummyBase) {
+      return '/admin';
+    }
+
+    // Must not contain credentials
+    if (parsed.username || parsed.password) {
+      return '/admin';
+    }
+
+    // Normalized pathname must still start with /admin or /oauth/authorize
+    const p = parsed.pathname;
+    const pathValid =
+      p === '/admin' ||
+      p.startsWith('/admin/') ||
+      p === '/oauth/authorize' ||
+      p.startsWith('/oauth/authorize/');
+
+    if (!pathValid) {
+      return '/admin';
+    }
+
+    return parsed.pathname + parsed.search + parsed.hash;
+  } catch {
+    return '/admin';
+  }
+}
+
+export const _safeAdminRedirect = _safeRedirect;
+const safeRedirect = _safeRedirect;
+const safeAdminRedirect = _safeAdminRedirect;
+
+export const load: PageServerLoad = async ({ locals, url }) => {
   if (locals.admin) {
-    throw redirect(303, '/admin');
+    const target = safeRedirect(url.searchParams.get('redirectTo'));
+    throw redirect(303, target);
   }
   return {};
 };
-
-function safeAdminRedirect(target: unknown): string {
-  if (
-    typeof target === 'string' &&
-    target.startsWith('/admin') &&
-    !target.startsWith('//') &&
-    !target.includes('\\')
-  ) {
-    return target;
-  }
-  return '/admin';
-}
 
 export const actions: Actions = {
   default: async ({ request, url, cookies, getClientAddress }) => {

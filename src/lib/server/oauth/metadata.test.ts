@@ -18,6 +18,15 @@ describe('OAuth discovery metadata', () => {
     expect(metadata.issuer).toBe('https://work-times.home');
     expect(metadata.grant_types_supported).toEqual(['authorization_code', 'refresh_token']);
     expect(metadata.code_challenge_methods_supported).toEqual(['S256']);
-    expect(metadata.token_endpoint_auth_methods_supported).toContain('none');
+    expect(metadata.token_endpoint_auth_methods_supported).toEqual([
+      'none',
+      'client_secret_post',
+      'client_secret_basic'
+    ]);
+    expect(metadata.revocation_endpoint_auth_methods_supported).toEqual([
+      'none',
+      'client_secret_post',
+      'client_secret_basic'
+    ]);
   });
 });

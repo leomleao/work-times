@@ -58,6 +58,15 @@ class MemoryAuthorization implements OAuthAuthorizationRepository {
     }
     return count;
   }
+  revokeByTokenHash(tokenHash: string, clientId: string, revokedAt: string): number {
+    const target = this.tokens.find(
+      (token) =>
+        (token.accessTokenHash === tokenHash || token.refreshTokenHash === tokenHash) &&
+        token.clientId === clientId
+    );
+    if (!target) return 0;
+    return this.revokeFamily(target.familyId, revokedAt);
+  }
 }
 
 const verifier = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFG';
@@ -296,4 +305,67 @@ describe('OAuth authorization-code flow', () => {
       })
     ).rejects.toThrow('scope');
   });
+
+  it('revokes the matching token family by access token or refresh token', async () => {
+    const { client, authorization } = await fixture();
+    const now = new Date('2026-01-01T00:00:00.000Z');
+    const issued = await authorization.issueAuthorizationCode({
+      clientId: client.metadata.clientId,
+      redirectUri: 'http://127.0.0.1:49152/callback',
+      resource,
+      scopes: ['activity:read'],
+      codeChallenge: createS256Challenge(verifier),
+      codeChallengeMethod: 'S256',
+      now
+    });
+    const tokens = await authorization.exchangeAuthorizationCode({
+      code: issued.code,
+      clientId: client.metadata.clientId,
+      redirectUri: 'http://127.0.0.1:49152/callback',
+      resource,
+      codeVerifier: verifier,
+      now
+    });
+    expect(tokens).not.toBeNull();
+
+    // Revoking an unknown token returns true (idempotent / safe)
+    await expect(
+      authorization.revokeToken({
+        token: 'wat_unknown_token',
+        clientId: client.metadata.clientId,
+        now
+      })
+    ).resolves.toBe(true);
+
+    // Revoking with invalid client credentials returns false
+    await expect(
+      authorization.revokeToken({
+        token: tokens!.accessToken,
+        clientId: 'unknown_client',
+        now
+      })
+    ).resolves.toBe(false);
+
+    // Revoke by access token revokes family (both access and refresh)
+    await expect(
+      authorization.revokeToken({
+        token: tokens!.accessToken,
+        clientId: client.metadata.clientId,
+        now
+      })
+    ).resolves.toBe(true);
+
+    await expect(
+      authorization.verifyAccessToken(tokens!.accessToken, ['activity:read'], now, resource)
+    ).resolves.toBeNull();
+    await expect(
+      authorization.refresh({
+        refreshToken: tokens!.refreshToken,
+        clientId: client.metadata.clientId,
+        resource,
+        now
+      })
+    ).resolves.toBeNull();
+  });
 });
+

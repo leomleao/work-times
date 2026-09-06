@@ -50,6 +50,7 @@ export interface OAuthAuthorizationRepository {
     replacement: OAuthTokenRecord
   ): boolean | Promise<boolean>;
   revokeFamily(familyId: string, revokedAt: string): number | Promise<number>;
+  revokeByTokenHash(tokenHash: string, clientId: string, revokedAt: string): number | Promise<number>;
 }
 
 export class OAuthTokenReuseError extends Error {
@@ -197,6 +198,20 @@ export class OAuthAuthorizationService {
       throw new OAuthTokenReuseError();
     }
     return generated.response;
+  }
+
+  async revokeToken(input: {
+    token: string;
+    clientId: string;
+    clientSecret?: string;
+    now?: Date;
+  }): Promise<boolean> {
+    const client = await this.clients.authenticate(input.clientId, input.clientSecret);
+    if (!client) return false;
+    const now = input.now ?? new Date();
+    const tokenHash = hashOpaqueToken(input.token);
+    await this.repository.revokeByTokenHash(tokenHash, client.clientId, now.toISOString());
+    return true;
   }
 
   async verifyAccessToken(

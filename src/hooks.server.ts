@@ -7,6 +7,7 @@ import {
   setSecurityHeaders,
   verifyCsrfToken
 } from '$lib/server/security/http';
+import { _safeRedirect as safeRedirect } from './routes/login/+page.server';
 
 export const handle: Handle = async ({ event, resolve }) => {
   const { pathname } = event.url;
@@ -47,17 +48,23 @@ export const handle: Handle = async ({ event, resolve }) => {
     }
   }
 
-  // Redirect authenticated user navigating to /login back to /admin
+  // Redirect authenticated user navigating to /login back to safe redirectTo or /admin
   if (event.locals.admin && pathname === '/login' && method === 'GET') {
-    throw redirect(303, '/admin');
+    const target = safeRedirect(event.url.searchParams.get('redirectTo'));
+    throw redirect(303, target);
   }
 
   // 3. Browser mutation validation
-  // Validate exact PUBLIC_URL Origin for every browser mutation and require the HMAC session-bound CSRF token
+  // Validate exact PUBLIC_URL Origin for every browser mutation and require the HMAC session-bound CSRF token.
+  // Exempt non-browser protocol endpoints (token, revoke, register) and MCP from browser Origin/CSRF enforcement.
   const isMcp = pathname === '/mcp' || pathname.startsWith('/mcp/');
+  const isOAuthProtocol =
+    pathname === '/oauth/token' ||
+    pathname === '/oauth/revoke' ||
+    pathname === '/oauth/register';
   const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
 
-  if (isMutation && !isMcp) {
+  if (isMutation && !isMcp && !isOAuthProtocol) {
     if (!requestHasTrustedOrigin(event.request, runtime.config.publicUrl)) {
       const response = json({ error: 'Cross-origin request rejected' }, { status: 403 });
       setSecurityHeaders(response.headers);

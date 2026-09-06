@@ -42,6 +42,7 @@ export class SqliteOAuthAuthorizationRepository implements OAuthAuthorizationRep
   private readonly findByRefreshTokenHashStmt: Database.Statement;
   private readonly markRefreshUsedStmt: Database.Statement;
   private readonly revokeFamilyStmt: Database.Statement;
+  private readonly revokeByTokenHashStmt: Database.Statement;
   private readonly deleteExpiredCodesStmt: Database.Statement;
   private readonly deleteExpiredTokensStmt: Database.Statement;
 
@@ -92,6 +93,15 @@ export class SqliteOAuthAuthorizationRepository implements OAuthAuthorizationRep
       UPDATE oauth_tokens
       SET revoked_at = ?
       WHERE family_id = ? AND revoked_at IS NULL
+    `);
+    this.revokeByTokenHashStmt = this.db.prepare(`
+      UPDATE oauth_tokens
+      SET revoked_at = ?
+      WHERE family_id IN (
+        SELECT family_id FROM oauth_tokens
+        WHERE (access_token_hash = ? OR refresh_token_hash = ?)
+          AND client_id = ?
+      ) AND revoked_at IS NULL
     `);
     this.deleteExpiredCodesStmt = this.db.prepare(`
       DELETE FROM oauth_authorization_codes
@@ -190,6 +200,11 @@ export class SqliteOAuthAuthorizationRepository implements OAuthAuthorizationRep
 
   revokeFamily(familyId: string, revokedAt: string): number {
     const info = this.revokeFamilyStmt.run(revokedAt, familyId);
+    return info.changes;
+  }
+
+  revokeByTokenHash(tokenHash: string, clientId: string, revokedAt: string): number {
+    const info = this.revokeByTokenHashStmt.run(revokedAt, tokenHash, tokenHash, clientId);
     return info.changes;
   }
 
