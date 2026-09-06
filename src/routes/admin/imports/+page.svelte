@@ -24,10 +24,12 @@
   let warningsModalOpen = $state(false);
   let selectedImportWarnings = $state<string[]>([]);
   let selectedImportId = $state<number>(0);
+  let selectedOmittedWarnings = $state<number>(0);
 
-  function openWarnings(id: number, warnings: string[]) {
+  function openWarnings(id: number, warnings: string[], omitted: number) {
     selectedImportId = id;
     selectedImportWarnings = warnings;
+    selectedOmittedWarnings = omitted;
     warningsModalOpen = true;
   }
 </script>
@@ -95,7 +97,13 @@
           <p class="eyebrow">Database Ledger</p>
           <h2 id="imports-heading">Ingested Source Archives</h2>
         </div>
-        <span class="badge neutral">{imports.sourceImports.length} imports</span>
+        <span class="badge neutral">
+          {#if imports.omittedImports > 0}
+            {imports.sourceImports.length} of {imports.totalImports} imports
+          {:else}
+            {imports.sourceImports.length} imports
+          {/if}
+        </span>
       </div>
 
       <div class="table-wrap">
@@ -173,11 +181,17 @@
                       <button
                         type="button"
                         class="button ghost sm"
-                        onclick={() => openWarnings(imp.id, imp.warnings)}
+                        onclick={() => openWarnings(imp.id, imp.warnings, imp.omittedWarnings)}
                         aria-label="View warnings for import {imp.id}"
                       >
                         <AlertCircle size={13} style="color: var(--warning);" />
-                        <span>{imp.warnings.length}</span>
+                        <span>
+                          {#if imp.omittedWarnings > 0}
+                            {imp.warnings.length}+
+                          {:else}
+                            {imp.warnings.length}
+                          {/if}
+                        </span>
                       </button>
                     {:else}
                       <span style="color: var(--faint); font-size: 11px;">Clean</span>
@@ -255,6 +269,13 @@
         <span style="font-family: ui-monospace, monospace; color: var(--text);">{warn}</span>
       </div>
     {/each}
+    {#if selectedOmittedWarnings > 0}
+      <p style="font-size: 11px; color: var(--muted); margin: 0;">
+        {selectedOmittedWarnings.toLocaleString()} further warning{selectedOmittedWarnings === 1
+          ? ''
+          : 's'} on this import were not loaded.
+      </p>
+    {/if}
   </div>
 
   {#snippet footer()}

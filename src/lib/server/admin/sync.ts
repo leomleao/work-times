@@ -2,6 +2,28 @@ import type Database from 'better-sqlite3';
 import type { RuntimeConfig } from '../config.js';
 import type { CapabilityPolicyState } from '../sync/capabilities.js';
 import { formatDuration } from './overview.js';
+import {
+  allowlistedNullableValue,
+  allowlistedValue,
+  boundedCsvList,
+  clampCount,
+  clampSeconds,
+  parseCapabilityPolicyState,
+  truncateNullableText,
+  truncateText,
+  MAX_LABEL_LENGTH,
+  SYNC_DAY_STATUSES,
+  SYNC_RUN_STATUSES,
+  SYNC_RUN_TRIGGERS,
+  SYNC_STEP_STATUSES
+} from './sanitize.js';
+
+/** Hard cap on sync run rows materialized for the sync page. */
+export const MAX_SYNC_RUN_ROWS = 50;
+/** Hard cap on per-day sync rows materialized for the sync page. */
+export const MAX_SYNC_DAY_ROWS = 50;
+/** Hard cap on degraded-capability / advisory codes surfaced per run. */
+export const MAX_SYNC_RUN_CODES = 25;
 
 export interface SyncRunItem {
   id: number;
@@ -57,9 +79,9 @@ export function getSyncData(db: Database.Database, config: RuntimeConfig): SyncV
               range_start_date, range_end_date, day_count, days_synced, days_failed,
               degraded_capabilities, advisory_codes, summary, error_message, policy_state_json
        FROM sync_runs
-       ORDER BY id DESC LIMIT 50`
+       ORDER BY id DESC LIMIT ?`
     )
-    .all() as Array<{
+    .all(MAX_SYNC_RUN_ROWS) as Array<{
       id: number;
       started_at: string;
       finished_at: string | null;
@@ -77,60 +99,37 @@ export function getSyncData(db: Database.Database, config: RuntimeConfig): SyncV
       policy_state_json: string | null;
     }>;
 
-  let capabilityState: CapabilityPolicyState | null = null;
-
-  // Check app_settings for capability_policy_state
+  // The policy state is opaque JSON on both of its persistence sites, so it is
+  // re-validated field by field rather than cast: an unrecognized shape yields
+  // null, which the page renders truthfully as "Not Probed Yet".
   const appCapRow = db
     .prepare("SELECT value FROM app_settings WHERE key = 'capability_policy_state'")
     .get() as { value: string } | undefined;
 
-  if (appCapRow?.value) {
-    try {
-      capabilityState = JSON.parse(appCapRow.value);
-    } catch {}
+  let capabilityState: CapabilityPolicyState | null = parseCapabilityPolicyState(appCapRow?.value);
+  if (!capabilityState) {
+    for (const run of rawRuns) {
+      capabilityState = parseCapabilityPolicyState(run.policy_state_json);
+      if (capabilityState) break;
+    }
   }
 
-  const syncRuns: SyncRunItem[] = rawRuns.map((r) => {
-    // If not found in app_settings, fallback to latest run's policy_state_json
-    if (!capabilityState && r.policy_state_json) {
-      try {
-        capabilityState = JSON.parse(r.policy_state_json);
-      } catch {}
-    }
-
-    let degraded: string[] = [];
-    if (r.degraded_capabilities) {
-      degraded = r.degraded_capabilities
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-    }
-
-    let advisories: string[] = [];
-    if (r.advisory_codes) {
-      advisories = r.advisory_codes
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-    }
-
-    return {
-      id: r.id,
-      startedAt: r.started_at,
-      finishedAt: r.finished_at,
-      trigger: r.trigger,
-      status: r.status,
-      rangeStartDate: r.range_start_date,
-      rangeEndDate: r.range_end_date,
-      dayCount: r.day_count,
-      daysSynced: r.days_synced,
-      daysFailed: r.days_failed,
-      degradedCapabilities: degraded,
-      advisoryCodes: advisories,
-      summary: r.summary,
-      errorMessage: r.error_message
-    };
-  });
+  const syncRuns: SyncRunItem[] = rawRuns.map((r) => ({
+    id: r.id,
+    startedAt: truncateText(r.started_at, MAX_LABEL_LENGTH),
+    finishedAt: truncateNullableText(r.finished_at, MAX_LABEL_LENGTH),
+    trigger: allowlistedValue(r.trigger, SYNC_RUN_TRIGGERS),
+    status: allowlistedValue(r.status, SYNC_RUN_STATUSES),
+    rangeStartDate: truncateNullableText(r.range_start_date, MAX_LABEL_LENGTH),
+    rangeEndDate: truncateNullableText(r.range_end_date, MAX_LABEL_LENGTH),
+    dayCount: clampCount(r.day_count),
+    daysSynced: clampCount(r.days_synced),
+    daysFailed: clampCount(r.days_failed),
+    degradedCapabilities: boundedCsvList(r.degraded_capabilities, MAX_SYNC_RUN_CODES),
+    advisoryCodes: boundedCsvList(r.advisory_codes, MAX_SYNC_RUN_CODES),
+    summary: truncateNullableText(r.summary),
+    errorMessage: truncateNullableText(r.error_message)
+  }));
 
   // 2. Fetch real sync_days
   const rawDays = db
@@ -138,9 +137,9 @@ export function getSyncData(db: Database.Database, config: RuntimeConfig): SyncV
       `SELECT id, sync_run_id, date, status, summaries_status, durations_status, heartbeats_status,
               total_seconds, heartbeat_count, error_message, synced_at
        FROM sync_days
-       ORDER BY date DESC, id DESC LIMIT 50`
+       ORDER BY date DESC, id DESC LIMIT ?`
     )
-    .all() as Array<{
+    .all(MAX_SYNC_DAY_ROWS) as Array<{
       id: number;
       sync_run_id: number | null;
       date: string;
@@ -154,20 +153,23 @@ export function getSyncData(db: Database.Database, config: RuntimeConfig): SyncV
       synced_at: string;
     }>;
 
-  const syncDays: SyncDayItem[] = rawDays.map((d) => ({
-    id: d.id,
-    syncRunId: d.sync_run_id,
-    date: d.date,
-    status: d.status,
-    summariesStatus: d.summaries_status,
-    durationsStatus: d.durations_status,
-    heartbeatsStatus: d.heartbeats_status,
-    totalSeconds: d.total_seconds,
-    formattedDuration: formatDuration(d.total_seconds),
-    heartbeatCount: d.heartbeat_count,
-    errorMessage: d.error_message,
-    syncedAt: d.synced_at
-  }));
+  const syncDays: SyncDayItem[] = rawDays.map((d) => {
+    const totalSeconds = clampSeconds(d.total_seconds);
+    return {
+      id: d.id,
+      syncRunId: d.sync_run_id,
+      date: truncateText(d.date, MAX_LABEL_LENGTH),
+      status: allowlistedValue(d.status, SYNC_DAY_STATUSES),
+      summariesStatus: allowlistedNullableValue(d.summaries_status, SYNC_STEP_STATUSES),
+      durationsStatus: allowlistedNullableValue(d.durations_status, SYNC_STEP_STATUSES),
+      heartbeatsStatus: allowlistedNullableValue(d.heartbeats_status, SYNC_STEP_STATUSES),
+      totalSeconds,
+      formattedDuration: formatDuration(totalSeconds),
+      heartbeatCount: clampCount(d.heartbeat_count),
+      errorMessage: truncateNullableText(d.error_message),
+      syncedAt: truncateText(d.synced_at, MAX_LABEL_LENGTH)
+    };
+  });
 
   const isEmpty = syncRuns.length === 0 && syncDays.length === 0;
 

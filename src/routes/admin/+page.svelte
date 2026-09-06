@@ -399,3 +399,16 @@
     </div>
   </div>
 </AppShell>
+
+<style>
+  :global(.badge.mixed) {
+    color: var(--accent);
+    border-color: rgb(217 134 74 / 0.35);
+    background: var(--accent-soft);
+  }
+  :global(.badge.unclassified) {
+    color: var(--muted);
+    border-color: var(--border-strong);
+    background: var(--panel-raised);
+  }
+</style>

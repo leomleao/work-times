@@ -1,3 +1,4 @@
+export * from './sanitize.js';
 export * from './overview.js';
 export * from './activity.js';
 export * from './sync.js';

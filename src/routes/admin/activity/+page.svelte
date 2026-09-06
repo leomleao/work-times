@@ -81,6 +81,15 @@
     </div>
   </header>
 
+  {#if activity.isTruncated}
+    <div class="notice warning" role="status">
+      <strong>Partial view.</strong>
+      This selection holds more than {activity.maxSlices.toLocaleString()} slices, so only the
+      first {activity.maxSlices.toLocaleString()} were loaded. The totals and counts below
+      describe that capped set, not the full range — narrow the date filter for exact figures.
+    </div>
+  {/if}
+
   <!-- Summary KPI Cards for active view -->
   <section class="metrics" aria-label="Activity volume metrics">
     <MetricCard

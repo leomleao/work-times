@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { basename } from 'node:path';
 import type { RuntimeConfig } from '../config.js';
+import { clampCount, truncateText, MAX_LABEL_LENGTH } from './sanitize.js';
 
 export interface SqliteStatus {
   journalMode: string;
@@ -49,19 +50,26 @@ export interface SettingsViewData {
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/**
+ * Reduce a configured database path to the least it can say and stay useful.
+ *
+ * The deployment path routinely embeds a home directory, an operator username,
+ * or a customer-specific mount, none of which the settings page needs. The
+ * result discloses at most the generic `./data/` marker plus the file's own
+ * name -- intermediate directories between the marker and the file are dropped
+ * too, since a nested layout is itself deployment detail.
+ */
 export function abbreviateDatabasePath(path: string): string {
   if (!path || path === ':memory:') return ':memory:';
-  // If path contains data/, show ./data/...
-  const dataIdx = path.lastIndexOf('/data/');
-  if (dataIdx !== -1) {
-    return `.${path.slice(dataIdx)}`;
-  }
-  const file = basename(path);
-  return `.../${file}`;
+
+  const file = truncateText(basename(path), MAX_LABEL_LENGTH);
+  if (!file) return ':memory:';
+
+  return /(^|\/)data\//.test(path) ? `./data/${file}` : `.../${file}`;
 }
 
 function getTableCount(db: Database.Database, table: string): number {
@@ -69,7 +77,7 @@ function getTableCount(db: Database.Database, table: string): number {
     const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as
       | { count: number }
       | undefined;
-    return row?.count ?? 0;
+    return clampCount(row?.count);
   } catch {
     return 0;
   }
@@ -91,7 +99,7 @@ export function getSettingsData(db: Database.Database, config: RuntimeConfig): S
 
   try {
     const jm = db.pragma('journal_mode', { simple: true });
-    if (typeof jm === 'string') journalMode = jm.toUpperCase();
+    if (typeof jm === 'string') journalMode = truncateText(jm, 32).toUpperCase();
 
     const ps = db.pragma('page_size', { simple: true });
     if (typeof ps === 'number') pageSize = ps;
@@ -100,7 +108,7 @@ export function getSettingsData(db: Database.Database, config: RuntimeConfig): S
     if (typeof pc === 'number') pageCount = pc;
   } catch {}
 
-  const estimatedSizeBytes = pageSize * pageCount;
+  const estimatedSizeBytes = clampCount(pageSize * pageCount);
 
   const tableCounts = {
     sourceImports: getTableCount(db, 'source_imports'),
@@ -145,15 +153,17 @@ export function getSettingsData(db: Database.Database, config: RuntimeConfig): S
     } | undefined;
 
   if (accRow) {
+    // Timezone, plan and the timestamp are copied verbatim from the WakaTime
+    // account payload at import time, so they are bounded before display.
     accountPreferences = {
-      timezone: accRow.timezone,
+      timezone: truncateText(accRow.timezone, MAX_LABEL_LENGTH),
       weekdayStart: accRow.weekday_start,
       weekdayStartLabel: accRow.weekday_start === 1 ? 'Monday (ISO)' : 'Sunday',
-      keystrokeTimeoutSeconds: accRow.keystroke_timeout_seconds,
+      keystrokeTimeoutSeconds: clampCount(accRow.keystroke_timeout_seconds),
       writesOnly: Boolean(accRow.writes_only),
-      plan: accRow.plan,
+      plan: truncateText(accRow.plan, MAX_LABEL_LENGTH),
       hasPremiumFeatures: Boolean(accRow.has_premium_features),
-      updatedAt: accRow.updated_at
+      updatedAt: truncateText(accRow.updated_at, MAX_LABEL_LENGTH)
     };
   }
 

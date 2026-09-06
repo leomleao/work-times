@@ -1,5 +1,14 @@
 import type Database from 'better-sqlite3';
 import type { SqliteClassificationService, EvaluatedSlice } from '../classification/sqlite.js';
+import {
+  allowlistedValue,
+  clampCount,
+  clampSeconds,
+  truncateText,
+  MAX_LABEL_LENGTH,
+  SOURCE_IMPORT_STATUSES,
+  SOURCE_IMPORT_TYPES
+} from './sanitize.js';
 
 export interface OverviewDateSpan {
   minDate: string | null;
@@ -33,7 +42,7 @@ export interface OverviewTopProject {
   formattedTime: string;
   sliceCount: number;
   aiSessions: number;
-  classification: 'work' | 'personal' | 'unclassified';
+  classification: 'work' | 'personal' | 'mixed' | 'unclassified';
   workSeconds: number;
   personalSeconds: number;
   unclassifiedSeconds: number;
@@ -110,13 +119,28 @@ export function getOverviewData(
   db: Database.Database,
   classification: SqliteClassificationService
 ): OverviewData {
-  // 1. Date span and totals from daily_totals
-  let dailyRow = db
+  // 1. Date span and active days from positive/slice-bearing days
+  const activeDatesRow = db
     .prepare(
       `SELECT
         MIN(date) AS min_date,
         MAX(date) AS max_date,
-        COUNT(DISTINCT date) AS active_days,
+        COUNT(DISTINCT date) AS active_days
+       FROM (
+         SELECT date FROM daily_totals WHERE total_seconds > 0
+         UNION
+         SELECT date FROM day_project_entity_slices WHERE total_seconds > 0
+       )`
+    )
+    .get() as {
+      min_date: string | null;
+      max_date: string | null;
+      active_days: number;
+    } | undefined;
+
+  const totalsRow = db
+    .prepare(
+      `SELECT
         COALESCE(SUM(total_seconds), 0) AS total_seconds,
         COALESCE(SUM(ai_sessions), 0) AS total_ai_sessions,
         COALESCE(SUM(ai_input_tokens + ai_cached_input_tokens + ai_output_tokens), 0) AS total_ai_tokens,
@@ -124,23 +148,22 @@ export function getOverviewData(
       FROM daily_totals`
     )
     .get() as {
-      min_date: string | null;
-      max_date: string | null;
-      active_days: number;
       total_seconds: number;
       total_ai_sessions: number;
       total_ai_tokens: number;
       total_ai_additions: number;
     } | undefined;
 
-  // Fallback to day_project_entity_slices if daily_totals is empty but slices exist
-  if (!dailyRow || dailyRow.active_days === 0) {
-    const sliceSpan = db
+  let totalSeconds = totalsRow?.total_seconds ?? 0;
+  let totalAiSessions = totalsRow?.total_ai_sessions ?? 0;
+  let totalAiTokens = totalsRow?.total_ai_tokens ?? 0;
+  let totalAiAdditions = totalsRow?.total_ai_additions ?? 0;
+
+  // Fallback to day_project_entity_slices if daily_totals has 0 seconds but slices exist
+  if (totalSeconds === 0 && (activeDatesRow?.active_days ?? 0) > 0) {
+    const sliceTotals = db
       .prepare(
         `SELECT
-          MIN(date) AS min_date,
-          MAX(date) AS max_date,
-          COUNT(DISTINCT date) AS active_days,
           COALESCE(SUM(total_seconds), 0) AS total_seconds,
           COALESCE(SUM(ai_sessions), 0) AS total_ai_sessions,
           0 AS total_ai_tokens,
@@ -148,33 +171,33 @@ export function getOverviewData(
         FROM day_project_entity_slices`
       )
       .get() as {
-        min_date: string | null;
-        max_date: string | null;
-        active_days: number;
         total_seconds: number;
         total_ai_sessions: number;
         total_ai_tokens: number;
         total_ai_additions: number;
       } | undefined;
 
-    if (sliceSpan && sliceSpan.active_days > 0) {
-      dailyRow = sliceSpan;
+    if (sliceTotals) {
+      totalSeconds = sliceTotals.total_seconds;
+      totalAiSessions = sliceTotals.total_ai_sessions;
+      totalAiTokens = sliceTotals.total_ai_tokens;
+      totalAiAdditions = sliceTotals.total_ai_additions;
     }
   }
 
   const dateSpan: OverviewDateSpan = {
-    minDate: dailyRow?.min_date ?? null,
-    maxDate: dailyRow?.max_date ?? null,
-    activeDays: dailyRow?.active_days ?? 0,
-    totalSeconds: dailyRow?.total_seconds ?? 0,
-    totalAiSessions: dailyRow?.total_ai_sessions ?? 0,
-    totalAiTokens: dailyRow?.total_ai_tokens ?? 0,
-    totalAiAdditions: dailyRow?.total_ai_additions ?? 0
+    minDate: activeDatesRow?.min_date ?? null,
+    maxDate: activeDatesRow?.max_date ?? null,
+    activeDays: clampCount(activeDatesRow?.active_days),
+    totalSeconds: clampSeconds(totalSeconds),
+    totalAiSessions: clampCount(totalAiSessions),
+    totalAiTokens: clampCount(totalAiTokens),
+    totalAiAdditions: clampCount(totalAiAdditions)
   };
 
   // 2. Heartbeat count
   const hbRow = db.prepare('SELECT COUNT(*) AS count FROM heartbeats').get() as { count: number };
-  const heartbeatCount = hbRow?.count ?? 0;
+  const heartbeatCount = clampCount(hbRow?.count);
 
   // 3. Source import state
   const totalImportsRow = db
@@ -200,18 +223,20 @@ export function getOverviewData(
     } | undefined;
 
   const sourceImportState: OverviewSourceImportState = {
-    totalImports: totalImportsRow?.count ?? 0,
+    totalImports: clampCount(totalImportsRow?.count),
     latestImport: latestImportRow
       ? {
           id: latestImportRow.id,
-          sourceType: latestImportRow.source_type,
-          status: latestImportRow.status,
-          startedAt: latestImportRow.started_at,
-          finishedAt: latestImportRow.finished_at,
-          dayCount: latestImportRow.day_count,
-          recordCount: latestImportRow.record_count,
-          duplicateCount: latestImportRow.duplicate_count,
-          conflictCount: latestImportRow.conflict_count
+          sourceType: allowlistedValue(latestImportRow.source_type, SOURCE_IMPORT_TYPES),
+          status: allowlistedValue(latestImportRow.status, SOURCE_IMPORT_STATUSES),
+          startedAt: truncateText(latestImportRow.started_at, MAX_LABEL_LENGTH),
+          finishedAt: latestImportRow.finished_at
+            ? truncateText(latestImportRow.finished_at, MAX_LABEL_LENGTH)
+            : null,
+          dayCount: clampCount(latestImportRow.day_count),
+          recordCount: clampCount(latestImportRow.record_count),
+          duplicateCount: clampCount(latestImportRow.duplicate_count),
+          conflictCount: clampCount(latestImportRow.conflict_count)
         }
       : null
   };
@@ -250,7 +275,11 @@ export function getOverviewData(
     let entry = projectMap.get(slice.projectId);
     if (!entry) {
       entry = {
-        name: slice.projectName ?? (slice.isUnattributed ? '__unattributed__' : `Project #${slice.projectId}`),
+        name: truncateText(
+          slice.projectName ??
+            (slice.isUnattributed ? '__unattributed__' : `Project #${slice.projectId}`),
+          MAX_LABEL_LENGTH
+        ),
         projectId: slice.projectId,
         totalSeconds: 0,
         sliceCount: 0,
@@ -298,11 +327,15 @@ export function getOverviewData(
     .sort((a, b) => b.totalSeconds - a.totalSeconds)
     .slice(0, 5)
     .map((p) => {
-      let classification: 'work' | 'personal' | 'unclassified' = 'unclassified';
-      if (p.workSeconds >= p.personalSeconds && p.workSeconds >= p.unclassifiedSeconds && p.workSeconds > 0) {
+      let classification: 'work' | 'personal' | 'mixed' | 'unclassified' = 'unclassified';
+      if (p.workSeconds > 0 && p.personalSeconds === 0 && p.unclassifiedSeconds === 0) {
         classification = 'work';
-      } else if (p.personalSeconds >= p.workSeconds && p.personalSeconds >= p.unclassifiedSeconds && p.personalSeconds > 0) {
+      } else if (p.personalSeconds > 0 && p.workSeconds === 0 && p.unclassifiedSeconds === 0) {
         classification = 'personal';
+      } else if (p.unclassifiedSeconds > 0 && p.workSeconds === 0 && p.personalSeconds === 0) {
+        classification = 'unclassified';
+      } else if (p.totalSeconds > 0) {
+        classification = 'mixed';
       }
 
       return {
@@ -331,20 +364,49 @@ export function getOverviewData(
     )
     .all() as Array<{ name: string; total_seconds: number }>;
 
-  const totalEditorSeconds = editorRows.reduce((sum, r) => sum + r.total_seconds, 0);
-  const topEditors: OverviewTopEditor[] = editorRows.map((r) => ({
-    name: r.name,
-    totalSeconds: r.total_seconds,
-    formattedTime: formatDuration(r.total_seconds),
-    sharePercent: totalEditorSeconds > 0 ? Math.round((r.total_seconds / totalEditorSeconds) * 100) : 0
-  }));
+  // Editor names arrive from WakaTime dimension payloads, so they are bounded
+  // before they reach the page.
+  const totalEditorSeconds = editorRows.reduce((sum, r) => sum + clampSeconds(r.total_seconds), 0);
+  const topEditors: OverviewTopEditor[] = editorRows.map((r) => {
+    const totalSeconds = clampSeconds(r.total_seconds);
+    return {
+      name: truncateText(r.name, MAX_LABEL_LENGTH),
+      totalSeconds,
+      formattedTime: formatDuration(totalSeconds),
+      sharePercent:
+        totalEditorSeconds > 0 ? Math.round((totalSeconds / totalEditorSeconds) * 100) : 0
+    };
+  });
 
-  // 7. Recent activity from daily_totals
+  // 7. Recent activity from positive/slice-bearing dates
   const recentDays = db
     .prepare(
-      `SELECT date, total_seconds, ai_sessions, human_additions, human_deletions, ai_additions, ai_deletions
-       FROM daily_totals
-       ORDER BY date DESC
+      `SELECT
+        d.date,
+        COALESCE(dt.total_seconds, ds.total_seconds, 0) AS total_seconds,
+        COALESCE(dt.ai_sessions, ds.ai_sessions, 0) AS ai_sessions,
+        COALESCE(dt.human_additions, ds.human_additions, 0) AS human_additions,
+        COALESCE(dt.human_deletions, ds.human_deletions, 0) AS human_deletions,
+        COALESCE(dt.ai_additions, ds.ai_additions, 0) AS ai_additions,
+        COALESCE(dt.ai_deletions, ds.ai_deletions, 0) AS ai_deletions
+       FROM (
+         SELECT date FROM daily_totals WHERE total_seconds > 0
+         UNION
+         SELECT date FROM day_project_entity_slices WHERE total_seconds > 0
+       ) d
+       LEFT JOIN daily_totals dt ON dt.date = d.date AND dt.total_seconds > 0
+       LEFT JOIN (
+         SELECT date,
+                SUM(total_seconds) AS total_seconds,
+                SUM(ai_sessions) AS ai_sessions,
+                SUM(human_additions) AS human_additions,
+                SUM(human_deletions) AS human_deletions,
+                SUM(ai_additions) AS ai_additions,
+                SUM(ai_deletions) AS ai_deletions
+         FROM day_project_entity_slices
+         GROUP BY date
+       ) ds ON ds.date = d.date
+       ORDER BY d.date DESC
        LIMIT 14`
     )
     .all() as Array<{

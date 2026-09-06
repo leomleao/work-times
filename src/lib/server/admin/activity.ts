@@ -1,6 +1,23 @@
 import type Database from 'better-sqlite3';
 import type { SqliteClassificationService, EvaluatedSlice } from '../classification/sqlite.js';
 import { formatDuration } from './overview.js';
+import { boundedStringList, clampCount, clampSeconds, truncateText, MAX_LABEL_LENGTH } from './sanitize.js';
+
+/** Distinct dates offered by the date picker. */
+export const MAX_DISTINCT_DATES = 60;
+/**
+ * Hard cap on slices materialized for one activity view.
+ *
+ * The date-range validator already caps a query at 366 days, but a single busy
+ * day can carry tens of thousands of slices, and every one of them is loaded,
+ * classified and sorted in memory before pagination. The cap keeps one request
+ * bounded regardless of how much history the database holds; when it bites,
+ * `isTruncated` says so rather than letting the page imply the totals are
+ * complete.
+ */
+export const MAX_ACTIVITY_SLICES = 20_000;
+/** Identity selectors surfaced per slice row. */
+export const MAX_SLICE_SELECTORS = 10;
 
 export interface ActivityFilterQuery {
   date?: string | null;
@@ -64,15 +81,227 @@ export interface ActivityData {
   distinctDates: string[];
   latestDate: string | null;
   isEmpty: boolean;
+  /**
+   * True when `MAX_ACTIVITY_SLICES` capped the slices considered, so the totals
+   * and counts describe only the capped set. The page must say so rather than
+   * present them as the full picture.
+   */
+  isTruncated: boolean;
+  /** The cap that produced `isTruncated`, so the UI can name the limit. */
+  maxSlices: number;
 }
 
-const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+export interface ValidatedActivityFilters {
+  date: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  classification: 'all' | 'work' | 'personal' | 'unclassified';
+  q: string;
+  page: number;
+  pageSize: number;
+}
 
-function isValidDateString(str: string): boolean {
-  if (!DATE_REGEX.test(str)) return false;
-  const t = Date.parse(str + 'T00:00:00Z');
-  if (Number.isNaN(t)) return false;
-  return new Date(t).toISOString().slice(0, 10) === str;
+export type ActivityValidationResult =
+  | { ok: true; filters: ValidatedActivityFilters }
+  | { ok: false; error: string };
+
+/**
+ * Rejection of a user-supplied activity query.
+ *
+ * Carries the HTTP status the loader should surface: a malformed `?date=` or
+ * `?page=` is a bad request, not a server fault, so it must not render as a
+ * 500. The message is built from the validator's own text and never echoes an
+ * unbounded slice of the raw query string.
+ */
+export class ActivityFilterError extends Error {
+  readonly status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ActivityFilterError';
+  }
+}
+
+/**
+ * Echo an offending query value back in an error message without letting the
+ * caller choose how long that message is.
+ */
+function echoValue(value: unknown): string {
+  return truncateText(value, 64);
+}
+
+export function parseStrictIsoDate(str: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) return null;
+  const [yStr, mStr, dStr] = str.split('-');
+  const y = Number(yStr);
+  const m = Number(mStr);
+  const d = Number(dStr);
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (
+    date.getUTCFullYear() !== y ||
+    date.getUTCMonth() !== m - 1 ||
+    date.getUTCDate() !== d
+  ) {
+    return null;
+  }
+  return str;
+}
+
+export function parseStrictPositiveInteger(val: unknown): number | null {
+  if (typeof val === 'number') {
+    if (Number.isSafeInteger(val) && val >= 1) return val;
+    return null;
+  }
+  if (typeof val === 'string') {
+    if (!/^[1-9]\d*$/.test(val)) return null;
+    const n = Number(val);
+    if (Number.isSafeInteger(n) && n >= 1) return n;
+    return null;
+  }
+  return null;
+}
+
+export function validateActivityFilterQuery(
+  rawFilters: ActivityFilterQuery
+): ActivityValidationResult {
+  // 1. Validate date
+  let selectedDate: string | null = null;
+  if (rawFilters.date !== undefined && rawFilters.date !== null && rawFilters.date !== '') {
+    if (typeof rawFilters.date !== 'string') {
+      return { ok: false, error: 'date must be a valid ISO date string (YYYY-MM-DD).' };
+    }
+    const parsed = parseStrictIsoDate(rawFilters.date);
+    if (!parsed) {
+      return { ok: false, error: `Invalid date '${echoValue(rawFilters.date)}': must be a valid ISO calendar date (YYYY-MM-DD).` };
+    }
+    selectedDate = parsed;
+  }
+
+  // 2. Validate startDate and endDate
+  let startDate: string | null = null;
+  if (rawFilters.startDate !== undefined && rawFilters.startDate !== null && rawFilters.startDate !== '') {
+    if (typeof rawFilters.startDate !== 'string') {
+      return { ok: false, error: 'startDate must be a valid ISO date string (YYYY-MM-DD).' };
+    }
+    const parsed = parseStrictIsoDate(rawFilters.startDate);
+    if (!parsed) {
+      return { ok: false, error: `Invalid startDate '${echoValue(rawFilters.startDate)}': must be a valid ISO calendar date (YYYY-MM-DD).` };
+    }
+    startDate = parsed;
+  }
+
+  let endDate: string | null = null;
+  if (rawFilters.endDate !== undefined && rawFilters.endDate !== null && rawFilters.endDate !== '') {
+    if (typeof rawFilters.endDate !== 'string') {
+      return { ok: false, error: 'endDate must be a valid ISO date string (YYYY-MM-DD).' };
+    }
+    const parsed = parseStrictIsoDate(rawFilters.endDate);
+    if (!parsed) {
+      return { ok: false, error: `Invalid endDate '${echoValue(rawFilters.endDate)}': must be a valid ISO calendar date (YYYY-MM-DD).` };
+    }
+    endDate = parsed;
+  }
+
+  // Selected date mutually exclusive with range
+  if (selectedDate && (startDate || endDate)) {
+    return { ok: false, error: 'Selected date cannot be combined with startDate or endDate range filters.' };
+  }
+
+  // Both range bounds required
+  if ((startDate && !endDate) || (!startDate && endDate)) {
+    return { ok: false, error: 'Both startDate and endDate are required when querying a date range.' };
+  }
+
+  // start <= end and hard maximum 366-day range
+  if (startDate && endDate) {
+    if (startDate > endDate) {
+      return { ok: false, error: `startDate (${startDate}) must be less than or equal to endDate (${endDate}).` };
+    }
+    const startMs = Date.parse(`${startDate}T00:00:00Z`);
+    const endMs = Date.parse(`${endDate}T00:00:00Z`);
+    const diffDays = Math.round((endMs - startMs) / 86_400_000) + 1;
+    if (diffDays > 366) {
+      return { ok: false, error: `Date range of ${diffDays} days exceeds the maximum allowed 366-day range.` };
+    }
+  }
+
+  // 3. Page bounds
+  let page = 1;
+  if (rawFilters.page !== undefined && rawFilters.page !== null && rawFilters.page !== '') {
+    const parsedPage = parseStrictPositiveInteger(rawFilters.page);
+    if (parsedPage === null || parsedPage > 100_000) {
+      return { ok: false, error: 'page must be a safe positive integer (1 to 100,000).' };
+    }
+    page = parsedPage;
+  }
+
+  // 4. PageSize bounds
+  let pageSize = 50;
+  if (rawFilters.pageSize !== undefined && rawFilters.pageSize !== null && rawFilters.pageSize !== '') {
+    const parsedPageSize = parseStrictPositiveInteger(rawFilters.pageSize);
+    if (parsedPageSize === null || parsedPageSize > 100) {
+      return { ok: false, error: 'pageSize must be a safe integer between 1 and 100.' };
+    }
+    pageSize = parsedPageSize;
+  }
+
+  // 5. Classification allowlist
+  let classification: 'all' | 'work' | 'personal' | 'unclassified' = 'all';
+  if (rawFilters.classification !== undefined && rawFilters.classification !== null && rawFilters.classification !== '') {
+    if (
+      rawFilters.classification !== 'all' &&
+      rawFilters.classification !== 'work' &&
+      rawFilters.classification !== 'personal' &&
+      rawFilters.classification !== 'unclassified'
+    ) {
+      return { ok: false, error: `Invalid classification '${echoValue(rawFilters.classification)}': must be 'all', 'work', 'personal', or 'unclassified'.` };
+    }
+    classification = rawFilters.classification;
+  }
+
+  // 6. Query text
+  let q = '';
+  if (rawFilters.q !== undefined && rawFilters.q !== null) {
+    if (typeof rawFilters.q !== 'string') {
+      return { ok: false, error: 'Query parameter q must be a string.' };
+    }
+    if (rawFilters.q.length > 200) {
+      return { ok: false, error: 'Query parameter q cannot exceed 200 characters.' };
+    }
+    q = rawFilters.q.trim();
+  }
+
+  return {
+    ok: true,
+    filters: {
+      date: selectedDate,
+      startDate,
+      endDate,
+      classification,
+      q,
+      page,
+      pageSize
+    }
+  };
+}
+
+/**
+ * The single pagination shape for a result with no rows.
+ *
+ * Both empty paths -- an empty database and a filter that matches nothing --
+ * route through this so a caller can never see `totalPages: 0` alongside a
+ * `hasNextPage: true`, or a page number that differs between the two.
+ */
+function emptyPagination(page: number, pageSize: number): ActivityData['pagination'] {
+  return {
+    page,
+    pageSize,
+    totalItems: 0,
+    totalPages: 0,
+    hasNextPage: false,
+    hasPrevPage: false
+  };
 }
 
 export function getActivityData(
@@ -80,6 +309,12 @@ export function getActivityData(
   classification: SqliteClassificationService,
   rawFilters: ActivityFilterQuery
 ): ActivityData {
+  const validation = validateActivityFilterQuery(rawFilters);
+  if (!validation.ok) {
+    throw new ActivityFilterError(validation.error);
+  }
+  const validated = validation.filters;
+
   // 1. Discover latest slice-bearing date and available distinct dates
   const latestDateRow = db
     .prepare('SELECT MAX(date) AS max_date FROM day_project_entity_slices')
@@ -87,28 +322,25 @@ export function getActivityData(
   const latestDate = latestDateRow?.max_date ?? null;
 
   const distinctDateRows = db
-    .prepare('SELECT DISTINCT date FROM day_project_entity_slices ORDER BY date DESC LIMIT 60')
-    .all() as Array<{ date: string }>;
+    .prepare('SELECT DISTINCT date FROM day_project_entity_slices ORDER BY date DESC LIMIT ?')
+    .all(MAX_DISTINCT_DATES) as Array<{ date: string }>;
   const distinctDates = distinctDateRows.map((r) => r.date);
 
   // If the database has no slices at all
   if (!latestDate || distinctDates.length === 0) {
     return {
       items: [],
-      pagination: {
-        page: 1,
-        pageSize: 50,
-        totalItems: 0,
-        totalPages: 0,
-        hasNextPage: false,
-        hasPrevPage: false
-      },
+      // Same pagination shape an in-range query with no matches produces, so
+      // the empty database and the empty filter render identically.
+      pagination: emptyPagination(validated.page, validated.pageSize),
+      // The requested filters are echoed rather than blanked: the page shows
+      // the query the operator actually ran, not a query nobody made.
       filters: {
-        selectedDate: null,
-        startDate: null,
-        endDate: null,
-        classification: 'all',
-        q: ''
+        selectedDate: validated.date,
+        startDate: validated.startDate,
+        endDate: validated.endDate,
+        classification: validated.classification,
+        q: validated.q
       },
       metrics: {
         totalDurationSeconds: 0,
@@ -121,59 +353,26 @@ export function getActivityData(
       },
       distinctDates: [],
       latestDate: null,
-      isEmpty: true
+      isEmpty: true,
+      isTruncated: false,
+      maxSlices: MAX_ACTIVITY_SLICES
     };
   }
 
-  // 2. Validate and normalize filter inputs
-  let selectedDate: string | null = null;
-  let startDate: string | null = null;
-  let endDate: string | null = null;
-
-  if (rawFilters.date && isValidDateString(rawFilters.date.trim())) {
-    selectedDate = rawFilters.date.trim();
-  }
-
-  if (rawFilters.startDate && isValidDateString(rawFilters.startDate.trim())) {
-    startDate = rawFilters.startDate.trim();
-  }
-
-  if (rawFilters.endDate && isValidDateString(rawFilters.endDate.trim())) {
-    endDate = rawFilters.endDate.trim();
-  }
+  // 2. Resolve date filter
+  let selectedDate = validated.date;
+  const startDate = validated.startDate;
+  const endDate = validated.endDate;
 
   // "Default to the latest slice-bearing date/range"
   if (!selectedDate && !startDate && !endDate) {
     selectedDate = latestDate;
   }
 
-  let classificationFilter: 'all' | 'work' | 'personal' | 'unclassified' = 'all';
-  if (
-    rawFilters.classification === 'work' ||
-    rawFilters.classification === 'personal' ||
-    rawFilters.classification === 'unclassified'
-  ) {
-    classificationFilter = rawFilters.classification;
-  }
-
-  const q = typeof rawFilters.q === 'string' ? rawFilters.q.trim().slice(0, 100) : '';
-
-  // Pagination validation
-  let page = 1;
-  if (rawFilters.page !== undefined && rawFilters.page !== null) {
-    const parsedPage = Number.parseInt(String(rawFilters.page), 10);
-    if (Number.isSafeInteger(parsedPage) && parsedPage >= 1) {
-      page = parsedPage;
-    }
-  }
-
-  let pageSize = 50;
-  if (rawFilters.pageSize !== undefined && rawFilters.pageSize !== null) {
-    const parsedSize = Number.parseInt(String(rawFilters.pageSize), 10);
-    if (Number.isSafeInteger(parsedSize) && parsedSize >= 1 && parsedSize <= 100) {
-      pageSize = parsedSize;
-    }
-  }
+  const classificationFilter = validated.classification;
+  const q = validated.q;
+  const page = validated.page;
+  const pageSize = validated.pageSize;
 
   // 3. Load classified slices for the bounded date or range
   const sliceFilter: { date?: string; startDate?: string; endDate?: string } = {};
@@ -184,7 +383,11 @@ export function getActivityData(
     if (endDate) sliceFilter.endDate = endDate;
   }
 
-  const classifiedSlices: EvaluatedSlice[] = classification.classifySlices(sliceFilter);
+  const loadedSlices: EvaluatedSlice[] = classification.classifySlices(sliceFilter);
+  const isTruncated = loadedSlices.length > MAX_ACTIVITY_SLICES;
+  const classifiedSlices = isTruncated
+    ? loadedSlices.slice(0, MAX_ACTIVITY_SLICES)
+    : loadedSlices;
 
   // Load telemetry metrics (ai_sessions, additions, deletions) for these slices
   const sliceIds = classifiedSlices.map((s) => s.id);
@@ -261,68 +464,80 @@ export function getActivityData(
   let totalAiSessions = 0;
 
   for (const s of filteredSlices) {
-    totalDurationSeconds += s.totalSeconds;
+    const seconds = clampSeconds(s.totalSeconds);
+    totalDurationSeconds += seconds;
     const telem = telemetryMap.get(s.id);
     if (telem) {
-      totalAiSessions += telem.ai_sessions;
+      totalAiSessions += clampCount(telem.ai_sessions);
     }
 
     switch (s.decision.classification) {
       case 'work':
-        workSeconds += s.totalSeconds;
+        workSeconds += seconds;
         break;
       case 'personal':
-        personalSeconds += s.totalSeconds;
+        personalSeconds += seconds;
         break;
       default:
-        unclassifiedSeconds += s.totalSeconds;
+        unclassifiedSeconds += seconds;
         break;
     }
   }
 
   // 6. Paginate results
   const totalItems = filteredSlices.length;
-  const totalPages = Math.ceil(totalItems / pageSize) || 1;
-  const safePage = Math.min(Math.max(1, page), totalPages);
-  const startIndex = (safePage - 1) * pageSize;
-  const pageSlices = filteredSlices.slice(startIndex, startIndex + pageSize);
+  const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / pageSize);
+  const startIndex = (page - 1) * pageSize;
+  const pageSlices =
+    totalItems === 0 || page > totalPages
+      ? []
+      : filteredSlices.slice(startIndex, startIndex + pageSize);
 
+  // Entity paths, project names and identity selectors all originate in
+  // WakaTime payloads, so each row is bounded before it reaches the page.
   const items: ActivitySliceItem[] = pageSlices.map((s) => {
     const telem = telemetryMap.get(s.id);
+    const totalSeconds = clampSeconds(s.totalSeconds);
     return {
       id: s.id,
       date: s.date,
       projectId: s.projectId,
-      projectName: s.projectName ?? (s.isUnattributed ? '__unattributed__' : `Project #${s.projectId}`),
-      entity: s.entity,
+      projectName: truncateText(
+        s.projectName ?? (s.isUnattributed ? '__unattributed__' : `Project #${s.projectId}`),
+        MAX_LABEL_LENGTH
+      ),
+      entity: truncateText(s.entity, MAX_LABEL_LENGTH),
       entityType: s.entityType,
-      totalSeconds: s.totalSeconds,
-      formattedDuration: formatDuration(s.totalSeconds),
+      totalSeconds,
+      formattedDuration: formatDuration(totalSeconds),
       isUnattributed: s.isUnattributed,
-      machineIds: s.machineIds,
-      editors: s.editors,
+      machineIds: boundedStringList(s.machineIds, MAX_SLICE_SELECTORS),
+      editors: boundedStringList(s.editors, MAX_SLICE_SELECTORS),
       classification: s.decision.classification,
       decisionSource: s.decision.source,
       winningRuleId: s.decision.winningRuleId,
       hasOverride: Boolean(s.allocation),
-      aiSessions: telem?.ai_sessions ?? 0,
-      aiAdditions: telem?.ai_additions ?? 0,
-      aiDeletions: telem?.ai_deletions ?? 0,
-      humanAdditions: telem?.human_additions ?? 0,
-      humanDeletions: telem?.human_deletions ?? 0
+      aiSessions: clampCount(telem?.ai_sessions),
+      aiAdditions: clampCount(telem?.ai_additions),
+      aiDeletions: clampCount(telem?.ai_deletions),
+      humanAdditions: clampCount(telem?.human_additions),
+      humanDeletions: clampCount(telem?.human_deletions)
     };
   });
 
   return {
     items,
-    pagination: {
-      page: safePage,
-      pageSize,
-      totalItems,
-      totalPages,
-      hasNextPage: safePage < totalPages,
-      hasPrevPage: safePage > 1
-    },
+    pagination:
+      totalItems === 0
+        ? emptyPagination(page, pageSize)
+        : {
+            page,
+            pageSize,
+            totalItems,
+            totalPages,
+            hasNextPage: page < totalPages,
+            hasPrevPage: page > 1
+          },
     filters: {
       selectedDate,
       startDate,
@@ -341,6 +556,8 @@ export function getActivityData(
     },
     distinctDates,
     latestDate,
-    isEmpty: false
+    isEmpty: false,
+    isTruncated,
+    maxSlices: MAX_ACTIVITY_SLICES
   };
 }

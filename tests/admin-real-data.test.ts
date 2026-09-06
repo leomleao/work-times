@@ -9,7 +9,13 @@ import {
   getImportsData,
   getSettingsData,
   abbreviateDatabasePath,
-  formatDuration
+  formatDuration,
+  validateActivityFilterQuery,
+  parseCapabilityPolicyState,
+  sourceHashPrefix,
+  truncateText,
+  ActivityFilterError,
+  MAX_ACTIVITY_SLICES
 } from '../src/lib/server/admin/index.js';
 import { load as overviewLoad } from '../src/routes/admin/+page.server.js';
 import { load as activityLoad } from '../src/routes/admin/activity/+page.server.js';
@@ -23,6 +29,49 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
   let db: Database.Database;
   let classification: SqliteClassificationService;
   let mockConfig: RuntimeConfig;
+
+  /** Insert the `source_imports` row every fact table's FK requires. */
+  function seedImport(id = 1, status = 'completed', sourceType = 'daily_dump'): number {
+    db.prepare(
+      `INSERT INTO source_imports (id, source_type, source_hash, byte_size, started_at, status, dry_run, day_count, record_count, duplicate_count, conflict_count)
+       VALUES (?, ?, 'abcdef0123456789', 1024, '2026-09-01T00:00:00Z', ?, 0, 1, 1, 0, 0)`
+    ).run(id, sourceType, status);
+    return id;
+  }
+
+  function seedSlice(fields: {
+    id: number;
+    date: string;
+    projectId: number;
+    entity: string;
+    totalSeconds: number;
+    importId?: number;
+  }): void {
+    db.prepare(
+      `INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, total_seconds, is_unattributed, source_import_id)
+       VALUES (?, ?, ?, ?, 'file', ?, 0, ?)`
+    ).run(
+      fields.id,
+      fields.date,
+      fields.projectId,
+      fields.entity,
+      fields.totalSeconds,
+      fields.importId ?? 1
+    );
+  }
+
+  function seedDailyTotal(date: string, totalSeconds: number, importId = 1): void {
+    db.prepare(
+      `INSERT INTO daily_totals (date, total_seconds, grand_total_json, source_import_id, source_hash)
+       VALUES (?, ?, '{}', ?, 'abcdef0123456789')`
+    ).run(date, totalSeconds, importId);
+  }
+
+  function seedProject(id: number, name: string): void {
+    db.prepare(
+      `INSERT INTO projects (id, name, is_unattributed, first_seen_at, last_seen_at) VALUES (?, ?, 0, '2026-09-01', '2026-09-01')`
+    ).run(id, name);
+  }
 
   beforeEach(() => {
     // Fresh in-memory database with migrations
@@ -376,9 +425,17 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
       expect(page2.pagination.hasNextPage).toBe(false);
       expect(page2.pagination.hasPrevPage).toBe(true);
 
-      // Bounded limit: requests over 100 default back to 50
-      const bounded = getActivityData(db, classification, { pageSize: 999 });
-      expect(bounded.pagination.pageSize).toBe(50);
+      // Out-of-range page sizes are rejected outright rather than silently
+      // clamped: a clamped result would report totals for a page the caller
+      // never asked for.
+      expect(() => getActivityData(db, classification, { pageSize: 999 })).toThrow(
+        ActivityFilterError
+      );
+
+      // The unfiltered default is the documented page size.
+      const defaults = getActivityData(db, classification, {});
+      expect(defaults.pagination.pageSize).toBe(50);
+      expect(defaults.pagination.page).toBe(1);
     });
 
     it('surfaces effective decision, source, and identity selectors', () => {
@@ -471,6 +528,466 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
 
       const settingsRes = await (settingsLoad as any)({} as any);
       expect(settingsRes?.settings).toBeDefined();
+    });
+  });
+
+  describe('8. Activity Query Validation Rejects Malformed Input', () => {
+    it('accepts only strict ISO calendar dates', () => {
+      for (const bad of ['2026-13-01', '2026-02-30', '2026-9-1', '2026-09-01T00:00:00Z', 'yesterday', '  2026-09-01 ']) {
+        const result = validateActivityFilterQuery({ date: bad });
+        expect(result.ok, `expected '${bad}' to be rejected`).toBe(false);
+      }
+
+      // 2026 is not a leap year, so 2026-02-29 must be rejected while the real
+      // leap day is accepted.
+      expect(validateActivityFilterQuery({ date: '2026-02-29' }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ date: '2024-02-29' }).ok).toBe(true);
+    });
+
+    it('accepts only whole-string integers for page and pageSize', () => {
+      for (const bad of ['1.5', '1e3', '0', '-1', ' 2', '2 ', '02x', '', ' ', 'NaN', 'Infinity']) {
+        // An empty/blank page falls back to the default rather than erroring,
+        // so only genuinely malformed values are asserted here.
+        if (bad.trim() === '') continue;
+        expect(validateActivityFilterQuery({ page: bad }).ok, `page '${bad}'`).toBe(false);
+        expect(validateActivityFilterQuery({ pageSize: bad }).ok, `pageSize '${bad}'`).toBe(false);
+      }
+
+      expect(validateActivityFilterQuery({ page: '7', pageSize: '25' })).toMatchObject({
+        ok: true,
+        filters: { page: 7, pageSize: 25 }
+      });
+      // '0100' is not a whole-string integer even though Number() would accept it.
+      expect(validateActivityFilterQuery({ page: '0100' }).ok).toBe(false);
+    });
+
+    it('bounds page and pageSize instead of trusting the caller', () => {
+      expect(validateActivityFilterQuery({ page: 100_001 }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ page: 100_000 }).ok).toBe(true);
+      expect(validateActivityFilterQuery({ pageSize: 101 }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ pageSize: 100 }).ok).toBe(true);
+      expect(validateActivityFilterQuery({ pageSize: Number.MAX_SAFE_INTEGER }).ok).toBe(false);
+    });
+
+    it('treats a selected date and a date range as mutually exclusive', () => {
+      expect(
+        validateActivityFilterQuery({ date: '2026-09-01', startDate: '2026-08-01', endDate: '2026-08-31' }).ok
+      ).toBe(false);
+      expect(validateActivityFilterQuery({ date: '2026-09-01', endDate: '2026-08-31' }).ok).toBe(false);
+    });
+
+    it('requires a complete range with start <= end and at most 366 days', () => {
+      expect(validateActivityFilterQuery({ startDate: '2026-08-01' }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ endDate: '2026-08-31' }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ startDate: '2026-09-02', endDate: '2026-09-01' }).ok).toBe(false);
+
+      // 2024 is a leap year: 2024-01-01..2024-12-31 is exactly 366 days.
+      expect(validateActivityFilterQuery({ startDate: '2024-01-01', endDate: '2024-12-31' }).ok).toBe(true);
+      expect(validateActivityFilterQuery({ startDate: '2024-01-01', endDate: '2025-01-01' }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ startDate: '2026-09-01', endDate: '2026-09-01' }).ok).toBe(true);
+    });
+
+    it('rejects unknown classification values and oversized query text', () => {
+      expect(validateActivityFilterQuery({ classification: 'secret' }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ q: 'x'.repeat(201) }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ q: 'x'.repeat(200) }).ok).toBe(true);
+    });
+
+    it('never echoes an unbounded query value back in the rejection message', () => {
+      const result = validateActivityFilterQuery({ date: 'z'.repeat(5000) });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.length).toBeLessThan(200);
+      }
+    });
+
+    it('surfaces a rejected filter as HTTP 400, not a server fault', async () => {
+      await expect(
+        (activityLoad as any)({
+          url: new URL('http://localhost:3002/admin/activity?date=not-a-date')
+        } as any)
+      ).rejects.toMatchObject({ status: 400 });
+
+      await expect(
+        (activityLoad as any)({
+          url: new URL('http://localhost:3002/admin/activity?page=0')
+        } as any)
+      ).rejects.toMatchObject({ status: 400 });
+
+      await expect(
+        (activityLoad as any)({
+          url: new URL('http://localhost:3002/admin/activity?startDate=2026-09-05&endDate=2026-09-01')
+        } as any)
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('carries a 400 status on the thrown filter error itself', () => {
+      try {
+        getActivityData(db, classification, { pageSize: 0 });
+        throw new Error('expected a rejection');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ActivityFilterError);
+        expect((err as ActivityFilterError).status).toBe(400);
+      }
+    });
+  });
+
+  describe('9. Activity Bounded Rows & Consistent Empty Pagination', () => {
+    it('reports the same pagination shape for an empty database and an empty filter', () => {
+      const emptyDb = getActivityData(db, classification, { page: 3, pageSize: 25 });
+      expect(emptyDb.isEmpty).toBe(true);
+      expect(emptyDb.pagination).toEqual({
+        page: 3,
+        pageSize: 25,
+        totalItems: 0,
+        totalPages: 0,
+        hasNextPage: false,
+        hasPrevPage: false
+      });
+
+      seedImport();
+      seedProject(10, 'proj');
+      seedSlice({ id: 1, date: '2026-09-01', projectId: 10, entity: 'src/a.ts', totalSeconds: 100 });
+
+      // A filter that matches nothing must produce the identical shape.
+      const noMatches = getActivityData(db, classification, {
+        date: '2026-09-01',
+        q: 'no-such-entity',
+        page: 3,
+        pageSize: 25
+      });
+      expect(noMatches.isEmpty).toBe(false);
+      expect(noMatches.items).toEqual([]);
+      expect(noMatches.pagination).toEqual(emptyDb.pagination);
+
+      // A page past the end yields no rows but still reports the real totals,
+      // so the operator can see the selection is non-empty and page back into
+      // it rather than being told the data does not exist.
+      const pastEnd = getActivityData(db, classification, { date: '2026-09-01', page: 9 });
+      expect(pastEnd.items).toEqual([]);
+      expect(pastEnd.pagination.totalItems).toBe(1);
+      expect(pastEnd.pagination.totalPages).toBe(1);
+      expect(pastEnd.pagination.hasNextPage).toBe(false);
+      expect(pastEnd.pagination.hasPrevPage).toBe(true);
+    });
+
+    it('echoes the requested filters back on an empty database instead of blanking them', () => {
+      const result = getActivityData(db, classification, {
+        startDate: '2026-01-01',
+        endDate: '2026-01-31',
+        classification: 'work',
+        q: 'auth'
+      });
+
+      expect(result.isEmpty).toBe(true);
+      expect(result.filters).toEqual({
+        selectedDate: null,
+        startDate: '2026-01-01',
+        endDate: '2026-01-31',
+        classification: 'work',
+        q: 'auth'
+      });
+    });
+
+    it('bounds row output and truncates untrusted slice strings', () => {
+      const longEntity = 'a'.repeat(5000);
+      seedImport();
+      seedProject(10, 'p'.repeat(4000));
+      seedSlice({ id: 1, date: '2026-09-01', projectId: 10, entity: longEntity, totalSeconds: 100 });
+      for (let i = 0; i < 40; i++) {
+        db.prepare(
+          `INSERT INTO slice_identities (slice_id, selector_type, value, source, observed_heartbeats) VALUES (1, 'machine', ?, 'slice', 1)`
+        ).run(`machine-${i}`);
+      }
+
+      const result = getActivityData(db, classification, { date: '2026-09-01' });
+      const item = result.items[0];
+
+      expect(item.entity.length).toBeLessThanOrEqual(121);
+      expect(item.projectName.length).toBeLessThanOrEqual(121);
+      expect(item.machineIds.length).toBeLessThanOrEqual(10);
+      expect(result.distinctDates.length).toBeLessThanOrEqual(60);
+      // Nothing was capped at this size, so the view must not claim otherwise.
+      expect(result.isTruncated).toBe(false);
+      expect(result.maxSlices).toBe(MAX_ACTIVITY_SLICES);
+    });
+  });
+
+  describe('10. Persisted Status, Capability & Diagnostic Sanitization', () => {
+    it('allowlists persisted import statuses and source types', () => {
+      seedImport();
+      // Write values the CHECK constraint forbids, standing in for schema drift
+      // or a row written by an older/newer build.
+      db.pragma('ignore_check_constraints = ON');
+      db.prepare(`UPDATE source_imports SET status = 'pwned', source_type = 'evil' WHERE id = 1`).run();
+      db.pragma('ignore_check_constraints = OFF');
+
+      const imports = getImportsData(db);
+      expect(imports.sourceImports[0].status).toBe('unknown');
+      expect(imports.sourceImports[0].sourceType).toBe('unknown');
+
+      const overview = getOverviewData(db, classification);
+      expect(overview.sourceImportState.latestImport?.status).toBe('unknown');
+      expect(overview.sourceImportState.latestImport?.sourceType).toBe('unknown');
+    });
+
+    it("reports a real 'running' import status rather than mapping it to unknown", () => {
+      seedImport(1, 'running', 'api_summaries');
+
+      expect(getImportsData(db).sourceImports[0].status).toBe('running');
+      expect(getOverviewData(db, classification).sourceImportState.latestImport?.status).toBe('running');
+    });
+
+    it('discloses only a prefix of the import content hash', () => {
+      const fullHash = 'a'.repeat(64);
+      seedImport();
+      db.prepare(`UPDATE source_imports SET source_hash = ? WHERE id = 1`).run(fullHash);
+
+      const imports = getImportsData(db);
+      const row = imports.sourceImports[0];
+      expect(row.sourceHashPrefix).toBe('a'.repeat(12));
+      expect(row.sourceHashPrefix).not.toBe(fullHash);
+      expect(JSON.stringify(imports)).not.toContain(fullHash);
+      expect((row as any).sourceHash).toBeUndefined();
+
+      expect(sourceHashPrefix('deadbeefcafebabe0123')).toBe('deadbeefcafe');
+      expect(sourceHashPrefix('NOT-HEX')).toBe('unknown');
+      expect(sourceHashPrefix(null)).toBe('unknown');
+    });
+
+    it('caps and truncates untrusted import warnings and error summaries', () => {
+      const warnings = Array.from({ length: 80 }, (_, i) => `warning ${i} ${'w'.repeat(2000)}`);
+      seedImport(1, 'failed');
+      db.prepare(`UPDATE source_imports SET warnings_json = ?, error_summary = ? WHERE id = 1`).run(
+        JSON.stringify(warnings),
+        'e'.repeat(10_000)
+      );
+
+      const row = getImportsData(db).sourceImports[0];
+      expect(row.warnings.length).toBe(25);
+      expect(row.omittedWarnings).toBe(55);
+      expect(Math.max(...row.warnings.map((w) => w.length))).toBeLessThanOrEqual(121);
+      expect((row.errorSummary ?? '').length).toBeLessThanOrEqual(501);
+    });
+
+    it('reports a malformed warnings blob as no warnings rather than failing the page', () => {
+      seedImport(1, 'failed');
+      db.prepare(`UPDATE source_imports SET warnings_json = '{not json' WHERE id = 1`).run();
+
+      const row = getImportsData(db).sourceImports[0];
+      expect(row.warnings).toEqual([]);
+      expect(row.omittedWarnings).toBe(0);
+    });
+
+    it('allowlists persisted sync run, day and per-capability statuses', () => {
+      db.prepare(
+        `INSERT INTO sync_runs (id, started_at, trigger, status, day_count, days_synced, days_failed, degraded_capabilities, advisory_codes)
+         VALUES (1, '2026-09-01T00:00:00Z', 'manual', 'succeeded', 1, 1, 0, ?, ?)`
+      ).run(
+        Array.from({ length: 60 }, (_, i) => `cap-${i}`).join(','),
+        Array.from({ length: 60 }, (_, i) => `adv-${i}`).join(',')
+      );
+      db.prepare(
+        `INSERT INTO sync_days (id, sync_run_id, date, status, summaries_status, durations_status, heartbeats_status, total_seconds, heartbeat_count)
+         VALUES (1, 1, '2026-09-01', 'succeeded', 'succeeded', 'restricted', 'skipped', 100.0, 5)`
+      ).run();
+
+      const clean = getSyncData(db, mockConfig);
+      expect(clean.syncRuns[0].status).toBe('succeeded');
+      expect(clean.syncRuns[0].trigger).toBe('manual');
+      expect(clean.syncDays[0].status).toBe('succeeded');
+      expect(clean.syncDays[0].durationsStatus).toBe('restricted');
+      expect(clean.syncRuns[0].degradedCapabilities.length).toBe(25);
+      expect(clean.syncRuns[0].advisoryCodes.length).toBe(25);
+
+      db.pragma('ignore_check_constraints = ON');
+      db.prepare(`UPDATE sync_runs SET status = 'owned', trigger = 'owned' WHERE id = 1`).run();
+      db.prepare(`UPDATE sync_days SET status = 'owned', durations_status = 'owned' WHERE id = 1`).run();
+      db.pragma('ignore_check_constraints = OFF');
+
+      const dirty = getSyncData(db, mockConfig);
+      expect(dirty.syncRuns[0].status).toBe('unknown');
+      expect(dirty.syncRuns[0].trigger).toBe('unknown');
+      expect(dirty.syncDays[0].status).toBe('unknown');
+      expect(dirty.syncDays[0].durationsStatus).toBe('unknown');
+      // A NULL per-capability status stays null rather than becoming 'unknown'.
+      expect(dirty.syncDays[0].heartbeatsStatus).toBe('skipped');
+    });
+
+    it('truncates untrusted sync diagnostics and strips control characters', () => {
+      db.prepare(
+        `INSERT INTO sync_runs (id, started_at, trigger, status, day_count, days_synced, days_failed, summary, error_message)
+         VALUES (1, '2026-09-01T00:00:00Z', 'manual', 'failed', 1, 0, 1, ?, ?)`
+      ).run('s'.repeat(9000), 'line one\nline two\u0007bell');
+
+      const run = getSyncData(db, mockConfig).syncRuns[0];
+      expect((run.summary ?? '').length).toBeLessThanOrEqual(501);
+      expect(run.errorMessage).toBe('line one line two bell');
+      expect(run.errorMessage).not.toContain('\n');
+    });
+
+    it('rejects a capability policy state that is not the expected shape', () => {
+      expect(parseCapabilityPolicyState('{not json')).toBeNull();
+      expect(parseCapabilityPolicyState(JSON.stringify([1, 2, 3]))).toBeNull();
+      expect(parseCapabilityPolicyState(JSON.stringify({ capabilities: 'all of them' }))).toBeNull();
+      expect(parseCapabilityPolicyState(JSON.stringify({ capabilities: { nonsense: {} } }))).toBeNull();
+      expect(parseCapabilityPolicyState(null)).toBeNull();
+    });
+
+    it('rebuilds a persisted capability policy state with allowlisted statuses and bounded strings', () => {
+      db.prepare(
+        `INSERT INTO app_settings (key, value) VALUES ('capability_policy_state', ?)`
+      ).run(
+        JSON.stringify({
+          capabilities: {
+            summaries: { capability: 'summaries', status: 'available', lastProbedAt: '2026-09-01T00:00:00Z', lastSuccessAt: null, nextReprobeAt: null },
+            durations: { capability: 'durations', status: 'pwned', lastProbedAt: null, lastSuccessAt: null, nextReprobeAt: null, errorMessage: 'x'.repeat(9000) },
+            attacker: { capability: 'attacker', status: 'available' }
+          },
+          updatedAt: 'u'.repeat(9000),
+          extraField: 'dropped'
+        })
+      );
+
+      const state = getSyncData(db, mockConfig).capabilityState;
+      expect(state).not.toBeNull();
+      expect(state?.capabilities.summaries.status).toBe('available');
+      // An unrecognized status degrades to 'untested', never to a fake success.
+      expect(state?.capabilities.durations.status).toBe('untested');
+      expect(state?.capabilities.durations.errorMessage?.length).toBeLessThanOrEqual(501);
+      expect(Object.keys(state?.capabilities ?? {})).toEqual(['summaries', 'durations']);
+      expect((state as any).extraField).toBeUndefined();
+      expect(state?.updatedAt.length).toBeLessThanOrEqual(121);
+    });
+
+    it('bounds untrusted editor and project names on the overview', () => {
+      seedImport();
+      seedProject(10, 'p'.repeat(4000));
+      seedSlice({ id: 1, date: '2026-09-01', projectId: 10, entity: 'src/a.ts', totalSeconds: 100 });
+      db.prepare(
+        `INSERT INTO daily_dimension_totals (date, scope, dimension, name, total_seconds, source_import_id)
+         VALUES ('2026-09-01', 'account', 'editor', ?, 100, 1)`
+      ).run('e'.repeat(4000));
+
+      const overview = getOverviewData(db, classification);
+      expect(overview.topEditors[0].name.length).toBeLessThanOrEqual(121);
+      expect(overview.topProjects[0].name.length).toBeLessThanOrEqual(121);
+    });
+
+    it('strips control characters and bounds any untrusted string', () => {
+      expect(truncateText('a\u0000b\u001fc\u007fd')).toBe('a b c d');
+      expect(truncateText('x'.repeat(600)).length).toBe(501);
+      expect(truncateText(null)).toBe('');
+      expect(truncateText(undefined)).toBe('');
+    });
+  });
+
+  describe('11. Overview Counts Only Positive & Slice-Bearing Days', () => {
+    beforeEach(() => {
+      seedImport();
+      // Two zero-second days that must not count as activity, plus a real one.
+      seedDailyTotal('2026-08-01', 0);
+      seedDailyTotal('2026-08-02', 0);
+      seedDailyTotal('2026-08-03', 3600);
+
+      seedProject(10, 'proj');
+      // A slice-bearing day with no daily_totals row at all.
+      seedSlice({ id: 1, date: '2026-08-05', projectId: 10, entity: 'src/a.ts', totalSeconds: 1800 });
+      // A zero-second slice on an otherwise empty day.
+      seedSlice({ id: 2, date: '2026-08-09', projectId: 10, entity: 'src/b.ts', totalSeconds: 0 });
+    });
+
+    it('counts only days that actually carry time', () => {
+      const overview = getOverviewData(db, classification);
+
+      expect(overview.dateSpan.activeDays).toBe(2);
+      expect(overview.dateSpan.minDate).toBe('2026-08-03');
+      expect(overview.dateSpan.maxDate).toBe('2026-08-05');
+      expect(overview.isEmpty).toBe(false);
+    });
+
+    it('lists only positive or slice-bearing days in recent activity', () => {
+      const dates = getOverviewData(db, classification).recentActivity.map((d) => d.date);
+
+      expect(dates).toEqual(['2026-08-05', '2026-08-03']);
+      expect(dates).not.toContain('2026-08-01');
+      expect(dates).not.toContain('2026-08-09');
+      expect(getOverviewData(db, classification).recentActivity.length).toBeLessThanOrEqual(14);
+    });
+  });
+
+  describe('12. Mixed Project Classification Is Never Mislabelled', () => {
+    beforeEach(() => {
+      seedImport();
+      seedProject(10, 'mixed-proj');
+      seedProject(20, 'pure-work');
+      seedProject(30, 'no-rules');
+
+      // mixed-proj: one work slice by rule, one slice left unclassified.
+      seedSlice({ id: 1, date: '2026-09-01', projectId: 10, entity: 'work.ts', totalSeconds: 5000 });
+      seedSlice({ id: 2, date: '2026-09-01', projectId: 10, entity: 'unknown.ts', totalSeconds: 10 });
+      seedSlice({ id: 3, date: '2026-09-01', projectId: 20, entity: 'a.ts', totalSeconds: 4000 });
+      seedSlice({ id: 4, date: '2026-09-01', projectId: 30, entity: 'b.ts', totalSeconds: 3000 });
+
+      classification.unsafeSeedRule({
+        name: 'Work by entity',
+        classification: 'work',
+        selectorType: 'entity',
+        selectorValue: 'work.ts'
+      });
+      classification.unsafeSeedRule({
+        name: 'Pure work project',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'pure-work'
+      });
+    });
+
+    it("labels a partly-classified project 'mixed' rather than borrowing the majority label", () => {
+      const byName = new Map(
+        getOverviewData(db, classification).topProjects.map((p) => [p.name, p])
+      );
+
+      const mixed = byName.get('mixed-proj');
+      expect(mixed?.classification).toBe('mixed');
+      expect(mixed?.workSeconds).toBe(5000);
+      expect(mixed?.unclassifiedSeconds).toBe(10);
+
+      // A project with no classified time at all stays 'unclassified'.
+      expect(byName.get('no-rules')?.classification).toBe('unclassified');
+      // A wholly-classified project keeps its real label.
+      expect(byName.get('pure-work')?.classification).toBe('work');
+    });
+  });
+
+  describe('13. Database Path Disclosure', () => {
+    it('reveals at most a generic ./data marker plus the filename', () => {
+      expect(abbreviateDatabasePath('/Users/leo/secret-client/dev/data/work-times.sqlite')).toBe(
+        './data/work-times.sqlite'
+      );
+      // Directories nested under data/ are deployment detail and are dropped too.
+      expect(
+        abbreviateDatabasePath('/srv/customer-acme/data/tenants/acme-prod/work-times.sqlite')
+      ).toBe('./data/work-times.sqlite');
+      // Without a data/ segment, only the filename survives.
+      expect(abbreviateDatabasePath('/home/operator-jsmith/db/work-times.sqlite')).toBe(
+        '.../work-times.sqlite'
+      );
+      expect(abbreviateDatabasePath(':memory:')).toBe(':memory:');
+
+      for (const path of [
+        '/Users/leo/secret-client/dev/data/work-times.sqlite',
+        '/srv/customer-acme/data/tenants/acme-prod/work-times.sqlite',
+        '/home/operator-jsmith/db/work-times.sqlite'
+      ]) {
+        const shown = abbreviateDatabasePath(path);
+        expect(shown).not.toContain('/Users/');
+        expect(shown).not.toContain('/home/');
+        expect(shown).not.toContain('/srv/');
+        expect(shown).not.toContain('secret-client');
+        expect(shown).not.toContain('acme');
+        expect(shown).not.toContain('operator-jsmith');
+      }
     });
   });
 
