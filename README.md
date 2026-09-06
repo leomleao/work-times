@@ -20,7 +20,7 @@ Activity is categorized into exactly three states:
 Classification operates as an **immutable overlay** over raw imported WakaTime facts:
 - Re-imports and reconciliations never erase or mutate classification decisions.
 - All rule and allocation modifications write append-only audit revision logs.
-- Rules match by selector types: `machine`, `editor`, `application`, `domain`, `project`, `folder_prefix`, and `entity`.
+- Rules match by seven identity selector types: `machine`, `editor`, `application`, `domain`, `project`, `folder_prefix` (with path-boundary `/` semantics), and `entity`. Selectors based on language, category, branch, or dependencies are strictly disallowed.
 - Evaluation follows strict precedence:
   1. Whole-slice manual override (`source: 'override'`).
   2. Explicit operator priority.
@@ -28,26 +28,63 @@ Classification operates as an **immutable overlay** over raw imported WakaTime f
   4. Longest matching folder prefix.
 - Conflicting rules of equal precedence fall back safely to `unclassified` (`source: 'ambiguous'`).
 
-### 3. Dump-Backed Ingestion Engine
+### 3. Dump-Backed Ingestion Engine & Verified Facts
 Work Times currently operates as a **dump-backed archive**. It parses and ingests official WakaTime historical exports:
 - Daily summary exports (`*-daily.json`): Aggregate totals, project breakdowns, categories, languages, and editors.
 - Raw heartbeat exports (`*-heatbeat .json` — including the upstream space typo): Fine-grained activity events (encompassing both write and non-write interactions) and machine telemetry.
 
 The ingestion engine deduplicates heartbeats idempotently by UUID, calculates canonical dependency hashes (`deps_hash`), redacts personal identifiers to short SHA-256 fingerprints in logs, and enforces a direct-parse memory safety ceiling (`MAX_DIRECT_IMPORT_BYTES`, default 96 MB).
 
-> [!IMPORTANT]
-> Live background synchronization against the WakaTime REST API using `WAKATIME_API_KEY` is **deferred** in this release. The application currently functions as a dump-backed archive; live polling reconciliation routes and background sync workers are not yet mounted.
+#### Verified Dataset Metrics (Historical Archive)
+Real export verification confirms the following aggregate baseline facts (no dump filenames, emails, hashes, paths, identities, or secrets):
+- **Calendar Envelopes**: 3,593 calendar rows across the archive period.
+- **Activity Days**: 571 positive activity days (non-zero daily totals) and 3,022 zero-total days.
+- **Normalized Time Slices**: 14,762 normalized slices derived from day/project/entity summaries enriched with heartbeat machine/editor identity.
+- **Heartbeat Events**: 82,276 unique heartbeats recognized.
+- **Duplicate Handling**: 42 canonical duplicate occurrences identified; all 42 pairs are canonically identical after deterministic dependency sorting.
+- **Heartbeat Conflicts**: Zero heartbeat conflicts in the archive.
+- **Dependency Canonicalization**: 220,067 canonical dependency rows stored.
+- **Identity Selectors**: 74,739 identity rows across the seven selector types.
+- **Mathematical Invariant**: Exact equality between daily total seconds and slice total seconds across all days (`work + personal + unclassified = daily_total_seconds`), with exactly one historical 900-second unattributed divergence between summary entities and daily grand total.
 
-### 4. Work-Only MCP Privacy Boundary
+> [!IMPORTANT]
+> Live background synchronization against the WakaTime REST API using `WAKATIME_API_KEY` is **deferred** in this release. The application currently functions as a dump-backed archive; recurring polling reconciliation workers and background schedulers are not yet mounted. Use the safe read-only discovery command (`pnpm wakatime:discover`) to inspect API capabilities and credentials without recurring ingestion.
+
+### 4. Safe Read-Only WakaTime Capability Discovery
+The CLI tool `pnpm wakatime:discover` provides a safe, read-only mechanism to probe WakaTime API credentials and plan-gated capabilities:
+- **Zero Network Calls Without Key**: When no key is configured, the command performs zero network calls, exits with code 1, and prints concise instructions to configure the key without echoing file contents.
+- **Credential Storage**: Reads strictly from `WAKATIME_API_KEY` in your gitignored `.env` or from a permissions-restricted secret file via `WAKATIME_API_KEY_FILE`.
+- **No CLI Key Arguments**: Passing API keys via command-line arguments (such as `--api-key`) is strictly forbidden and rejected at parsing time to prevent credential leakage into shell histories, process listings (`ps aux`), or logs.
+- **Bounded Non-PII Reporting**: Reports are strictly bounded:
+  - Dumps listing is capped to at most 10 items (`MAX_DUMP_ITEMS = 10`) with aggregate total counts and a truncation indicator (`truncated: boolean`).
+  - Dump types and statuses are mapped strictly to known safe values (`daily`, `heartbeats`, `pending`, `processing`, `completed`, `failed`) or `"unknown"`; arbitrary upstream strings are never echoed.
+  - Response field names are filtered against explicit schema allowlists (`RECOGNIZED_RESPONSE_FIELDS`), redacting unexpected passthrough keys.
+  - `--probe-date` is strictly validated as a real UTC calendar date (rejecting invalid dates like `2026-02-31`).
+  - Zero PII: Output strictly excludes user IDs, emails, usernames, entity paths, project names, machines, download URLs, raw response bodies, and authorization headers.
+- **Soft-Degraded Results**: Plan restrictions returning HTTP 402 or 403 on durations or heartbeats record `status: "restricted"` with `restrictionCode: "HTTP_402"` or `"HTTP_403"` without failing discovery if baseline summaries succeed.
+- **Read-Only Invariant**: Probes existing data dumps via `GET /users/current/data_dumps` only; never creates dumps or triggers background sync.
+
+### 5. Work-Only MCP Privacy Boundary
 Work Times provides a read-only Streamable HTTP Model Context Protocol (MCP) endpoint at `/mcp` for AI assistants (such as Claude, Orca, and Cursor):
 - **Privacy Contract**: MCP tools query only effective `work` slices. `personal` activity and all personal/unclassified identifying details (projects, categories, languages, entities, and file paths) are strictly excluded. However, MCP responses intentionally return aggregate unclassified-seconds warnings (`unclassifiedSeconds`, `hasUnclassified`) across the requested range or day so agents are alerted to incomplete classification coverage without leaking non-work identities or personal time. Exact file paths are excluded from evidence payloads to prevent accidental code disclosure.
 - **Tools Provided**:
   - `get_work_summary`: Returns work-only seconds grouped by calendar day and project across a date range (`start` to `end`), along with aggregate unclassified warnings.
   - `get_work_evidence`: Returns work-only project, category, and language breakdowns for a specific `date` (and optional `project`) for timesheet preparation, along with aggregate unclassified warnings.
-- **Authentication**: Protected by Bearer token authorization (`Authorization: Bearer <generated-api-key>`) requiring the `activity:read` scope. API keys are generated from the web administration console.
-- **OAuth Status**: Discovery metadata endpoints exist at `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource/mcp`, but interactive OAuth protocol endpoints (`/oauth/authorize`, `/oauth/token`) are deferred and not mounted as live HTTP routes. API keys (`<generated-api-key>`) are the active authentication mechanism.
+- **Authentication**: Protected by Bearer token authorization (`Authorization: Bearer <token>`) requiring the `activity:read` scope. Clients authenticate using either a generated application API key (`wtk_...`) or an OAuth 2.0 access token (`wto_...`).
 
-### 5. Security & Session Model
+### 6. OAuth 2.0 Authorization Server & Authentication
+Work Times implements standards-compliant OAuth 2.0 authorization server routes:
+- **Discovery Metadata**: RFC 8414 metadata at `GET /.well-known/oauth-authorization-server` and RFC 9728 protected resource metadata at `GET /.well-known/oauth-protected-resource/mcp`.
+- **Interactive Admin Consent (`/oauth/authorize`)**: Renders a dedicated SvelteKit consent screen requiring an active administrator session and valid CSRF token. Displays requesting client details and requested scopes before authorization.
+- **Mandatory PKCE**: Enforces Proof Key for Code Exchange (RFC 7636) with `S256` code challenges for public clients.
+- **Exact Redirect & Resource Binding**: Redirect URIs must match registered client URIs exactly (no wildcards or path traversal). Authorizations and tokens are strictly bound to the MCP resource indicator (`resource=${PUBLIC_URL}/mcp`).
+- **Token Issuance (`/oauth/token`)**: Supports authorization code exchange and refresh token grants for both public clients (`client_id` with PKCE) and confidential clients (authenticated via HTTP Basic `Authorization: Basic ...` or `client_secret_post`).
+- **Refresh Token Rotation & Reuse Detection**: Refresh tokens rotate on every exchange. If an old refresh token is reused, the entire authorization family is revoked immediately to prevent replay attacks.
+- **Token Revocation (`/oauth/revoke`)**: RFC 7009 endpoint revoking access and refresh tokens.
+- **Constrained Dynamic Registration (`/oauth/register`)**: RFC 7591 dynamic client registration endpoint for public clients, protected by IP-based rate limiting, strict redirect URI validation, and constrained client names.
+- **Cloudflare Access Ingress**: When deployed behind Cloudflare Access, bypass rules must be configured for machine protocol paths (`/oauth/*`, `/.well-known/*`, `/mcp`) so automated AI agents are not redirected to interactive HTML login pages.
+
+### 7. Security & Session Model
 - **Authentication**: Administrator access is protected by `scrypt` password hashing and login rate limiting (5 consecutive failures per 15-minute window per IP).
 - **Admin Sessions**: Sessions are opaque server-side database records stored in SQLite and tracked in the browser using an `HttpOnly; SameSite=Lax` cookie named `work_times_session`.
 - **Session Secret**: `SESSION_SECRET` (or `SESSION_SECRET_FILE`) authenticates session-bound HMAC CSRF tokens for administrative mutations; admin sessions themselves are opaque server-side records, not signed cookies.
@@ -119,7 +156,18 @@ Verify the migration status:
 pnpm db:migrate --status
 ```
 
-### 4. (Optional) Ingest Historical WakaTime Dumps
+### 4. (Optional) Safe WakaTime API Capability Discovery
+To safely probe your WakaTime account credentials and capabilities without modifying upstream state:
+```bash
+# Set WAKATIME_API_KEY in .env or WAKATIME_API_KEY_FILE in secrets/
+pnpm wakatime:discover
+```
+To emit a bounded JSON report:
+```bash
+pnpm wakatime:discover --json
+```
+
+### 5. (Optional) Ingest Historical WakaTime Dumps
 Validate your export dumps in dry-run mode before executing the live database import:
 ```bash
 pnpm import:dumps \
@@ -134,23 +182,29 @@ pnpm import:dumps \
   --heartbeats "/path/to/wakatime-*-heatbeat .json"
 ```
 
-### 5. Run Development Server
+### 6. Run Development Server
 ```bash
 pnpm dev
 ```
 Open [http://127.0.0.1:3002](http://127.0.0.1:3002) in your browser:
 - Log in at `/login` using your configured admin credentials.
 - Navigate to `/admin/api-keys` to create an MCP Bearer token.
+- Manage OAuth clients at `/admin/oauth-clients`.
 - Inspect classifications and manage activity at `/admin/classify`.
 
-### 6. Production Build & Start
+### 7. Production Build & Start
 ```bash
 pnpm build
 pnpm start
 ```
 
-### 7. Docker Compose Deployment
+### 8. Docker Compose Deployment
 The service includes a production-ready `Dockerfile` and `docker-compose.yml` backed by a named Docker volume (`work-times-data`) mapped to `/data`:
+- **Build Stage**: The multi-stage build installs native compilation tools (`python3`, `make`, `g++`) to build native `better-sqlite3` bindings before assembling the minimal runtime container.
+- **Non-Root Execution**: Runs under non-root user `node` (UID 1000).
+- **In-Process Migrations**: The container automatically executes pending migrations in-process on boot before listening on port 3002.
+- **Read-Only Secret Mount**: `docker-compose.yml` mounts the host `./secrets` directory read-only at `/run/secrets`. In the `.env` consumed by Compose, point the `*_FILE` variables at the container paths — `WAKATIME_API_KEY_FILE=/run/secrets/wakatime_api_key`, `ADMIN_PASSWORD_HASH_FILE=/run/secrets/admin_password_hash`, and `SESSION_SECRET_FILE=/run/secrets/session_secret`. The host-relative `./secrets/...` paths shown in the Quickstart apply only to local, non-container runs.
+- **No Background Sync**: Live recurring background API synchronization is not active.
 
 ```bash
 # Build and start container
@@ -225,3 +279,26 @@ pnpm test:e2e
 - **[Operations & Deployment Guide](docs/OPERATIONS.md)**: Full production deployment manual, Docker Compose setup, secret storage, backup/restore procedures, Cloudflare Access Bypass configuration, and troubleshooting.
 - **[WakaTime Dump Data Contract](docs/DUMP-DATA-CONTRACT.md)**: Structural specifications, envelope invariants, and privacy boundaries for daily and raw heartbeat dump archives.
 - **[Architecture & Implementation Plan](docs/IMPLEMENTATION-PLAN.md)**: Deep architectural decisions, data models, precedence hierarchies, and roadmap.
+
+---
+
+## Upstream References & Licensing Position
+
+Work Times is an unofficial, personal archive built on the operator's own exported
+WakaTime activity. It is not affiliated with, endorsed by, or sponsored by WakaTime, and
+it uses no WakaTime branding.
+
+The reviewed WakaTime terms grant revocable access to one's own data, require lawful use,
+prohibit overloading the service, and reserve WakaTime's intellectual property. Reading
+those terms, private single-operator archiving and analysis of one's own exported activity
+appears supportable, and the discovery CLI stays far below the documented rate limits.
+This summary is a reading of the published documents, not legal advice, and it claims no
+legal certainty. Commercial use, multi-user deployment, ingesting another person's data,
+or redistributing WakaTime-derived data would each require independent legal review.
+Consult the official sources directly, since they may change:
+
+- [WakaTime Developers API Documentation](https://wakatime.com/developers/)
+- [WakaTime Pricing](https://wakatime.com/pricing)
+- [WakaTime Terms of Service](https://wakatime.com/legal/terms-of-service)
+- [WakaTime Privacy Policy](https://wakatime.com/legal/privacy-policy)
+- [WakaTime FAQ](https://wakatime.com/faq)

@@ -55,6 +55,7 @@ pnpm dev
 | `pnpm test:e2e` | Runs Playwright browser test suite. |
 | `pnpm db:migrate` | Executes the database migration CLI (`scripts/migrate.ts`). |
 | `pnpm import:dumps` | Executes the WakaTime dump ingestion CLI (`scripts/import-dumps.ts`). |
+| `pnpm wakatime:discover` | Runs safe, read-only discovery of WakaTime credentials and API capabilities (`scripts/wakatime-discover.ts`). |
 | `pnpm admin:hash-password` | Generates an `scrypt` password hash via hidden interactive stdin. |
 
 ---
@@ -81,6 +82,31 @@ openssl rand -hex 32 > secrets/session_secret
 chmod 600 secrets/session_secret
 ```
 
+#### Secret File Paths: Host vs. Container
+The `*_FILE` variables are read as literal filesystem paths inside the process that
+consumes them, so the correct value differs between a local (non-container) run and a
+Docker Compose run. `docker-compose.yml` mounts the host secrets directory read-only at
+`/run/secrets`:
+
+```yaml
+volumes:
+  - ./secrets:/run/secrets:ro
+```
+
+Set the `*_FILE` variables accordingly:
+
+| Variable | Local (non-container) run | Docker Compose run |
+| :--- | :--- | :--- |
+| `WAKATIME_API_KEY_FILE` | `./secrets/wakatime_api_key` | `/run/secrets/wakatime_api_key` |
+| `ADMIN_PASSWORD_HASH_FILE` | `./secrets/admin_password_hash` | `/run/secrets/admin_password_hash` |
+| `SESSION_SECRET_FILE` | `./secrets/session_secret` | `/run/secrets/session_secret` |
+
+Because Compose loads `.env` via `env_file`, a single `.env` cannot hold both variants.
+Use the container paths (`/run/secrets/...`) in the `.env` consumed by Compose, and keep
+host-relative paths (`./secrets/...`) only for local `pnpm dev` / `pnpm start` runs. The
+host filenames under `./secrets/` must match the basenames above, since the mount exposes
+them unchanged at `/run/secrets/`.
+
 ### Configuration Reference
 All runtime configuration is evaluated in `src/lib/server/config.ts` and `server/index.mjs`:
 
@@ -95,11 +121,37 @@ All runtime configuration is evaluated in `src/lib/server/config.ts` and `server
 | `HOST` | — | `127.0.0.1` | Network interface to bind (`0.0.0.0` in container). |
 | `COOKIE_SECURE` | — | `false` (dev) / `true` (HTTPS) | Enforces `Secure` attribute on admin session cookies. |
 | `MAX_DIRECT_IMPORT_BYTES` | — | `100663296` (96 MB) | Memory safety ceiling for parsing large JSON dump files. |
-| `WAKATIME_API_KEY` | `WAKATIME_API_KEY_FILE` | *None* | *Deferred*: Reserved for future WakaTime API background sync. |
+| `WAKATIME_API_KEY` | `WAKATIME_API_KEY_FILE` | *None* | API key for safe read-only capability discovery (`pnpm wakatime:discover`). Background recurring sync remains deferred. |
 | `WORK_TIMES_PORT` | — | `3002` | Host port mapping in `docker-compose.yml`. |
 
 > [!IMPORTANT]
-> Real WakaTime API synchronization using `WAKATIME_API_KEY` is **deferred** in this release. The application currently operates as a dump-backed archive. Do not expect background API polling to pull live heartbeats automatically.
+> Real recurring WakaTime API synchronization using `WAKATIME_API_KEY` is **deferred** in this release. The application currently operates as a dump-backed archive; no background polling scheduler is running. Use `pnpm wakatime:discover` to inspect credentials and capabilities safely.
+
+### Safe Read-Only WakaTime Capability Discovery (`pnpm wakatime:discover`)
+The discovery CLI inspects WakaTime account credentials, endpoint availability, and plan-gated restrictions without writing to the database or modifying upstream account state:
+
+```bash
+# Run discovery using configured WAKATIME_API_KEY or WAKATIME_API_KEY_FILE
+pnpm wakatime:discover
+
+# Emit bounded JSON output on stdout
+pnpm wakatime:discover --json
+
+# Probe a specific UTC calendar date
+pnpm wakatime:discover --probe-date 2026-09-05
+```
+
+#### Security & Discovery Invariants
+- **Missing-Key Behavior**: When no API key is configured, the CLI performs zero network calls, exits with code 1, and writes a safe guidance message to stderr without echoing file paths or environment contents.
+- **No CLI Key Arguments**: API keys must **never** be passed via CLI arguments (flags like `--api-key` are explicitly forbidden and rejected at argument parsing).
+- **Strict UTC Calendar Date Validation**: The `--probe-date` option is strictly validated as a real UTC calendar date with month-boundary and leap-year enforcement (rejecting non-calendar dates like `2026-02-31`).
+- **Bounded Non-PII Reporting**:
+  - Dumps listing is capped to at most 10 items (`MAX_DUMP_ITEMS = 10`) with total aggregate count and a truncation indicator (`truncated: boolean`).
+  - Dump types and statuses are strictly mapped to safe known values (`daily`, `heartbeats`, `pending`, `processing`, `completed`, `failed`) or `"unknown"`. Arbitrary upstream strings are never echoed.
+  - Response field names are filtered against explicit schema allowlists (`RECOGNIZED_RESPONSE_FIELDS`), redacting unexpected passthrough keys.
+  - Reports strictly omit user IDs, emails, usernames, entity paths, project names, machines, download URLs, raw response bodies, and authorization headers.
+- **Soft Degradation**: Probing optional endpoints (durations and heartbeats) that return HTTP 402 or 403 records `status: "restricted"` with `restrictionCode: "HTTP_402"` or `"HTTP_403"` without failing discovery if baseline summaries succeed.
+- **Read-Only Invariant**: Probes existing data dumps via `GET /users/current/data_dumps` only; never triggers dump creation. Background incremental sync remains deferred.
 
 ### Generating the Admin Password Hash
 Work Times uses `scrypt` with parameters `N=32768, r=8, p=1, maxmem=64MB` and enforces a minimum password length of 12 characters. Use the interactive CLI to generate the hash without echoing your password:
@@ -220,6 +272,18 @@ pnpm import:dumps \
 - **Redacted Logging**: Paths, machine identifiers, and user accounts are reduced to short SHA-256 fingerprints before being written to stderr.
 - **Idempotency**: Repeatedly importing identical dumps is a safe no-op. Heartbeats are deduplicated by UUID, and dependency arrays are sorted and hashed canonically into `deps_hash`.
 
+### Verified Ingestion Metrics (Historical Archive)
+Real export verification confirms the following aggregate baseline facts (no dump filenames, emails, hashes, paths, identities, or secrets):
+- **Calendar Envelopes**: 3,593 calendar rows across the archive period.
+- **Activity Days**: 571 positive activity days (non-zero daily totals) and 3,022 zero-total days.
+- **Normalized Time Slices**: 14,762 normalized slices derived from day/project/entity summaries enriched with heartbeat machine/editor identity.
+- **Heartbeat Events**: 82,276 unique heartbeats recognized.
+- **Duplicate Handling**: 42 canonical duplicate occurrences identified; all 42 pairs are canonically identical after deterministic dependency sorting.
+- **Heartbeat Conflicts**: Zero heartbeat conflicts in the archive.
+- **Dependency Canonicalization**: 220,067 canonical dependency rows stored.
+- **Identity Selectors**: 74,739 identity rows across the seven selector types.
+- **Mathematical Invariant**: Exact equality between daily total seconds and slice total seconds across all days (`work + personal + unclassified = daily_total_seconds`), with exactly one historical 900-second unattributed divergence between summary entities and daily grand total.
+
 ---
 
 ## 6. Docker Compose Deployment
@@ -228,11 +292,14 @@ A production-ready `docker-compose.yml` and multi-stage `Dockerfile` are include
 
 ### Container Architecture
 - **Base Image**: `node:24-bookworm-slim`.
+- **Native Build Stage**: Compiles native `better-sqlite3` bindings using `python3`, `make`, and `g++` in the build stage while maintaining a minimal production runtime image.
 - **Runtime User**: Runs as non-root user `node` (`USER node`, UID 1000).
 - **In-Process Migrations**: The container entry point (`node server/index.mjs`) executes pending database migrations on boot before listening on port `3002`.
 - **Data Persistence**: Backed by a named Docker volume (`work-times-data`) mapped to `/data`.
 - **Host Port Binding**: Bound strictly to loopback `127.0.0.1:3002` (configurable via `WORK_TIMES_PORT`).
 - **Reverse Proxy**: Includes labels for integration with Traefik on the `traefik-net` network.
+- **Read-Only Secret Mount**: Mounts the host `./secrets` directory read-only at `/run/secrets`, so container `*_FILE` variables resolve to `/run/secrets/wakatime_api_key`, `/run/secrets/admin_password_hash`, and `/run/secrets/session_secret`.
+- **No Background Sync**: Does not execute live recurring API sync or background polling workers.
 
 ### Docker Compose Service Definition
 The service is configured in `docker-compose.yml`:
@@ -254,6 +321,7 @@ services:
       - "127.0.0.1:${WORK_TIMES_PORT:-3002}:3002"
     volumes:
       - work-times-data:/data
+      - ./secrets:/run/secrets:ro
     networks:
       - default
       - traefik-net
@@ -273,6 +341,17 @@ networks:
 ```
 
 ### Launching the Service
+Create the host secrets directory before the first launch, because Compose bind-mounts
+`./secrets` into the container. If the path does not exist, Docker creates it as a
+root-owned directory, which the non-root container user cannot read:
+
+```bash
+mkdir -p secrets && chmod 700 secrets
+```
+
+`secrets/` is gitignored (`/secrets/`) and excluded from the build context
+(`.dockerignore`), so its contents never enter git history or an image layer.
+
 ```bash
 # Build the Docker image and start in detached mode
 docker compose up -d --build
@@ -423,17 +502,29 @@ API keys authenticate AI agents and MCP clients.
 4. The plaintext token (prefixed with `wtk_`) is transiently rendered once in the browser response upon creation and is never persisted in plaintext (only its SHA-256 hash is saved in SQLite). It disappears permanently upon navigation or page reload; copy and store it immediately in your agent configuration.
 5. The database stores only the token hash. Keys can be revoked at any time from the UI table.
 
-### OAuth Client Registration (`/admin/oauth-clients`)
-You can register public or confidential OAuth client applications in `/admin/oauth-clients`.
-- Clients receive a client ID prefixed with `woc_`.
-- Confidential clients receive a client secret prefixed with `wcs_` that is transiently rendered once upon registration and never persisted in plaintext. It disappears permanently upon navigation or reload.
+### OAuth 2.0 Authorization Server Implementation
+Work Times provides an RFC-compliant OAuth 2.0 authorization server powering URL-only agent onboarding.
 
-> [!NOTE]
-> **OAuth Implementation Status**: Discovery metadata endpoints exist at:
-> - `GET /.well-known/oauth-authorization-server`
-> - `GET /.well-known/oauth-protected-resource/mcp`
->
-> However, interactive OAuth protocol endpoints (such as `/oauth/authorize`, `/oauth/token`, and `/oauth/register`) are **deferred and not yet mounted** as live HTTP routes. API keys (`<generated-api-key>`) are the active authentication mechanism for MCP clients.
+#### Protocol Endpoints Reference
+| Endpoint | Method | RFC / Spec | Purpose |
+| :--- | :--- | :--- | :--- |
+| `/.well-known/oauth-authorization-server` | `GET` | RFC 8414 | OAuth 2.0 authorization server metadata. |
+| `/.well-known/oauth-protected-resource/mcp` | `GET` | RFC 9728 | Protected resource metadata linking `/mcp` to the authorization server. |
+| `/oauth/register` | `POST` | RFC 7591 | Constrained dynamic client registration for public agents. |
+| `/oauth/authorize` | `GET`, `POST` | RFC 6749, RFC 7636 | Interactive admin consent flow requiring SvelteKit admin session. |
+| `/oauth/token` | `POST` | RFC 6749, RFC 7636 | Authorization code redemption and refresh token rotation. |
+| `/oauth/revoke` | `POST` | RFC 7009 | Revocation endpoint for access and refresh tokens. |
+
+#### OAuth Security Details
+- **Interactive Admin Consent**: `/oauth/authorize` checks for an active administrative session. If unauthenticated, it redirects safely to `/login` preserving validated redirect parameters. Authenticated administrators review the requesting client name, exact redirect URI, and requested scopes before granting consent with session-bound CSRF verification.
+- **Mandatory PKCE**: Proof Key for Code Exchange with code challenge method `S256` is strictly enforced for public clients. Plaintext code challenges (`method=plain`) are rejected.
+- **Exact Redirect & Resource Binding**: Redirect URIs must match the client's registered redirect URIs byte-for-byte; partial, prefix, or wildcard matches are rejected. Tokens are bound to the MCP resource indicator (`resource=${PUBLIC_URL}/mcp`).
+- **Public & Confidential Client Authentication**:
+  - Public clients authenticate using `client_id` paired with PKCE `code_verifier`.
+  - Confidential clients authenticate using `client_id` and `client_secret` via either HTTP Basic (`Authorization: Basic base64(id:secret)`) or `client_secret_post` in the request body.
+- **Refresh Token Rotation & Reuse Revocation**: Every refresh token exchange issues a newly rotated refresh token and invalidates the prior token. If an already-used refresh token is presented again (indicating potential token leakage or replay), the system immediately revokes all access and refresh tokens associated with that grant.
+- **Constrained Dynamic Client Registration (`/oauth/register`)**: Supports automated agent registration for public clients. Constrained to prevent abuse: IP-based rate limiting (10 registrations per 15-minute window), strict redirect URI validation (must use `http://127.0.0.1`, `http://localhost`, or `https://`), and restricted client names.
+- **OAuth Client Management (`/admin/oauth-clients`)**: Administrators can review registered public and confidential clients, create confidential clients with one-time rendered secrets (`wcs_...`), and revoke clients along with all issued authorizations.
 
 ---
 
@@ -444,7 +535,7 @@ Work Times implements a Streamable HTTP Model Context Protocol (MCP) server at `
 ### Endpoint Specification
 - **URL**: `${PUBLIC_URL}/mcp` (e.g. `http://127.0.0.1:3002/mcp` or `https://work-times.yourdomain.com/mcp`)
 - **HTTP Methods**: `GET`, `POST`, `DELETE`
-- **Authentication**: `Authorization: Bearer <generated-api-key>`
+- **Authentication**: `Authorization: Bearer <token>` (accepts API keys `wtk_...` or OAuth access tokens `wto_...`)
 - **Required Scope**: `activity:read`
 
 ### Privacy Enforcement
@@ -478,7 +569,7 @@ When publishing Work Times through Cloudflare Tunnel and protecting it with Clou
 ### Network Ingress Topology
 ```text
 [ Browser Operator ]  ──> Cloudflare Access ──┐
-                                              ├──> Cloudflare Tunnel ──> 127.0.0.1:3002 ──> Work Times
+                                               ├──> Cloudflare Tunnel ──> 127.0.0.1:3002 ──> Work Times
 [ MCP / AI Client  ]  ──> [ Access Bypass ] ──┘
 ```
 
@@ -499,7 +590,7 @@ Create an Access Application covering `work-times.yourdomain.com`.
    - Include: Your administrative email or identity provider group.
 
 2. **Machine Protocol Bypass Policy (MANDATORY)**:
-   - Create a policy with action **`Bypass`** targeting these path prefixes:
+   - Create an Access policy with action **`Bypass`** targeting these path prefixes:
      - `/.well-known/*`
      - `/oauth/*`
      - `/mcp`
@@ -508,13 +599,16 @@ Create an Access Application covering `work-times.yourdomain.com`.
 > [!WARNING]
 > **Why Bypass is Required**: Non-browser agent clients (such as Claude Desktop, Cursor, and automated scripts) do not execute browser JavaScript or follow Cloudflare Access interactive login redirects.
 >
-> If Cloudflare Access is not bypassed on `/mcp` and `/.well-known/*`, the agent receives an **HTML 302/200 login page** instead of JSON-RPC responses or HTTP 401 Bearer challenges. This immediately breaks MCP client initialization.
+> If Cloudflare Access is not bypassed on `/mcp`, `/oauth/*`, and `/.well-known/*`, the agent receives an **HTML 302/200 login page** instead of JSON-RPC responses, token exchanges, or HTTP 401 challenges. This immediately breaks MCP and OAuth client operation.
 >
-> **Security Impact**: Bypassing Cloudflare Access on `/mcp` **does not** expose your data to the public. The `/mcp` endpoint is protected by:
-> - Application Bearer token verification (`Authorization: Bearer <generated-api-key>`).
-> - Required OAuth scope validation (`activity:read`).
-> - Host and Origin header validation.
-> - SHA-256 token hash lookup against the SQLite store.
+> **Security Rationale**: Bypassing Cloudflare Access on `/mcp` and `/oauth/*` does not expose private activity data to the public because:
+> - The `/mcp` endpoint enforces cryptographic Bearer token authentication (`Authorization: Bearer ...`) and requires the `activity:read` scope.
+> - The `/oauth/authorize` endpoint requires an authenticated administrator session cookie (`work_times_session`) and session-bound CSRF token to issue authorization codes.
+> - Dynamic client registration (`/oauth/register`) is rate-limited and constrained to public client parameters.
+> - Host and Origin header validation protects against cross-site request forgery.
+> - All telemetry classified as `personal` is completely quarantined from MCP responses.
+>
+> Note: While application-layer authentication protects these endpoints, administrators should still consider IP restrictions or mTLS if public machine exposure is a concern.
 
 ---
 
@@ -599,10 +693,10 @@ Create an Access Application covering `work-times.yourdomain.com`.
   "
   ```
 
-### 3. Agent Receives HTML Instead of JSON from `/mcp`
+### 3. Agent Receives HTML Instead of JSON from `/mcp` or `/oauth/*`
 - **Symptom**: MCP client logs show `Unexpected token < in JSON at position 0` or redirects to `https://*.cloudflareaccess.com`.
-- **Cause**: Cloudflare Access is intercepting `/mcp` requests.
-- **Remedy**: Add an Access **Bypass** policy for path `/mcp` in your Cloudflare Zero Trust dashboard.
+- **Cause**: Cloudflare Access is intercepting `/mcp` or `/oauth/*` requests.
+- **Remedy**: Add an Access **Bypass** policy for paths `/mcp`, `/oauth/*`, and `/.well-known/*` in your Cloudflare Zero Trust dashboard.
 
 ### 4. `403 Forbidden: Cross-origin request rejected`
 - **Cause**: Browser mutation sent an `Origin` header that does not match `PUBLIC_URL`.
@@ -610,7 +704,7 @@ Create an Access Application covering `work-times.yourdomain.com`.
 
 ### 5. `401 Unauthorized: Access token is invalid or expired` on `/mcp`
 - **Cause**: Token omitted, invalid, or revoked.
-- **Remedy**: Generate a new API key in `/admin/api-keys` (keys are prefixed with `wtk_`), and ensure the client sends `Authorization: Bearer <generated-api-key>`.
+- **Remedy**: Generate a new API key in `/admin/api-keys` (keys are prefixed with `wtk_`) or re-authenticate via OAuth, ensuring the client sends `Authorization: Bearer <token>`.
 
 ### 6. Importer Memory Ceiling Exceeded
 - **Cause**: A massive dump exceeds `MAX_DIRECT_IMPORT_BYTES` (default 96 MB).
@@ -618,3 +712,16 @@ Create an Access Application covering `work-times.yourdomain.com`.
   ```bash
   pnpm import:dumps --daily ... --heartbeats ... --max-bytes 209715200
   ```
+
+---
+
+## 14. Research, Licensing & References
+
+WakaTime terms grant revocable access to one's own data, require lawful use, prohibit service overloading, and reserve intellectual property rights. Work Times operates as a personal, private archive consuming user-owned exported activity files. This analysis is not legal advice and does not claim legal certainty; any commercialization, multi-user deployment, or third-party redistribution would require independent legal review.
+
+Primary references:
+- [WakaTime Developers API Documentation](https://wakatime.com/developers/)
+- [WakaTime Frequently Asked Questions](https://wakatime.com/faq)
+- [WakaTime Pricing Information](https://wakatime.com/pricing)
+- [WakaTime Terms of Service](https://wakatime.com/legal/terms-of-service)
+- [WakaTime Privacy Policy](https://wakatime.com/legal/privacy-policy)

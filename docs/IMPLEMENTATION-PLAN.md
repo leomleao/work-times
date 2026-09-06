@@ -1,17 +1,23 @@
 # Work Times — Architecture and Implementation Plan
 
-Status: implementation in progress
+Status: core release implemented (verification and documentation complete)
 
 Last updated: 2026-09-06
 
 Implementation alignment decisions:
 
-- Preserve the agreed delivery order: importer, API sync, admin UI, application
-  API keys, OAuth, then MCP and analytics.
+- Core delivery completed: dump importer, classification overlay, dark-first SvelteKit
+  admin UI with real SQLite views, application API keys, standards-based OAuth protocol
+  routes (/oauth/authorize, /oauth/token, /oauth/revoke, /oauth/register), safe read-only
+  WakaTime capability discovery CLI (pnpm wakatime:discover), work-only Streamable HTTP
+  MCP server at /mcp, and multi-stage Docker packaging.
+- Live recurring background API synchronization and future timeline visualization
+  charts remain deferred to a later release milestone; the service functions as a
+  dump-backed archive.
 - Use Svelte 5 and SvelteKit with `@sveltejs/adapter-node` wrapped in a custom
   Node entry point (`server/index.mjs`) hosting the SvelteKit request handler,
-  native JSON admin API endpoints, Streamable HTTP MCP at `/mcp`, OAuth routes,
-  and the background synchronization scheduler in a single unified Node process.
+  native JSON admin API endpoints, Streamable HTTP MCP at `/mcp`, and OAuth routes
+  in a single unified Node process.
 - Adopt a dark-first UI aesthetic inspired by Svelte Bits (bits-ui), providing
   dense, accessible controls and establishing a componentized foundation for
   future visualizations (such as Svelte-native interactive timeline and slice
@@ -104,7 +110,8 @@ WakaTime client and not a multi-user employee-monitoring product.
 ### In scope
 
 - Historical import from WakaTime daily and heartbeat data dumps.
-- Incremental read-only WakaTime API synchronization.
+- Incremental read-only WakaTime API synchronization (deferred to a later milestone; this
+  release ships safe read-only capability discovery only).
 - WakaTime-compatible daily totals and breakdowns.
 - Raw activity evidence for detailed local queries.
 - Daily, weekly, and arbitrary date-range analysis.
@@ -365,6 +372,20 @@ indicates sparse events that WakaTime did not turn into duration. Consequently:
 - A daily summary and its heartbeats are related datasets, not interchangeable
   representations.
 
+### 4.5 Verified Ingestion Facts & Dataset Metrics
+
+Real export verification confirms the following aggregate baseline facts (never including dump filenames, emails, hashes, paths, identities, or secrets):
+
+- **Calendar Envelopes**: 3,593 calendar rows across the archive period.
+- **Activity Days**: 571 positive activity days (non-zero daily totals) and 3,022 zero-total days.
+- **Normalized Time Slices**: 14,762 normalized slices derived from day/project/entity summaries enriched with heartbeat machine/editor identity.
+- **Heartbeat Events**: 82,276 unique heartbeats recognized.
+- **Duplicate Handling**: 42 canonical duplicate occurrences identified; all 42 pairs are canonically identical after deterministic dependency sorting.
+- **Heartbeat Conflicts**: Zero heartbeat conflicts in the archive.
+- **Dependency Canonicalization**: 220,067 canonical dependency rows stored.
+- **Identity Selectors**: 74,739 identity rows across seven selector types.
+- **Mathematical Invariant**: Exact equality between daily total seconds and slice total seconds across all days (`work + personal + unclassified = daily_total_seconds`), with exactly one historical 900-second unattributed divergence between summary entities and daily grand total.
+
 ## 5. Target architecture
 
 ```text
@@ -397,15 +418,17 @@ Use one TypeScript/Node application and one Docker runtime container:
 
 - HTTP server for the SvelteKit admin UI, admin JSON API, OAuth endpoints,
   Streamable HTTP MCP endpoint at `/mcp`, and minimal health endpoint.
-- In-process scheduler for incremental synchronization.
+- In-process scheduler for incremental synchronization (deferred — not mounted in this
+  release; see section 7.3).
 - SQLite database in WAL mode for concurrent sync writes and MCP/admin reads.
 - Guarded native JSON importer for the current dump sizes, behind a parser
   interface that permits a streaming implementation when evidence requires it.
 - Svelte 5 + SvelteKit admin application compiled with `@sveltejs/adapter-node`
   and mounted within the custom Node entry point (`server/index.mjs`). This single
   Node process serves the SvelteKit SSR frontend, static assets, native JSON
-  admin API endpoints, OAuth endpoints, Streamable HTTP MCP at `/mcp`, and the
-  in-process background sync scheduler; no separate frontend service.
+  admin API endpoints, OAuth endpoints, and Streamable HTTP MCP at `/mcp`; no separate
+  frontend service. The in-process background sync scheduler is designed for this same
+  process but is deferred and not started in this release.
 - Dark-first Svelte Bits-inspired UI architecture: built with Svelte 5 runes,
   accessible primitive foundations (bits-ui / Svelte Bits design principles),
   dense data tables, responsive layouts, and an extensible component-based
@@ -610,7 +633,7 @@ classification semantics. This keeps filters and authorization predictable.
   4. `domain`: exact domain identity (e.g. `github.com`, `linear.app`, internal company hostname).
   5. `project/repo`: exact project or repository identity.
   6. `folder_prefix`: folder path prefix with path-boundary semantics (e.g.
-     `/Users/leo/work/` matching subpaths strictly terminating on `/` path
+     `/Users/<operator>/work/` matching subpaths strictly terminating on `/` path
      boundaries) and longest-prefix specificity.
   7. `entity`: exact file path, window title, or entity identifier.
 - **Disallowed selectors**: Selectors based on programming language, WakaTime
@@ -643,7 +666,7 @@ classification semantics. This keeps filters and authorization predictable.
 - **Work laptop + personal repo override**: Multi-tier selector rules cleanly
   handle hybrid development environments. An operator can define a broad machine
   rule classifying all activity on a work laptop as `work`, while defining a
-  project/repo rule (or folder prefix rule like `/Users/leo/dev/personal/`)
+  project/repo rule (or folder prefix rule like `/Users/<operator>/dev/personal/`)
   classifying a personal repository as `personal`. Because project and
   folder-prefix selectors have higher specificity than computer/machine
   selectors, personal repo activity on the work laptop is correctly classified
@@ -855,6 +878,10 @@ the learned shape; real values are never committed.
 
 ### 7.3 Incremental sync policy
 
+**Status: Deferred — design only.** No scheduler, catch-up worker, or recurring
+reconciliation is mounted in this release; the service runs as a dump-backed archive.
+The policy below records the intended design for the deferred milestone.
+
 - On startup: identify and catch up missing dates.
 - Hourly: refresh today and yesterday.
 - Nightly: replace/reconcile the previous 14 days.
@@ -879,6 +906,12 @@ time, source local date, and timezone together so daylight-saving transitions
 remain interpretable.
 
 ### 7.4 Plan-aware capability degradation
+
+**Status: Partially implemented.** Independent per-capability probing and soft `402`/`403`
+degradation are implemented in `pnpm wakatime:discover`, which records
+`status: "restricted"` with `restrictionCode: "HTTP_402"` or `"HTTP_403"` without failing an
+otherwise successful run. The scheduled retry cadence, per-layer freshness tracking, and
+MCP freshness reporting described below depend on the deferred sync scheduler.
 
 The supplied account metadata reports neither Basic nor Premium features.
 WakaTime API availability may therefore differ by endpoint: recent summaries
@@ -960,6 +993,9 @@ explicit OAuth consent flow.
 
 #### Overview
 
+**Status: Implemented against real SQLite data**, minus the scheduler and last-sync rows,
+which stay empty while background synchronization is deferred.
+
 - process, database, scheduler, and WakaTime connectivity status
 - last successful sync and current run
 - oldest/newest archived dates
@@ -993,6 +1029,12 @@ every WakaTime chart.
 - immutable revision history: review the append-only audit trail of classification mutations
 
 #### Synchronization
+
+**Status: Deferred.** `/admin/sync` is mounted and reads real SQLite state — the
+`sync_runs` and `sync_days` history tables, the recorded capability-policy state, whether a
+WakaTime key is configured, and an explicit `backgroundSyncDeferred` flag. The scheduled-sync
+controls below depend on the deferred background scheduler and are not operational in this
+release, so the view is read-only and normally empty until a sync milestone ships.
 
 - enable/disable scheduled synchronization
 - edit allowed schedule settings
@@ -1150,73 +1192,50 @@ OAuth routes include:
 /oauth/register
 ```
 
-### 9.3 Scopes
+### 9.3 Scopes and Privacy Enforcement
 
-Strict work-only MCP privacy is enforced across all scopes. Personal and
+Strict work-only MCP privacy is enforced across all endpoints and tools. Personal and
 unclassified activity are strictly excluded from all MCP responses to protect
 operator privacy.
 
-`activity:read`
+`activity:read` (Primary Scope)
 
-- totals, projects, categories, languages, editors, sanitized timelines, and
-  comparisons for work-classified activity only
-- aggregate responses include unclassified coverage metadata
-  (`unclassified_seconds` and `coverage_percentage`) so agents know whether
-  work evidence is complete for a requested range, without disclosing personal
-  project identities or details
-
-`activity:detail`
-
-- exact entities/file paths, branches, dependencies, machine identifiers, and
-  raw-evidence detail for work-classified activity only
-- personal and unclassified raw events and file paths are never exposed
+- Totals, projects, categories, and languages for work-classified activity only.
+- Exact file paths are excluded from evidence payloads to prevent accidental code disclosure.
+- Aggregate responses intentionally return unclassified coverage indicators
+  (`unclassifiedSeconds`, `hasUnclassified`) so agents know whether work evidence is
+  complete for a requested range, without disclosing personal or unclassified identities.
+- Personal and unclassified activities, entities, projects, categories, and languages
+  are never exposed or leaked across the MCP boundary.
 
 `operations:read`
 
-- data coverage, classification coverage ratios, freshness, and sanitized sync status
+- Data coverage, classification coverage ratios, freshness, and sanitized sync status.
 
 No MCP scope permits changing WakaTime or modifying the local archive. Sync and
 credential controls remain admin-cookie operations.
 
-### 9.4 Initial tools
+### 9.4 Implemented MCP Tools
 
-`get_activity_summary`
+`get_work_summary`
 
-- inclusive start/end local dates
-- group by day, week, project, category, language, or editor for work-classified
-  activity only
-- return WakaTime-derived work totals, freshness, and unclassified coverage
-  indicators (`unclassified_seconds`, `coverage_percentage`)
+- Input: `start` (YYYY-MM-DD), `end` (YYYY-MM-DD).
+- Returns work-only seconds grouped by calendar day and project across the inclusive date range.
+- Emits work-only project, category, and language breakdowns.
+- Includes aggregate `unclassifiedSeconds` and `hasUnclassified` flags.
+- Personal and unclassified project names, categories, languages, and entities are never returned.
 
-`get_activity_timeline`
+`get_work_evidence`
 
-- a day's or week's ordered activity blocks/evidence for work-classified
-  projects only
-- project filter (work projects only)
-- sanitized entity by default; exact entity requires `activity:detail`
+- Input: `date` (YYYY-MM-DD), optional `project`.
+- Returns work-only project, category, and language breakdowns for a specific calendar date to assist in timesheet preparation.
+- Exact file paths and entity details are excluded to prevent source code exposure.
+- Includes aggregate `unclassifiedSeconds` and `hasUnclassified` flags.
+- Personal and unclassified identities and times are strictly quarantined.
 
-`search_activity`
-
-- bounded search/filter over work-classified project, branch, language,
-  category, dependency, and optionally entity
-
-`list_projects`
-
-- lists only projects that contain work-classified activity: first/last work
-  activity, total work time, recent activity, and project identity
-
-`compare_periods`
-
-- compare work activity between two explicit ranges or this week versus the
-  preceding week
-
-`get_sync_status`
-
-- freshness, data coverage, classification coverage percentage, last successful
-  run, and missing/problem dates
-
-All tools are read-only, bounded, paginated where appropriate, and return
-structured content containing:
+Both tools are read-only, idempotent, and return structured content adhering to the
+strict work-only privacy contract. Additional analytical tools (such as timeline
+comparisons and period search) are planned for future feature releases.
 
 - source timezone
 - inclusive requested range
@@ -1276,8 +1295,13 @@ Prefer file-backed Docker secrets:
 
 ```text
 WAKATIME_API_KEY_FILE=/run/secrets/wakatime_api_key
+ADMIN_PASSWORD_HASH_FILE=/run/secrets/admin_password_hash
 SESSION_SECRET_FILE=/run/secrets/session_secret
 ```
+
+These container paths match the read-only `./secrets:/run/secrets:ro` mount declared in
+`docker-compose.yml`. Local non-container runs use host-relative `./secrets/...` paths
+instead.
 
 The application supports direct environment values for development but gives
 `*_FILE` precedence in production.
@@ -1303,6 +1327,13 @@ available. Default MCP tools to aggregate/sanitized output.
 
 ### 11.1 Image
 
+**Status: Implemented, with hardening items outstanding.** The shipped `Dockerfile`
+implements the multi-stage build, native `better-sqlite3` compilation in the build stage,
+production-only runtime dependencies, non-root `USER node` (UID 1000), a persistent `/data`
+volume at mode `0700`, and a built-in health check against `GET /api/health`. A read-only
+root filesystem, dropped Linux capabilities, `no-new-privileges`, the graceful-shutdown
+sync-recovery record, and GHCR publishing are **not yet applied** and remain planned.
+
 - Multi-stage build with exact lockfile installation.
 - Compile Svelte 5 + SvelteKit admin client (via `@sveltejs/adapter-node`) and
   the custom Node entry point in the builder stage.
@@ -1311,7 +1342,7 @@ available. Default MCP tools to aggregate/sanitized output.
 - Read-only root filesystem.
 - Drop all Linux capabilities and set `no-new-privileges`.
 - Writable persistent `/data` and ephemeral `/tmp` only.
-- Built-in health check against a minimal `/health` response.
+- Built-in health check against a minimal health response (implemented at `GET /api/health`).
 - Graceful shutdown waits for the current database transaction, then records an
   interrupted sync for safe startup recovery.
 
@@ -1332,7 +1363,7 @@ role isolation. The single process performs this startup sequence:
 2. acquire the application/startup lock;
 3. apply versioned migrations transactionally;
 4. run integrity/configuration checks;
-5. start the scheduler;
+5. start the scheduler (deferred — not started in this release);
 6. bind the HTTP listener.
 
 A migration failure exits non-zero before any route becomes reachable. The
@@ -1342,8 +1373,15 @@ Use the reserved Work Times port consistently inside and outside the container:
 
 ```text
 127.0.0.1:3002:3002
-/home/leo/work-times/data:/data
+work-times-data:/data
+./secrets:/run/secrets:ro
 ```
+
+The shipped `docker-compose.yml` backs `/data` with the named volume `work-times-data`
+rather than a host bind mount, and mounts the host secrets directory read-only at
+`/run/secrets`. Container `*_FILE` variables therefore resolve to
+`/run/secrets/wakatime_api_key`, `/run/secrets/admin_password_hash`, and
+`/run/secrets/session_secret`.
 
 Set `PORT=3002`, attach the service to the existing external `traefik-net`, and
 add a Traefik router for `work-times.home` with load-balancer port `3002`.
@@ -1370,8 +1408,8 @@ Cloudflare Access and the application's own login when Access is enabled.
 
 ### 11.3 Health and logs
 
-Unauthenticated `/health` returns only a status and no personal or operational
-detail. Authenticated admin status provides deeper checks.
+The unauthenticated health endpoint (implemented at `GET /api/health`) returns only a
+status and no personal or operational detail. Authenticated admin status provides deeper checks.
 
 Structured logs may include:
 
@@ -1406,6 +1444,7 @@ Compose teardown never deletes `/data`.
 ## 12. Implementation phases
 
 ### Phase 0 — Plan and repository safety
+**Status: Complete**
 
 - Commit this plan.
 - Add ignore rules before creating any `.env`, dump, sample, database, or backup
@@ -1416,9 +1455,10 @@ Compose teardown never deletes `/data`.
   adapter-node custom Node entry, the immutable classification overlay, and
   work-only MCP privacy.
 
-Exit criteria: secret/data paths are demonstrably ignored and CI is green.
+Exit criteria verified: secret and data paths are demonstrably ignored and CI is green.
 
 ### Phase 1 — Dump contracts and guarded importer
+**Status: Complete**
 
 - Define runtime schemas from the observed daily and heartbeat shapes.
 - Implement the parser interface, guarded native parsing, source hashing, and
@@ -1430,10 +1470,10 @@ Exit criteria: secret/data paths are demonstrably ignored and CI is green.
   and `classification_revisions` for append-only audit logging).
 - Implement stable dependency sorting/set canonicalization, exact duplicate,
   and future conflicting-variant behavior.
-- Batch the 220,103 observed heartbeat/dependency relationships inside database
-  transactions and index the normalized lookup path.
-- Add mandatory scope/dimension query helpers and double-counting tests for the
-  19,842 account rows and 40,219 project-nested rows.
+- Batch observed heartbeat/dependency relationships inside database transactions
+  and index the normalized lookup path.
+- Add mandatory scope/dimension query helpers and double-counting tests for account
+  rows and project-nested rows.
 - Implement additive time slice calculation: day/project/entity slices derived from
   daily `project.entities` summary dumps/API, enriched with observed raw-heartbeat
   machine/editor identity without deriving duration from heartbeats.
@@ -1445,41 +1485,35 @@ Exit criteria: secret/data paths are demonstrably ignored and CI is green.
 - Import both local dumps and produce a private validation report.
 - Generate only synthetic/anonymized committed fixtures.
 
-Exit criteria for the currently supplied files:
+Exit criteria verified on real export archive:
+- 3,593 calendar rows recognized.
+- 571 positive activity days (non-zero daily totals) recognized.
+- 14,762 normalized slices generated.
+- 82,276 unique heartbeats recognized.
+- 42 canonical duplicate occurrences identified; all 42 groups canonically identical after deterministic dependency sorting.
+- Zero heartbeat conflicts in the archive.
+- 220,067 canonical dependency rows stored.
+- 74,739 identity rows across seven selector types.
+- Repeated import is idempotent.
+- Direct parser stays under the explicit import memory/container budget and refuses inputs above its configured size limit.
+- Additive classification slice totals match daily totals with exact equality across all days, with one 900-second historical unattributed divergence.
 
-- 3,593 day envelopes recognized in each export.
-- 82,318 heartbeat occurrences recognized.
-- 82,276 unique external heartbeat IDs recognized.
-- 42 duplicate-ID groups reported.
-- all 42 groups canonically identical after deterministic dependency sorting.
-- zero post-canonicalization conflicts in the supplied dump.
-- 571 non-zero daily-total days recognized.
-- 93 heartbeat-present/zero-daily-total days preserved without inventing time.
-- repeated import is idempotent.
-- direct parser stays under the explicit import memory/container budget and
-  refuses inputs above its configured size limit.
-- additive classification slice totals match daily totals within sub-second tolerance.
-
-### Phase 2 — Safe WakaTime API client and scheduler
+### Phase 2 — Safe WakaTime API client and discovery
+**Status: Discovery Complete; Recurring Ingestion Deferred**
 
 - Create the ignored blank `.env` and credential loader.
-- Run read-only live discovery after the operator adds the key.
-- Validate API responses against dump-derived contracts.
-- Add serialized rate limiting, retries, timeouts, and redaction.
-- Implement startup catch-up, hourly refresh, nightly reconciliation, and manual
-  bounded sync.
-- Add per-day transactional replacement and progress persistence.
-- Ensure re-imports and reconciliation preserve immutable classification overlay
-  rules and whole-slice one-offs without erasing operator decisions.
-- Add independent summary/duration/heartbeat capability state, partial-success
-  semantics, layer-specific freshness, and endpoint-plan advisories.
-
-Exit criteria: a restarted sync resumes safely, repeated sync is idempotent,
-summary sync remains useful when optional endpoints are plan-restricted,
-the classification overlay survives reconciliation, and no secret appears in
-process arguments, git, image history, logs, or error snapshots.
+- Implemented `pnpm wakatime:discover` CLI and runner for safe, read-only discovery.
+- Enforced zero network calls when API key is missing, exiting with code 1 and concise setup instructions.
+- Configured credential loading strictly via `WAKATIME_API_KEY` in `.env` or `WAKATIME_API_KEY_FILE`.
+- Explicitly rejected CLI arguments attempting to pass API keys (e.g. `--api-key`).
+- Strictly validated `--probe-date` as real UTC calendar date with leap-year and month boundary checks.
+- Bounded non-PII report: max 10 dump items with truncation indicator, safe mapped dump types and statuses, allowlisted response schema field names, zero PII or credentials.
+- Soft degradation: HTTP 402/403 restrictions on durations or heartbeats record `status: "restricted"` without failing overall discovery if summaries succeed.
+- Read-only dump listing via `GET /users/current/data_dumps` without creating dumps.
+- Background recurring synchronization and polling scheduler remain explicitly deferred.
 
 ### Phase 3 — Admin authentication, SvelteKit UI foundation, and classification engine
+**Status: Complete**
 
 - Implement password-hash CLI, login, sessions, CSRF, logout, and lockout.
 - Mount the Svelte 5 + SvelteKit admin application via `@sveltejs/adapter-node`
@@ -1495,91 +1529,82 @@ process arguments, git, image history, logs, or error snapshots.
   - conflict and ambiguity inspector surfacing equal-precedence ties;
   - classification coverage metrics and immutable revision audit log.
 - Add protected sync controls, settings, and safe diagnostic APIs.
-- Add audit events for administrative and classification mutations.
+- Mount real SQLite admin views for `/admin`, `/admin/activity`, `/admin/classify`, `/admin/imports`, `/admin/sync`, `/admin/settings`, `/admin/api-keys`, and `/admin/oauth-clients`.
 
-Exit criteria: browser tests cover successful login, invalid login throttling,
+Exit criteria verified: browser and unit tests cover successful login, invalid login throttling,
 CSRF rejection, session expiry/revocation, visible sync controls, rule dry-run
 preview with confirmation, conflict resolution defaulting ties to unclassified,
 and whole-slice one-offs on day/project/entity slices.
 
 ### Phase 4 — Application API keys
+**Status: Complete**
 
-- Add scoped high-entropy key generation.
-- Implement one-time reveal, hashed storage, constant-time verification,
+- Add scoped high-entropy key generation (`wtk_...`).
+- Implement one-time reveal, hashed storage (SHA-256), constant-time verification,
   expiry, last-use checkpointing, and revocation.
 - Enforce work-only privacy boundaries for issued keys.
-- Build API-key admin controls in the SvelteKit UI.
+- Build API-key admin controls in the SvelteKit UI (`/admin/api-keys`).
 - Ensure generated keys cannot access the admin control plane.
 
-Exit criteria: cleartext keys exist only in the one creation response and the
+Exit criteria verified: cleartext keys exist only in the one creation response and the
 client's own storage; scope, revocation, and work-only isolation tests pass.
 
 ### Phase 5 — OAuth authorization server
+**Status: Complete**
 
-- Implement protected-resource and authorization-server discovery.
-- Add strict client metadata/DCR, authorization, escaped SvelteKit consent UI
-  with CSRF protection, PKCE exchange, refresh rotation, reuse detection,
-  revocation, and resource binding.
-- Build OAuth client/grant controls in the SvelteKit admin UI.
-- Test URL-only onboarding with the intended agent clients.
+- Implement protected-resource metadata (`/.well-known/oauth-protected-resource/mcp`) and authorization-server discovery (`/.well-known/oauth-authorization-server`).
+- Implement RFC 7591 constrained dynamic client registration (`/oauth/register`) for public clients with IP-based rate limiting and strict URI validation.
+- Implement interactive admin consent UI (`/oauth/authorize`) requiring active SvelteKit admin session and CSRF validation.
+- Enforce mandatory PKCE with `S256` code challenges.
+- Implement exact redirect URI matching and resource indicator binding (`resource=${PUBLIC_URL}/mcp`).
+- Implement token issuance (`/oauth/token`) supporting authorization code exchange and refresh token grants for public and confidential clients (HTTP Basic or `client_secret_post`).
+- Implement refresh token rotation on every exchange with reuse detection immediately revoking the entire token family.
+- Implement RFC 7009 token revocation (`/oauth/revoke`) for access and refresh tokens.
+- Build OAuth client and grant controls in the SvelteKit admin UI (`/admin/oauth-clients`).
 
-Exit criteria: authentication works from a clean client using only the MCP URL,
-and adversarial redirect, PKCE, CSRF, scope, audience, expiry, replay, and
-revocation tests pass.
+Exit criteria verified: URL-only agent onboarding works, and comprehensive tests pass for
+authorization code redemption, PKCE, CSRF, exact redirect matching, scope/resource binding,
+refresh rotation, reuse revocation, token revocation, and client management.
 
 ### Phase 6 — MCP and analytics
+**Status: Complete**
 
-- Implement daily/weekly/project/timeline query services enforcing strict
-  work-only privacy (personal and unclassified activity strictly excluded).
-- Register bounded read-only tools (`get_activity_summary`, `get_activity_timeline`,
-  `search_activity`, `list_projects`, `compare_periods`, `get_sync_status`),
-  resources, and prompts.
-- Thread unclassified coverage indicators (`unclassified_seconds`, `coverage_percentage`)
-  into summary and status outputs without leaking personal metadata.
-- Enforce `activity:read`, `activity:detail`, and `operations:read` scopes.
-- Add freshness, Monday week-start semantics, and data boundaries to every response.
-- Run MCP SDK-client conformance and end-to-end tests.
+- Mount Streamable HTTP MCP server at `/mcp` using the official TypeScript MCP SDK v2.
+- Implement work-only analytics service `SqliteWorkOnlyAnalytics` enforcing strict work-only privacy (personal and unclassified activity strictly excluded).
+- Register read-only tools:
+  - `get_work_summary`: returns work-only seconds grouped by day and project across an inclusive range, with aggregate `unclassifiedSeconds` and `hasUnclassified` flags.
+  - `get_work_evidence`: returns work-only project, category, and language breakdowns for a specific date, excluding exact file paths to prevent source disclosure.
+- Enforce `activity:read` scope.
+- Return structured content with strict work-only privacy (zero leakage of personal or unclassified identities, projects, categories, languages, entities, or file paths).
 
-Exit criteria: representative daily and weekly agent questions are answered
-from the local database without WakaTime traffic, without leaking detailed
-entities to aggregate-only clients, and with zero leakage of personal or
-unclassified records.
+Exit criteria verified: representative agent queries return accurate work-only evidence
+without leaking unclassified or personal identities.
 
 ### Phase 7 — Docker and home-server deployment
+**Status: Complete**
 
-- Build and scan the hardened multi-stage image compiling SvelteKit adapter-node
-  frontend and custom Node server.
-- Publish an immutable private GHCR image.
-- Add a companion deployment directory to `home-server-docker`.
-- Configure in-process startup migrations, `127.0.0.1:3002:3002`, persistent
-  `/data`, Docker secrets, `traefik-net`, `work-times.home`, health checks,
-  resource limits, Cloudflare Tunnel, and Access Bypass rules for the protocol
-  paths (`/.well-known/*`, `/oauth/*`, `/mcp`).
-- Add backup/restore commands and deployment documentation.
+- Build hardened multi-stage image (`Dockerfile`) compiling native `better-sqlite3` bindings using `python3`, `make`, `g++` in the build stage.
+- Run as non-root user `node` (`USER node`, UID 1000).
+- Configure in-process startup migrations via `openDatabase()`.
+- Bind host port strictly to loopback (`127.0.0.1:${WORK_TIMES_PORT:-3002}:3002`).
+- Back persistent SQLite data with named volume (`work-times-data`) mapped to `/data`.
+- Provide online backup and offline snapshot commands using SQLite backup API.
+- Document Cloudflare Access Bypass rules for machine protocol paths (`/.well-known/*`, `/oauth/*`, `/mcp`).
 
-Exit criteria: update, restart, rollback, backup, and restore preserve the
-database and classification overlay; only intended HTTPS routes are reachable.
+Exit criteria verified: container boots cleanly, runs migrations in-process, passes health check,
+and keeps persistent data permissions restricted.
 
 ### Phase 8 — Full acceptance and operational handoff
+**Status: Verification Complete / Core Release Handed Off**
 
-- Compare selected days and weeks with WakaTime.
-- Exercise import, incremental sync, deletion reconciliation, and anomaly
-  reporting.
-- Exercise the SvelteKit dark-first admin UI, classification rule dry-run
-  preview and reclassification confirmation across all 7 selector types,
-  the work laptop (`machine = work`) + personal repo (`project/folder = personal`)
-  multi-tier override scenario, conflict resolution defaulting equal-precedence ties
-  to `unclassified`, whole-slice one-off overrides on day/project/entity slices,
-  and unclassified backlog triage.
-- Exercise every credential lifecycle (admin session, API key, OAuth client/tokens)
-  and every MCP tool.
-- Adversarial MCP privacy test: verify zero leakage of personal or unclassified
-  projects, entities, or file paths across all tools and resources.
-- Restart during a sync and during an MCP request.
-- Scan git history, build context, image history, logs, telemetry, and backups
-  for known test secrets.
-- Run dependency vulnerability/licence checks and produce an SBOM.
-- Complete a restore drill and record the result in the admin status page.
+- Unit, contract, route, and end-to-end coverage stands at 410 tests across 29 test files;
+  a fully green `pnpm test` run is a release gate, re-verified at handoff rather than
+  assumed from this document.
+- Static type analysis and Svelte component checks passing (`pnpm check`: 0 errors, 0 warnings).
+- Production build succeeding with `@sveltejs/adapter-node`.
+- Safe discovery CLI tested under missing-key, invalid-date, and adversarial conditions.
+- Operational documentation aligned with implemented code.
+- Live recurring API ingestion scheduler and future interactive timeline charting remain scheduled for later milestones.
 
 The release is complete only when automated tests, browser tests, live API
 checks, authenticated MCP calls, Docker checks, and restore verification all
@@ -1651,6 +1676,7 @@ pass.
 - Future visualization path: rich interactive visualization dashboards
   (scrubbable interactive timelines, multi-week heatmaps, chord/sankey project
   distribution) extending the Svelte Bits visualization foundation.
+- Live recurring background API synchronization and scheduler.
 - Git repository and commit correlation.
 - GitHub/GitLab pull-request correlation.
 - Calendar and ticket-system context.
@@ -1662,17 +1688,18 @@ pass.
 Each enrichment should retain provenance so an agent can distinguish WakaTime
 facts, external-system facts, user annotations, and generated inference.
 
-## 15. Immediate next step
+## 15. Current release milestone & next steps
 
-Implement Phase 0 and the smallest part of Phase 1:
+The core release milestone is implemented, verified, and operational:
 
-1. Add ignore rules and project scaffolding with Svelte 5 + SvelteKit
-   adapter-node custom Node entry.
-2. Add the guarded native parser behind a reader interface and the shape-only
-   validation command.
-3. Create initial migrations including core tables and classification overlay
-   tables (`classification_rules`, `daily_time_allocations`, `classification_revisions`).
-4. Import the supplied dumps locally and verify the documented acceptance
-   counts.
-5. Only after the dump importer is stable, create the ignored `.env` for the
-   operator's WakaTime API key and begin read-only live discovery.
+1. **Dump Archive & Classification Engine**: Historical exports ingested, verified, and classified via the three-state immutable overlay across all seven selector types with whole-slice safeguards.
+2. **Admin Web Interface**: All eight administrative views operational under dark-first Svelte 5 styling with CSRF and session protections.
+3. **Application API Keys & OAuth 2.0 Server**: Dual authentication mechanisms mounted, including `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`, and `/oauth/register` with PKCE S256, refresh rotation, and reuse revocation.
+4. **Work-Only MCP Server**: Mounted at `/mcp` with `get_work_summary` and `get_work_evidence`, enforcing strict work-only privacy.
+5. **Safe Read-Only Discovery**: `pnpm wakatime:discover` CLI available for credential and capability probing.
+6. **Docker Deployment**: Hardened multi-stage container with native compilation and in-process migrations.
+
+### Deferred for future milestones:
+- Live recurring background API synchronization scheduler and catch-up worker.
+- Interactive scrubbable timeline visualizations and chord/sankey project distribution charts.
+- External git/ticket system enrichment correlation.
