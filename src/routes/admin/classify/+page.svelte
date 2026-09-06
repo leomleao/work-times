@@ -2,7 +2,7 @@
   import AppShell from '$lib/components/AppShell.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import type { PageData, ActionData } from './$types';
-  import { SELECTOR_TYPES, type SelectorType } from '$lib/server/classification/model';
+  import type { SelectorType } from '$lib/server/classification/model';
   import type {
     ClassificationCoverage,
     ClassificationRevisionRecord,
@@ -60,6 +60,15 @@
   let csrfToken = $derived<string | null>(data?.csrfToken ?? null);
 
   // Navigation tab state
+  const ALL_SELECTOR_TYPES: readonly SelectorType[] = [
+    'machine',
+    'editor',
+    'application',
+    'domain',
+    'project',
+    'folder_prefix',
+    'entity'
+  ] as const;
   let currentTab = $state<'suggestions' | 'rules' | 'overrides' | 'revisions'>('suggestions');
   let selectedSelectorFilter = $state<'all' | SelectorType>('all');
   let searchQuery = $state('');
@@ -1298,7 +1307,7 @@
           bind:value={editRuleSelectorType}
           class="form-input"
         >
-          {#each SELECTOR_TYPES as st}
+          {#each ALL_SELECTOR_TYPES as st}
             <option value={st}>{st} (Rank {getSelectorSpecificity(st)})</option>
           {/each}
         </select>

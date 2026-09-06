@@ -1096,5 +1096,24 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       expect(svelteSrc).toContain('shiftedSeconds.workToPersonal');
       expect(svelteSrc).toContain('shiftedSeconds.personalToWork');
     });
+
+    it('verifies +page.svelte respects SvelteKit server-only boundary with no runtime $lib/server imports', () => {
+      const svelteSrc = loadClassifySvelte();
+
+      // Find all imports from $lib/server that are not type-only
+      const serverImportRegex = /import\s+(?:(?!(?:type\s+))[^;]+)\s+from\s+['"]\$lib\/server[^'"]*['"]/g;
+      const matches = [...svelteSrc.matchAll(serverImportRegex)];
+      expect(matches).toHaveLength(0);
+
+      // Verify SelectorType is imported as a type only
+      expect(svelteSrc).toMatch(/import\s+type\s+\{[^}]*SelectorType[^}]*\}\s+from\s+['"]\$lib\/server\/classification\/model['"]/);
+      expect(svelteSrc).not.toMatch(/import\s+\{[^}]*SELECTOR_TYPES[^}]*\}\s+from\s+['"]\$lib\/server/);
+
+      // Verify all seven selector types are defined in ALL_SELECTOR_TYPES
+      expect(svelteSrc).toContain('ALL_SELECTOR_TYPES');
+      for (const selector of ['machine', 'editor', 'application', 'domain', 'project', 'folder_prefix', 'entity']) {
+        expect(svelteSrc).toContain(`'${selector}'`);
+      }
+    });
   });
 });
