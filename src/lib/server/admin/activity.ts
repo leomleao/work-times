@@ -247,8 +247,10 @@ export function validateActivityFilterQuery(
     endDate = parsed;
   }
 
-  // Selected date mutually exclusive with range
-  if (selectedDate && selectedDate !== 'all' && (startDate || endDate)) {
+  // A date selector, including the "all" sentinel, is mutually exclusive with
+  // an explicit range. Accepting both makes the response claim "All Dates"
+  // while the loader actually applies the range bounds.
+  if (selectedDate && (startDate || endDate)) {
     return { ok: false, error: 'Selected date cannot be combined with startDate or endDate range filters.' };
   }
 

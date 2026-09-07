@@ -663,6 +663,9 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
         validateActivityFilterQuery({ date: '2026-09-01', startDate: '2026-08-01', endDate: '2026-08-31' }).ok
       ).toBe(false);
       expect(validateActivityFilterQuery({ date: '2026-09-01', endDate: '2026-08-31' }).ok).toBe(false);
+      expect(
+        validateActivityFilterQuery({ date: 'all', startDate: '2026-08-01', endDate: '2026-08-31' }).ok
+      ).toBe(false);
     });
 
     it('requires a complete range with start <= end and at most 366 days', () => {
