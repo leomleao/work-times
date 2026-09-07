@@ -23,5 +23,6 @@
 *.sqlite-wal
 
 # Local tooling
+/.worktrees/
 .DS_Store
 *.log
