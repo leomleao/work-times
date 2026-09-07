@@ -158,15 +158,15 @@ pnpm db:migrate --status
 
 ### 4. Connect WakaTime with OAuth
 
-Create an app at <https://wakatime.com/apps>. For a production origin of `https://times.byleo.uk`, register:
+Create an app at <https://wakatime.com/apps>. For a production origin of `https://time.byleo.uk`, register:
 
 ```text
-Install URL: https://times.byleo.uk/integrations/wakatime
-Authorized Redirect URI: https://times.byleo.uk/oauth/wakatime/callback
+Install URL: https://time.byleo.uk/integrations/wakatime
+Authorized Redirect URI: https://time.byleo.uk/oauth/wakatime/callback
 Authorized Redirect URI: http://localhost:3002/oauth/wakatime/callback
 ```
 
-If the final production hostname changes, replace `times.byleo.uk` in both production URLs. Redirect URIs must match `PUBLIC_URL` exactly. Configure the App ID and App Secret locally:
+If the final production hostname changes, replace `time.byleo.uk` in both production URLs. Redirect URIs must match `PUBLIC_URL` exactly. Configure the App ID and App Secret locally:
 
 ```dotenv
 PUBLIC_URL=http://localhost:3002

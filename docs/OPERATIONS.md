@@ -133,8 +133,8 @@ All runtime configuration is evaluated in `src/lib/server/config.ts` and `server
 For the planned production origin, enter the following at <https://wakatime.com/apps>:
 
 ```text
-Install URL: https://times.byleo.uk/integrations/wakatime
-Authorized Redirect URI: https://times.byleo.uk/oauth/wakatime/callback
+Install URL: https://time.byleo.uk/integrations/wakatime
+Authorized Redirect URI: https://time.byleo.uk/oauth/wakatime/callback
 Authorized Redirect URI: http://localhost:3002/oauth/wakatime/callback
 ```
 
