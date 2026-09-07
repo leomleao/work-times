@@ -666,7 +666,7 @@ describe('SqliteClassificationService - Coverage & Unclassified Suggestions', ()
     expect(suggestions[0].specificity).toBeLessThanOrEqual(40);
   });
 
-  it('resolves friendly machine and editor names and matches rules with friendly names', () => {
+  it('keeps selector identities stable and never guesses an editor from daily aggregates', () => {
     db.prepare(
       `INSERT OR REPLACE INTO daily_dimension_totals
        (date, scope, dimension, name, machine_name_id, total_seconds, human_additions, human_deletions, ai_additions, ai_deletions, ai_sessions, source_import_id)
@@ -680,6 +680,12 @@ describe('SqliteClassificationService - Coverage & Unclassified Suggestions', ()
     ).run();
 
     db.prepare(
+      `INSERT OR REPLACE INTO daily_dimension_totals
+       (date, scope, dimension, name, total_seconds, human_additions, human_deletions, ai_additions, ai_deletions, ai_sessions, source_import_id)
+       VALUES ('2026-06-15', 'account', 'editor', 'Another Editor', 500, 0, 0, 0, 0, 0, 1)`
+    ).run();
+
+    db.prepare(
       `INSERT OR REPLACE INTO heartbeats
        (id, external_id, occurred_at_us, occurred_at, local_date, entity, entity_type, category, user_agent_id, source_import_id, canonical_hash)
        VALUES (9901, 'hb-uuid-1', 1700000000000000, '2026-06-15T12:00:00Z', '2026-06-15', 'src/app.ts', 'file', 'coding', 'editor-agent-uuid-1', 1, 'hash-hb-1')`
@@ -688,12 +694,14 @@ describe('SqliteClassificationService - Coverage & Unclassified Suggestions', ()
     service.clearCaches();
 
     expect(service.resolveMachineName('mach-uuid-1')).toBe('MacBook-Pro.local');
-    expect(service.resolveEditorName('editor-agent-uuid-1')).toBe('VS Code');
+    expect(service.resolveEditorName('editor-agent-uuid-1')).toBe('editor-agent-uuid-1');
+    expect(service.getEditorNameMap()).toEqual(new Map());
   });
 
-  it('provides unclassified suggestions with fair per-type representation and friendly names', () => {
+  it('provides unclassified suggestions with fair per-type representation and separate display values', () => {
     const suggestions = service.getUnclassifiedSuggestions({ limitPerType: 10 });
     expect(suggestions.length).toBeGreaterThan(0);
+    expect(suggestions.every((suggestion) => suggestion.displayValue.length > 0)).toBe(true);
 
     for (let i = 1; i < suggestions.length; i++) {
       expect(suggestions[i].specificity).toBeGreaterThanOrEqual(suggestions[i - 1].specificity);

@@ -1150,7 +1150,11 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       expect(svelteSrc).toContain('Project ({candidateCounts.project})');
       expect(svelteSrc).not.toContain('Machine (10)');
       expect(svelteSrc).not.toContain('Project (40)');
+
+      // A friendly label must never be submitted in place of the canonical
+      // identity when an existing rule is edited.
+      expect(svelteSrc).toContain('editRuleSelectorValue = rule.selector_value');
+      expect(svelteSrc).not.toContain('editRuleSelectorValue = rule.display_value');
     });
   });
 });
-

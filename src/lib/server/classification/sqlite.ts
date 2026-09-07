@@ -220,6 +220,7 @@ export interface ClassificationCoverage {
 export interface UnclassifiedSuggestion {
   selectorType: SelectorType;
   selectorValue: string;
+  displayValue: string;
   specificity: number;
   unclassifiedSeconds: number;
   sliceCount: number;
@@ -272,13 +273,12 @@ function canonicalOperationKey(op: NormalizedRuleOperation): string {
 
 export class SqliteClassificationService {
   private machineNameMap: Map<string, string> | null = null;
-  private editorNameMap: Map<string, string> | null = null;
+  private readonly editorNameMap = new Map<string, string>();
 
   constructor(private readonly db: Database.Database) {}
 
   clearCaches(): void {
     this.machineNameMap = null;
-    this.editorNameMap = null;
   }
 
   getMachineNameMap(): Map<string, string> {
@@ -288,40 +288,20 @@ export class SqliteClassificationService {
     try {
       const directRows = this.db
         .prepare(
-          "SELECT DISTINCT name, machine_name_id FROM daily_dimension_totals WHERE dimension = 'machine' AND machine_name_id IS NOT NULL"
+          `SELECT machine_name_id, MIN(name) AS name
+           FROM daily_dimension_totals
+           WHERE scope = 'account'
+             AND dimension = 'machine'
+             AND machine_name_id IS NOT NULL
+           GROUP BY machine_name_id
+           HAVING COUNT(DISTINCT name) = 1`
         )
         .all() as Array<{ name: string; machine_name_id: string }>;
 
       for (const r of directRows) {
-        if (r.machine_name_id && !map.has(r.machine_name_id)) {
-          map.set(r.machine_name_id, r.name);
-        }
-      }
-
-      const unmapped = (
-        this.db
-          .prepare("SELECT DISTINCT value FROM slice_identities WHERE selector_type = 'machine'")
-          .all() as Array<{ value: string }>
-      )
-        .map((r) => r.value)
-        .filter((id) => !map.has(id));
-
-      if (unmapped.length > 0) {
-        const placeholders = unmapped.map(() => '?').join(',');
-        const hbRows = this.db
-          .prepare(
-            `SELECT h.machine_name_id, d.name AS machine_name, SUM(h.occurrence_count) AS score
-             FROM heartbeats h
-             JOIN daily_dimension_totals d ON d.date = h.local_date AND d.dimension = 'machine'
-             WHERE h.machine_name_id IN (${placeholders})
-             GROUP BY h.machine_name_id, d.name`
-          )
-          .all(...unmapped) as Array<{ machine_name_id: string; machine_name: string; score: number }>;
-
-        for (const r of hbRows) {
-          if (!map.has(r.machine_name_id)) {
-            map.set(r.machine_name_id, r.machine_name);
-          }
+        const id = normalizeSelectorValue('machine', r.machine_name_id);
+        if (id && !map.has(id)) {
+          map.set(id, r.name);
         }
       }
     } catch {
@@ -333,36 +313,15 @@ export class SqliteClassificationService {
   }
 
   getEditorNameMap(): Map<string, string> {
-    if (this.editorNameMap) return this.editorNameMap;
-
-    const map = new Map<string, string>();
-    try {
-      const edRows = this.db
-        .prepare(
-          `SELECT h.user_agent_id, d.name AS editor_name, SUM(h.occurrence_count) AS score
-           FROM heartbeats h
-           JOIN daily_dimension_totals d ON d.date = h.local_date AND d.dimension = 'editor'
-           WHERE h.user_agent_id IS NOT NULL
-           GROUP BY h.user_agent_id, d.name`
-        )
-        .all() as Array<{ user_agent_id: string; editor_name: string; score: number }>;
-
-      for (const r of edRows) {
-        const existing = map.get(r.user_agent_id);
-        if (!existing) {
-          map.set(r.user_agent_id, r.editor_name);
-        }
-      }
-    } catch {
-      // Fall back gracefully in test or minimal databases
-    }
-
-    this.editorNameMap = map;
-    return map;
+    // A heartbeat's user_agent_id can only be resolved authoritatively through
+    // WakaTime's /users/current/user_agents registry. Daily editor totals are
+    // aggregate views and cannot be joined to an individual heartbeat by date.
+    // Keep IDs unresolved until that registry is persisted by the sync phase.
+    return this.editorNameMap;
   }
 
   resolveMachineName(value: string): string {
-    return this.getMachineNameMap().get(value) ?? value;
+    return this.getMachineNameMap().get(normalizeSelectorValue('machine', value)) ?? value;
   }
 
   resolveEditorName(value: string): string {
@@ -1612,19 +1571,11 @@ export class SqliteClassificationService {
         identitiesBySlice.set(r.slice_id, entry);
       }
       if (r.selector_type === 'machine') {
-        const friendly = this.resolveMachineName(r.value);
-        if (friendly && !entry.machineIds.includes(friendly)) {
-          entry.machineIds.push(friendly);
-        }
-        if (r.value && r.value !== friendly && !entry.machineIds.includes(r.value)) {
+        if (r.value && !entry.machineIds.includes(r.value)) {
           entry.machineIds.push(r.value);
         }
       } else if (r.selector_type === 'editor') {
-        const friendly = this.resolveEditorName(r.value);
-        if (friendly && !entry.editors.includes(friendly)) {
-          entry.editors.push(friendly);
-        }
-        if (r.value && r.value !== friendly && !entry.editors.includes(r.value)) {
+        if (r.value && !entry.editors.includes(r.value)) {
           entry.editors.push(r.value);
         }
       }
@@ -1867,12 +1818,12 @@ export class SqliteClassificationService {
         continue;
       }
 
-      const sliceMachines = new Set(s.machineIds.map((m) => this.resolveMachineName(m)));
+      const sliceMachines = new Set(s.machineIds);
       for (const m of sliceMachines) {
         recordCandidate('machine', m, s);
       }
 
-      const sliceEditors = new Set(s.editors.map((e) => this.resolveEditorName(e)));
+      const sliceEditors = new Set(s.editors);
       for (const e of sliceEditors) {
         recordCandidate('editor', e, s);
       }
@@ -1950,6 +1901,12 @@ export class SqliteClassificationService {
       return {
         selectorType: cg.selectorType,
         selectorValue: cg.selectorValue,
+        displayValue:
+          cg.selectorType === 'machine'
+            ? this.resolveMachineName(cg.selectorValue)
+            : cg.selectorType === 'editor'
+              ? this.resolveEditorName(cg.selectorValue)
+              : cg.selectorValue,
         specificity: SELECTOR_SPECIFICITY[cg.selectorType],
         unclassifiedSeconds: roundSeconds(cg.unclassifiedSeconds),
         sliceCount: cg.slices.length,

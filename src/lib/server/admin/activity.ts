@@ -14,14 +14,13 @@ import {
 /** Distinct dates offered by the date picker. */
 export const MAX_DISTINCT_DATES = 60;
 /**
- * Hard cap on slices materialized for one activity view.
+ * Hard cap on matching slices carried into one activity view.
  *
  * The date-range validator already caps a query at 366 days, but a single busy
- * day can carry tens of thousands of slices, and every one of them is loaded,
- * classified and sorted in memory before pagination. The cap keeps one request
- * bounded regardless of how much history the database holds; when it bites,
- * `isTruncated` says so rather than letting the page imply the totals are
- * complete.
+ * day can carry tens of thousands of slices. Classification currently evaluates
+ * the selected date range before the cap, but filtering happens before limiting
+ * so a narrow drilldown cannot lose matches to unrelated rows. When the cap
+ * bites, `isTruncated` says so rather than implying the totals are complete.
  */
 export const MAX_ACTIVITY_SLICES = 20_000;
 /** Identity selectors surfaced per slice row. */
@@ -258,17 +257,17 @@ export function validateActivityFilterQuery(
     return { ok: false, error: 'Both startDate and endDate are required when querying a date range.' };
   }
 
-  // start <= end and hard maximum 366-day range
+  // start <= end; ordinary exploratory ranges are capped after selector-pair
+  // validation below. A classification drilldown may carry its full observed
+  // timeframe because the selector still bounds the resulting view.
+  let rangeDays: number | null = null;
   if (startDate && endDate) {
     if (startDate > endDate) {
       return { ok: false, error: `startDate (${startDate}) must be less than or equal to endDate (${endDate}).` };
     }
     const startMs = Date.parse(`${startDate}T00:00:00Z`);
     const endMs = Date.parse(`${endDate}T00:00:00Z`);
-    const diffDays = Math.round((endMs - startMs) / 86_400_000) + 1;
-    if (diffDays > 366) {
-      return { ok: false, error: `Date range of ${diffDays} days exceeds the maximum allowed 366-day range.` };
-    }
+    rangeDays = Math.round((endMs - startMs) / 86_400_000) + 1;
   }
 
   // 3. Page bounds
@@ -338,7 +337,21 @@ export function validateActivityFilterQuery(
     if (rawFilters.selectorValue.length > 500) {
       return { ok: false, error: 'Query parameter selectorValue cannot exceed 500 characters.' };
     }
-    selectorValue = rawFilters.selectorValue.trim();
+    selectorValue = rawFilters.selectorValue.trim() || null;
+  }
+
+  if ((selectorType === null) !== (selectorValue === null)) {
+    return {
+      ok: false,
+      error: 'selectorType and selectorValue must be provided together.'
+    };
+  }
+
+  if (rangeDays !== null && rangeDays > 366 && selectorType === null) {
+    return {
+      ok: false,
+      error: `Date range of ${rangeDays} days exceeds the maximum allowed 366-day range.`
+    };
   }
 
   // 8. Individual dimension filters
@@ -534,64 +547,28 @@ export function getActivityData(
   }
 
   const loadedSlices: EvaluatedSlice[] = classification.classifySlices(sliceFilter);
-  const isTruncated = loadedSlices.length > MAX_ACTIVITY_SLICES;
-  const classifiedSlices = isTruncated
-    ? loadedSlices.slice(0, MAX_ACTIVITY_SLICES)
-    : loadedSlices;
+
+  const displayMachines = (slice: EvaluatedSlice): string[] =>
+    Array.from(new Set(slice.machineIds.map((id) => classification.resolveMachineName(id))));
+  const displayEditors = (slice: EvaluatedSlice): string[] =>
+    Array.from(new Set(slice.editors.map((id) => classification.resolveEditorName(id))));
 
   const distinctProjects = Array.from(
     new Set(loadedSlices.map((s) => s.projectName).filter((p): p is string => Boolean(p)))
   ).sort();
   const distinctEditors = Array.from(
-    new Set(loadedSlices.flatMap((s) => s.editors).filter(Boolean))
+    new Set(loadedSlices.flatMap(displayEditors).filter(Boolean))
   ).sort();
   const distinctMachines = Array.from(
-    new Set(loadedSlices.flatMap((s) => s.machineIds).filter(Boolean))
+    new Set(loadedSlices.flatMap(displayMachines).filter(Boolean))
   ).sort();
-
-  // Load telemetry metrics (ai_sessions, additions, deletions) for these slices
-  const sliceIds = classifiedSlices.map((s) => s.id);
-  const telemetryMap = new Map<
-    number,
-    {
-      ai_sessions: number;
-      ai_additions: number;
-      ai_deletions: number;
-      human_additions: number;
-      human_deletions: number;
-    }
-  >();
-
-  if (sliceIds.length > 0) {
-    // Query in batches if needed
-    const batchSize = 500;
-    for (let i = 0; i < sliceIds.length; i += batchSize) {
-      const batch = sliceIds.slice(i, i + batchSize);
-      const placeholders = batch.map(() => '?').join(',');
-      const rows = db
-        .prepare(
-          `SELECT id, ai_sessions, ai_additions, ai_deletions, human_additions, human_deletions
-           FROM day_project_entity_slices
-           WHERE id IN (${placeholders})`
-        )
-        .all(...batch) as Array<{
-          id: number;
-          ai_sessions: number;
-          ai_additions: number;
-          ai_deletions: number;
-          human_additions: number;
-          human_deletions: number;
-        }>;
-
-      for (const r of rows) {
-        telemetryMap.set(r.id, r);
-      }
-    }
-  }
 
   // 4. Apply in-memory classification, query text, and dynamic selector filters
   const lowerQ = q.toLowerCase();
-  const filteredSlices = classifiedSlices.filter((s) => {
+  const matchingSlices = loadedSlices.filter((s) => {
+    const machineLabels = displayMachines(s);
+    const editorLabels = displayEditors(s);
+
     if (classificationFilter !== 'all' && s.decision.classification !== classificationFilter) {
       return false;
     }
@@ -599,8 +576,12 @@ export function getActivityData(
     if (lowerQ) {
       const entityMatch = s.entity.toLowerCase().includes(lowerQ);
       const projMatch = (s.projectName ?? '').toLowerCase().includes(lowerQ);
-      const machineMatch = s.machineIds.some((m) => m.toLowerCase().includes(lowerQ));
-      const editorMatch = s.editors.some((e) => e.toLowerCase().includes(lowerQ));
+      const machineMatch = [...s.machineIds, ...machineLabels].some((m) =>
+        m.toLowerCase().includes(lowerQ)
+      );
+      const editorMatch = [...s.editors, ...editorLabels].some((e) =>
+        e.toLowerCase().includes(lowerQ)
+      );
       if (!entityMatch && !projMatch && !machineMatch && !editorMatch) {
         return false;
       }
@@ -608,6 +589,10 @@ export function getActivityData(
 
     // Dynamic selector rule matching (handles all 7 selector types from Classify drilldown)
     if (validated.selectorType && validated.selectorValue) {
+      // Reusable rules deliberately do not apply to unattributed slices, so a
+      // candidate drilldown must exclude them as well or its count will exceed
+      // the classification preview.
+      if (s.isUnattributed) return false;
       const classifiableSlice: ClassifiableSlice = {
         id: String(s.id),
         project: s.projectName,
@@ -637,14 +622,14 @@ export function getActivityData(
 
     if (validated.editor) {
       const e = validated.editor.toLowerCase();
-      if (!s.editors.some((ed) => ed.toLowerCase() === e)) {
+      if (![...s.editors, ...editorLabels].some((ed) => ed.toLowerCase() === e)) {
         return false;
       }
     }
 
     if (validated.machine) {
       const m = validated.machine.toLowerCase();
-      if (!s.machineIds.some((mac) => mac.toLowerCase() === m)) {
+      if (![...s.machineIds, ...machineLabels].some((mac) => mac.toLowerCase() === m)) {
         return false;
       }
     }
@@ -684,12 +669,59 @@ export function getActivityData(
     return true;
   });
 
-  // Sort slices: newest date first, then largest duration
-  filteredSlices.sort((a, b) => {
+  // Sort the complete matching set before applying the view cap. This ensures
+  // all-history drilldowns keep the newest matching slices instead of capping
+  // the oldest unfiltered rows first.
+  matchingSlices.sort((a, b) => {
     const cmp = b.date.localeCompare(a.date);
     if (cmp !== 0) return cmp;
     return b.totalSeconds - a.totalSeconds;
   });
+
+  const isTruncated = matchingSlices.length > MAX_ACTIVITY_SLICES;
+  const filteredSlices = isTruncated
+    ? matchingSlices.slice(0, MAX_ACTIVITY_SLICES)
+    : matchingSlices;
+
+  // Load telemetry metrics (ai_sessions, additions, deletions) only for the
+  // filtered, capped set that the view and its metrics actually represent.
+  const sliceIds = filteredSlices.map((s) => s.id);
+  const telemetryMap = new Map<
+    number,
+    {
+      ai_sessions: number;
+      ai_additions: number;
+      ai_deletions: number;
+      human_additions: number;
+      human_deletions: number;
+    }
+  >();
+
+  if (sliceIds.length > 0) {
+    const batchSize = 500;
+    for (let i = 0; i < sliceIds.length; i += batchSize) {
+      const batch = sliceIds.slice(i, i + batchSize);
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = db
+        .prepare(
+          `SELECT id, ai_sessions, ai_additions, ai_deletions, human_additions, human_deletions
+           FROM day_project_entity_slices
+           WHERE id IN (${placeholders})`
+        )
+        .all(...batch) as Array<{
+          id: number;
+          ai_sessions: number;
+          ai_additions: number;
+          ai_deletions: number;
+          human_additions: number;
+          human_deletions: number;
+        }>;
+
+      for (const r of rows) {
+        telemetryMap.set(r.id, r);
+      }
+    }
+  }
 
   // 5. Compute aggregate metrics for the filtered view
   let totalDurationSeconds = 0;
@@ -746,8 +778,8 @@ export function getActivityData(
       totalSeconds,
       formattedDuration: formatDuration(totalSeconds),
       isUnattributed: s.isUnattributed,
-      machineIds: boundedStringList(s.machineIds, MAX_SLICE_SELECTORS),
-      editors: boundedStringList(s.editors, MAX_SLICE_SELECTORS),
+      machineIds: boundedStringList(displayMachines(s), MAX_SLICE_SELECTORS),
+      editors: boundedStringList(displayEditors(s), MAX_SLICE_SELECTORS),
       classification: s.decision.classification,
       decisionSource: s.decision.source,
       winningRuleId: s.decision.winningRuleId,

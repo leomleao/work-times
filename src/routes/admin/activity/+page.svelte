@@ -71,6 +71,24 @@
     return `/admin/activity${query ? `?${query}` : ''}`;
   }
 
+  function submitSelectedDate(event: Event): void {
+    const select = event.currentTarget as HTMLSelectElement;
+    if (!select.value) return;
+    const form = select.form;
+    if (!form) return;
+    const start = form.elements.namedItem('startDate') as HTMLInputElement | null;
+    const end = form.elements.namedItem('endDate') as HTMLInputElement | null;
+    if (start) start.value = '';
+    if (end) end.value = '';
+    form.requestSubmit();
+  }
+
+  function activateDateRange(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    const date = input.form?.elements.namedItem('date') as HTMLSelectElement | null;
+    if (date) date.value = '';
+  }
+
   let hasActiveFilters = $derived(
     Boolean(
       (activity.filters.selectorType && activity.filters.selectorValue) ||
@@ -84,6 +102,7 @@
       (activity.filters.entityType && activity.filters.entityType !== 'all') ||
       (activity.filters.classification && activity.filters.classification !== 'all') ||
       activity.filters.q ||
+      (activity.filters.startDate && activity.filters.endDate) ||
       activity.filters.selectedDate === 'all'
     )
   );
@@ -170,16 +189,18 @@
               name="date"
               class="form-select"
               style="font-size: 12px; padding: 6px 10px; min-width: 140px;"
-              onchange={(e) => {
-                (e.currentTarget.form as HTMLFormElement).submit();
-              }}
+              onchange={submitSelectedDate}
             >
               {#if activity.distinctDates.length === 0}
                 <option value="">No dates recorded</option>
               {:else}
-                <option value="all" selected={activity.filters.selectedDate === 'all'}>
-                  All Dates ({activity.distinctDates.length} days)
+                <option
+                  value=""
+                  selected={Boolean(activity.filters.startDate && activity.filters.endDate)}
+                >
+                  Custom range
                 </option>
+                <option value="all" selected={activity.filters.selectedDate === 'all'}>All Dates</option>
                 {#each activity.distinctDates as d}
                   <option value={d} selected={d === activity.filters.selectedDate}>
                     {d} {d === activity.latestDate ? '(Latest)' : ''}
@@ -187,6 +208,32 @@
                 {/each}
               {/if}
             </select>
+          </div>
+
+          <!-- Explicit date range; changing either bound clears the single-date selector. -->
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <label for="filter-start-date" style="font-size: 11px; color: var(--faint);">From</label>
+            <input
+              id="filter-start-date"
+              name="startDate"
+              type="date"
+              value={activity.filters.startDate ?? ''}
+              max={activity.latestDate ?? undefined}
+              class="form-input"
+              style="width: 132px; font-size: 12px; padding: 6px 8px;"
+              onchange={activateDateRange}
+            />
+            <label for="filter-end-date" style="font-size: 11px; color: var(--faint);">To</label>
+            <input
+              id="filter-end-date"
+              name="endDate"
+              type="date"
+              value={activity.filters.endDate ?? ''}
+              max={activity.latestDate ?? undefined}
+              class="form-input"
+              style="width: 132px; font-size: 12px; padding: 6px 8px;"
+              onchange={activateDateRange}
+            />
           </div>
 
           <!-- Project Selector -->
@@ -361,6 +408,27 @@
                 style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
                 title="Reset to latest date"
                 aria-label="Reset to latest date"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.startDate && activity.filters.endDate}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span>
+                <strong>Range:</strong> {activity.filters.startDate} → {activity.filters.endDate}
+              </span>
+              <a
+                href={buildFilterUrl({
+                  startDate: null,
+                  endDate: null,
+                  date: activity.latestDate ?? '',
+                  page: 1
+                })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Reset to latest date"
+                aria-label="Clear date range"
               >
                 <X size={12} />
               </a>

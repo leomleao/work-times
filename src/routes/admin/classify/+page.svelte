@@ -218,7 +218,9 @@
     editRuleName = rule.name;
     editRuleClassification = rule.classification;
     editRuleSelectorType = rule.selector_type;
-    editRuleSelectorValue = rule.display_value || formatSelectorDisplay(rule.selector_type, rule.selector_value);
+    // Friendly labels are presentation-only. Preserve the canonical selector
+    // value so editing an unrelated field cannot silently change rule scope.
+    editRuleSelectorValue = rule.selector_value;
     editRulePriority = rule.priority;
     editRuleEnabled = rule.enabled;
     editRuleTimesheetCode = rule.timesheet_code ?? '';
@@ -287,6 +289,19 @@
     return start ?? end ?? '—';
   }
 
+  function activityDrilldownUrl(suggestion: UnclassifiedSuggestion): string {
+    const params = new URLSearchParams({
+      selectorType: suggestion.selectorType,
+      selectorValue: suggestion.selectorValue,
+      classification: 'unclassified'
+    });
+    if (suggestion.earliestDate && suggestion.latestDate) {
+      params.set('startDate', suggestion.earliestDate);
+      params.set('endDate', suggestion.latestDate);
+    }
+    return `/admin/activity?${params.toString()}`;
+  }
+
   function getSelectorIcon(type: SelectorType) {
     switch (type) {
       case 'machine':
@@ -351,6 +366,7 @@
         const q = searchQuery.toLowerCase();
         return (
           s.selectorValue.toLowerCase().includes(q) ||
+          s.displayValue.toLowerCase().includes(q) ||
           s.selectorType.toLowerCase().includes(q) ||
           s.sampleEntities.some((e: string) => e.toLowerCase().includes(q)) ||
           s.sampleProjects.some((p: string) => p.toLowerCase().includes(q))
@@ -369,7 +385,7 @@
   // Auto-generate proposal name when active suggestion changes
   $effect(() => {
     if (activeSuggestion) {
-      proposalName = `${proposalChoice === 'work' ? 'Work' : 'Personal'} ${activeSuggestion.selectorType}: ${activeSuggestion.selectorValue}`;
+      proposalName = `${proposalChoice === 'work' ? 'Work' : 'Personal'} ${activeSuggestion.selectorType}: ${activeSuggestion.displayValue}`;
     }
   });
 
@@ -632,7 +648,7 @@
                 }}
                 tabindex="0"
                 role="button"
-                aria-label="Inspect candidate {suggestion.selectorValue}"
+                aria-label="Inspect candidate {suggestion.displayValue}"
               >
                 <div class="candidate-icon" aria-hidden="true">
                   <IconComponent size={18} />
@@ -644,7 +660,7 @@
                       Rank {suggestion.specificity}
                     </span>
                   </div>
-                  <strong>{suggestion.selectorValue}</strong>
+                  <strong>{suggestion.displayValue}</strong>
                   <small>
                     {#if suggestion.sampleProjects.length > 0}
                       Projects: {suggestion.sampleProjects.join(', ')}
@@ -659,7 +675,7 @@
                   <strong>{formatDuration(suggestion.unclassifiedSeconds)}</strong>
                   <small>{suggestion.sliceCount} slices</small>
                 </div>
-                <div class="choice-group" aria-label="Classify {suggestion.selectorValue}">
+                <div class="choice-group" aria-label="Classify {suggestion.displayValue}">
                   <button
                     type="button"
                     class:chosen-work={isSelected && proposalChoice === 'work'}
@@ -712,7 +728,7 @@
               <span class="badge accent">{activeSuggestion.selectorType} (Rank {activeSuggestion.specificity})</span>
             </div>
             <strong style="font-size: 15px; color: var(--text); display: block; word-break: break-all;">
-              {activeSuggestion.selectorValue}
+              {activeSuggestion.displayValue}
             </strong>
             <p style="margin: 6px 0 16px; font-size: 12px; color: var(--muted);">
               {#if activeSuggestion.sampleProjects.length > 0}
@@ -751,7 +767,7 @@
             <!-- Activity Explorer Drilldown Link -->
             <div style="margin-bottom: 16px;">
               <a
-                href="/admin/activity?selectorType={encodeURIComponent(activeSuggestion.selectorType)}&selectorValue={encodeURIComponent(activeSuggestion.selectorValue)}&classification=unclassified&date=all"
+                href={activityDrilldownUrl(activeSuggestion)}
                 target="_blank"
                 rel="noreferrer"
                 class="button secondary sm"

@@ -464,6 +464,20 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
       expect(projectResult.filters.selectedDate).toBe('all');
 
       // 2. Selector type 'editor' across all dates
+      const unattributedProject = db
+        .prepare("SELECT id FROM projects WHERE name = '__unattributed__'")
+        .get() as { id: number };
+      db.prepare(
+        `INSERT INTO day_project_entity_slices
+         (id, date, project_id, entity, entity_type, total_seconds, is_unattributed, source_import_id)
+         VALUES (6, '2026-09-01', ?, '__unattributed__', 'unattributed', 60, 1, 1)`
+      ).run(unattributedProject.id);
+      db.prepare(
+        `INSERT INTO slice_identities
+         (id, slice_id, selector_type, value, source, observed_heartbeats)
+         VALUES (3, 6, 'editor', 'cursor', 'heartbeat', 1)`
+      ).run();
+
       const editorResult = getActivityData(db, classification, {
         selectorType: 'editor',
         selectorValue: 'cursor'
@@ -500,6 +514,28 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
       expect(dimResult.distinctProjects).toContain('work-proj');
       expect(dimResult.distinctEditors).toContain('cursor');
       expect(dimResult.distinctMachines).toContain('laptop-mac');
+    });
+
+    it('applies drilldown filters before the activity cap', () => {
+      const insert = db.prepare(
+        `INSERT INTO day_project_entity_slices
+         (id, date, project_id, entity, entity_type, total_seconds, is_unattributed, source_import_id)
+         VALUES (?, '2026-01-01', 20, ?, 'file', 1, 0, 1)`
+      );
+      db.transaction(() => {
+        for (let i = 0; i < MAX_ACTIVITY_SLICES; i++) {
+          insert.run(100 + i, `bulk/unrelated-${i}.ts`);
+        }
+      })();
+
+      const result = getActivityData(db, classification, {
+        date: 'all',
+        project: 'work-proj'
+      });
+
+      expect(result.items).toHaveLength(4);
+      expect(result.items.every((item) => item.projectName === 'work-proj')).toBe(true);
+      expect(result.isTruncated).toBe(false);
     });
   });
 
@@ -637,6 +673,14 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
       // 2024 is a leap year: 2024-01-01..2024-12-31 is exactly 366 days.
       expect(validateActivityFilterQuery({ startDate: '2024-01-01', endDate: '2024-12-31' }).ok).toBe(true);
       expect(validateActivityFilterQuery({ startDate: '2024-01-01', endDate: '2025-01-01' }).ok).toBe(false);
+      expect(
+        validateActivityFilterQuery({
+          startDate: '2024-01-01',
+          endDate: '2025-01-01',
+          selectorType: 'project',
+          selectorValue: 'work-proj'
+        }).ok
+      ).toBe(true);
       expect(validateActivityFilterQuery({ startDate: '2026-09-01', endDate: '2026-09-01' }).ok).toBe(true);
     });
 
@@ -644,6 +688,14 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
       expect(validateActivityFilterQuery({ classification: 'secret' }).ok).toBe(false);
       expect(validateActivityFilterQuery({ q: 'x'.repeat(201) }).ok).toBe(false);
       expect(validateActivityFilterQuery({ q: 'x'.repeat(200) }).ok).toBe(true);
+    });
+
+    it('requires selector type and value as a complete pair', () => {
+      expect(validateActivityFilterQuery({ selectorType: 'editor' }).ok).toBe(false);
+      expect(validateActivityFilterQuery({ selectorValue: 'cursor' }).ok).toBe(false);
+      expect(
+        validateActivityFilterQuery({ selectorType: 'editor', selectorValue: 'cursor' }).ok
+      ).toBe(true);
     });
 
     it('never echoes an unbounded query value back in the rejection message', () => {

@@ -135,16 +135,19 @@ describe('Admin UI Acceptance Review Contracts', () => {
 
   describe('Requirement 8: Dynamic telemetry drilldown between Classify and Activity', () => {
     it('provides an inspect slices drilldown link in Classify staging proposal panel', () => {
-      expect(classifySrc).toContain('/admin/activity?selectorType=');
-      expect(classifySrc).toContain('classification=unclassified');
-      expect(classifySrc).toContain('date=all');
+      expect(classifySrc).toContain('activityDrilldownUrl(activeSuggestion)');
+      expect(classifySrc).toContain("classification: 'unclassified'");
+      expect(classifySrc).toContain("params.set('startDate', suggestion.earliestDate)");
+      expect(classifySrc).toContain("params.set('endDate', suggestion.latestDate)");
       expect(classifySrc).toContain('Inspect');
       expect(classifySrc).toContain('slices in Activity');
     });
 
-    it('provides All Dates and dynamic filter controls in Activity Explorer', () => {
+    it('provides date-range and dynamic filter controls in Activity Explorer', () => {
       const activitySrc = loadFile('src/routes/admin/activity/+page.svelte');
       expect(activitySrc).toContain('All Dates');
+      expect(activitySrc).toContain('name="startDate"');
+      expect(activitySrc).toContain('name="endDate"');
       expect(activitySrc).toContain('name="project"');
       expect(activitySrc).toContain('name="editor"');
       expect(activitySrc).toContain('name="entityType"');
