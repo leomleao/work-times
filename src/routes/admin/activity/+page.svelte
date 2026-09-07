@@ -16,7 +16,8 @@
     Laptop,
     Layers,
     Search,
-    SlidersHorizontal
+    SlidersHorizontal,
+    X
   } from '@lucide/svelte';
 
   let { data } = $props<{ data: PageData }>();
@@ -44,10 +45,22 @@
       current.set('classification', activity.filters.classification);
     }
     if (activity.filters.q) current.set('q', activity.filters.q);
+    if (activity.filters.selectorType) current.set('selectorType', activity.filters.selectorType);
+    if (activity.filters.selectorValue) current.set('selectorValue', activity.filters.selectorValue);
+    if (activity.filters.project) current.set('project', activity.filters.project);
+    if (activity.filters.editor) current.set('editor', activity.filters.editor);
+    if (activity.filters.machine) current.set('machine', activity.filters.machine);
+    if (activity.filters.application) current.set('application', activity.filters.application);
+    if (activity.filters.domain) current.set('domain', activity.filters.domain);
+    if (activity.filters.folder) current.set('folder', activity.filters.folder);
+    if (activity.filters.entity) current.set('entity', activity.filters.entity);
+    if (activity.filters.entityType && activity.filters.entityType !== 'all') {
+      current.set('entityType', activity.filters.entityType);
+    }
     if (activity.pagination.pageSize !== 50) current.set('pageSize', String(activity.pagination.pageSize));
 
     for (const [key, value] of Object.entries(params)) {
-      if (value === null || value === undefined || value === '' || value === 'all') {
+      if (value === null || value === undefined || value === '' || (value === 'all' && key !== 'date')) {
         current.delete(key);
       } else {
         current.set(key, String(value));
@@ -57,6 +70,23 @@
     const query = current.toString();
     return `/admin/activity${query ? `?${query}` : ''}`;
   }
+
+  let hasActiveFilters = $derived(
+    Boolean(
+      (activity.filters.selectorType && activity.filters.selectorValue) ||
+      activity.filters.project ||
+      activity.filters.editor ||
+      activity.filters.machine ||
+      activity.filters.application ||
+      activity.filters.domain ||
+      activity.filters.folder ||
+      activity.filters.entity ||
+      (activity.filters.entityType && activity.filters.entityType !== 'all') ||
+      (activity.filters.classification && activity.filters.classification !== 'all') ||
+      activity.filters.q ||
+      activity.filters.selectedDate === 'all'
+    )
+  );
 </script>
 
 <svelte:head>
@@ -96,7 +126,7 @@
       label="Total Filtered Duration"
       value={activity.metrics.formattedTotalDuration}
       subtext={`${activity.metrics.totalSlices.toLocaleString()} slices in selection`}
-      badge={activity.filters.selectedDate ? activity.filters.selectedDate : 'Active View'}
+      badge={activity.filters.selectedDate ? (activity.filters.selectedDate === 'all' ? 'All Dates' : activity.filters.selectedDate) : 'Active View'}
       badgeVariant="neutral"
     />
     <MetricCard
@@ -128,91 +158,364 @@
 
   <!-- Filter & Search Controls (Preserving URL state) -->
   <div style="max-width: 1180px; margin: 0 auto 16px;">
-    <form method="GET" action="/admin/activity" class="panel" style="padding: 14px 18px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;">
-      <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-        <!-- Date Selector -->
-        <div style="display: flex; align-items: center; gap: 6px;">
-          <Calendar size={15} style="color: var(--muted);" />
-          <label for="filter-date" class="sr-only">Date</label>
-          <select
-            id="filter-date"
-            name="date"
-            class="form-select"
-            style="font-size: 12px; padding: 6px 10px; min-width: 150px;"
-            onchange={(e) => {
-              (e.currentTarget.form as HTMLFormElement).submit();
-            }}
-          >
-            {#if activity.distinctDates.length === 0}
-              <option value="">No dates recorded</option>
-            {:else}
-              {#each activity.distinctDates as d}
-                <option value={d} selected={d === activity.filters.selectedDate}>
-                  {d} {d === activity.latestDate ? '(Latest)' : ''}
+    <form method="GET" action="/admin/activity" class="panel" style="padding: 14px 18px; display: flex; flex-direction: column; gap: 12px;">
+      <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: space-between;">
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <!-- Date Selector -->
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <Calendar size={15} style="color: var(--muted);" />
+            <label for="filter-date" class="sr-only">Date</label>
+            <select
+              id="filter-date"
+              name="date"
+              class="form-select"
+              style="font-size: 12px; padding: 6px 10px; min-width: 140px;"
+              onchange={(e) => {
+                (e.currentTarget.form as HTMLFormElement).submit();
+              }}
+            >
+              {#if activity.distinctDates.length === 0}
+                <option value="">No dates recorded</option>
+              {:else}
+                <option value="all" selected={activity.filters.selectedDate === 'all'}>
+                  All Dates ({activity.distinctDates.length} days)
                 </option>
-              {/each}
-            {/if}
-          </select>
+                {#each activity.distinctDates as d}
+                  <option value={d} selected={d === activity.filters.selectedDate}>
+                    {d} {d === activity.latestDate ? '(Latest)' : ''}
+                  </option>
+                {/each}
+              {/if}
+            </select>
+          </div>
+
+          <!-- Project Selector -->
+          {#if activity.distinctProjects && activity.distinctProjects.length > 0}
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <FolderKanban size={15} style="color: var(--muted);" />
+              <label for="filter-project" class="sr-only">Project</label>
+              <select
+                id="filter-project"
+                name="project"
+                class="form-select"
+                style="font-size: 12px; padding: 6px 10px; max-width: 150px;"
+                onchange={(e) => {
+                  (e.currentTarget.form as HTMLFormElement).submit();
+                }}
+              >
+                <option value="">All Projects</option>
+                {#each activity.distinctProjects as p}
+                  <option value={p} selected={p === activity.filters.project}>{p}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+
+          <!-- Editor Selector -->
+          {#if activity.distinctEditors && activity.distinctEditors.length > 0}
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <FileCode size={15} style="color: var(--muted);" />
+              <label for="filter-editor" class="sr-only">Editor</label>
+              <select
+                id="filter-editor"
+                name="editor"
+                class="form-select"
+                style="font-size: 12px; padding: 6px 10px; max-width: 130px;"
+                onchange={(e) => {
+                  (e.currentTarget.form as HTMLFormElement).submit();
+                }}
+              >
+                <option value="">All Editors</option>
+                {#each activity.distinctEditors as ed}
+                  <option value={ed} selected={ed === activity.filters.editor}>{ed}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+
+          <!-- Entity Type Selector -->
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <Layers size={15} style="color: var(--muted);" />
+            <label for="filter-entity-type" class="sr-only">Entity Type</label>
+            <select
+              id="filter-entity-type"
+              name="entityType"
+              class="form-select"
+              style="font-size: 12px; padding: 6px 10px; min-width: 100px;"
+              onchange={(e) => {
+                (e.currentTarget.form as HTMLFormElement).submit();
+              }}
+            >
+              <option value="all" selected={activity.filters.entityType === 'all'}>All Types</option>
+              <option value="file" selected={activity.filters.entityType === 'file'}>Files</option>
+              <option value="app" selected={activity.filters.entityType === 'app'}>Apps</option>
+              <option value="domain" selected={activity.filters.entityType === 'domain'}>Domains</option>
+              <option value="unattributed" selected={activity.filters.entityType === 'unattributed'}>Unattributed</option>
+            </select>
+          </div>
+
+          <!-- Text search query -->
+          <div style="position: relative;">
+            <input
+              type="text"
+              name="q"
+              placeholder="Search entity, project…"
+              value={activity.filters.q}
+              class="form-input"
+              style="width: 200px; font-size: 12px; padding: 6px 10px;"
+              aria-label="Filter activity slices"
+            />
+          </div>
+
+          <!-- Hidden inputs to preserve drilldown selector and classification filters -->
+          {#if activity.filters.selectorType}
+            <input type="hidden" name="selectorType" value={activity.filters.selectorType} />
+          {/if}
+          {#if activity.filters.selectorValue}
+            <input type="hidden" name="selectorValue" value={activity.filters.selectorValue} />
+          {/if}
+          {#if activity.filters.machine}
+            <input type="hidden" name="machine" value={activity.filters.machine} />
+          {/if}
+          {#if activity.filters.application}
+            <input type="hidden" name="application" value={activity.filters.application} />
+          {/if}
+          {#if activity.filters.domain}
+            <input type="hidden" name="domain" value={activity.filters.domain} />
+          {/if}
+          {#if activity.filters.folder}
+            <input type="hidden" name="folder" value={activity.filters.folder} />
+          {/if}
+          {#if activity.filters.entity}
+            <input type="hidden" name="entity" value={activity.filters.entity} />
+          {/if}
+          {#if activity.filters.classification !== 'all'}
+            <input type="hidden" name="classification" value={activity.filters.classification} />
+          {/if}
+
+          <button type="submit" class="button secondary sm">
+            <Search size={13} />
+            <span>Filter</span>
+          </button>
         </div>
 
-        <!-- Text search query -->
-        <div style="position: relative;">
-          <input
-            type="text"
-            name="q"
-            placeholder="Filter by entity, project, editor, machine…"
-            value={activity.filters.q}
-            class="form-input"
-            style="width: 280px; font-size: 12px; padding: 6px 10px;"
-            aria-label="Filter activity slices"
-          />
-        </div>
-
-        <!-- Hidden inputs to preserve classification filter on text submit -->
-        {#if activity.filters.classification !== 'all'}
-          <input type="hidden" name="classification" value={activity.filters.classification} />
-        {/if}
-
-        <button type="submit" class="button secondary sm">
-          <Search size={13} />
-          <span>Filter</span>
-        </button>
-
-        {#if activity.filters.q || (activity.filters.classification !== 'all')}
-          <a href={buildFilterUrl({ q: null, classification: null, page: 1 })} class="button ghost sm">
-            <span>Reset</span>
+        <!-- Classification category pill buttons -->
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <span style="font-size: 11px; color: var(--faint);">Status:</span>
+          <a
+            href={buildFilterUrl({ classification: 'all', page: 1 })}
+            class="button sm {activity.filters.classification === 'all' ? 'primary' : 'ghost'}"
+          >
+            All
           </a>
-        {/if}
+          <a
+            href={buildFilterUrl({ classification: 'work', page: 1 })}
+            class="button sm {activity.filters.classification === 'work' ? 'primary' : 'ghost'}"
+          >
+            Work
+          </a>
+          <a
+            href={buildFilterUrl({ classification: 'personal', page: 1 })}
+            class="button sm {activity.filters.classification === 'personal' ? 'primary' : 'ghost'}"
+          >
+            Personal
+          </a>
+          <a
+            href={buildFilterUrl({ classification: 'unclassified', page: 1 })}
+            class="button sm {activity.filters.classification === 'unclassified' ? 'primary' : 'ghost'}"
+          >
+            Unclassified
+          </a>
+        </div>
       </div>
 
-      <!-- Classification category pill buttons -->
-      <div style="display: flex; gap: 6px; align-items: center;">
-        <span style="font-size: 11px; color: var(--faint);">Classification:</span>
-        <a
-          href={buildFilterUrl({ classification: 'all', page: 1 })}
-          class="button sm {activity.filters.classification === 'all' ? 'primary' : 'ghost'}"
-        >
-          All
-        </a>
-        <a
-          href={buildFilterUrl({ classification: 'work', page: 1 })}
-          class="button sm {activity.filters.classification === 'work' ? 'primary' : 'ghost'}"
-        >
-          Work
-        </a>
-        <a
-          href={buildFilterUrl({ classification: 'personal', page: 1 })}
-          class="button sm {activity.filters.classification === 'personal' ? 'primary' : 'ghost'}"
-        >
-          Personal
-        </a>
-        <a
-          href={buildFilterUrl({ classification: 'unclassified', page: 1 })}
-          class="button sm {activity.filters.classification === 'unclassified' ? 'primary' : 'ghost'}"
-        >
-          Unclassified
-        </a>
-      </div>
+      <!-- Active Filters Row (Pills with dismiss buttons) -->
+      {#if hasActiveFilters}
+        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 8px; border-top: 1px solid var(--border);">
+          <span style="font-size: 11px; color: var(--faint); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">
+            Active:
+          </span>
+
+          {#if activity.filters.selectorType && activity.filters.selectorValue}
+            <span class="badge accent" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span>
+                <strong style="text-transform: capitalize;">{activity.filters.selectorType.replace('_', ' ')}:</strong>
+                {activity.filters.selectorValue}
+              </span>
+              <a
+                href={buildFilterUrl({ selectorType: null, selectorValue: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear selector filter"
+                aria-label="Clear selector filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.selectedDate === 'all'}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Date:</strong> All Dates</span>
+              <a
+                href={buildFilterUrl({ date: activity.latestDate ?? '', page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Reset to latest date"
+                aria-label="Reset to latest date"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.classification !== 'all'}
+            <span class="badge {activity.filters.classification}" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Status:</strong> {activity.filters.classification.toUpperCase()}</span>
+              <a
+                href={buildFilterUrl({ classification: 'all', page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear classification filter"
+                aria-label="Clear classification filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.project}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Project:</strong> {activity.filters.project}</span>
+              <a
+                href={buildFilterUrl({ project: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear project filter"
+                aria-label="Clear project filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.editor}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Editor:</strong> {activity.filters.editor}</span>
+              <a
+                href={buildFilterUrl({ editor: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear editor filter"
+                aria-label="Clear editor filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.machine}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Machine:</strong> {activity.filters.machine}</span>
+              <a
+                href={buildFilterUrl({ machine: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear machine filter"
+                aria-label="Clear machine filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.application}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>App:</strong> {activity.filters.application}</span>
+              <a
+                href={buildFilterUrl({ application: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear app filter"
+                aria-label="Clear app filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.domain}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Domain:</strong> {activity.filters.domain}</span>
+              <a
+                href={buildFilterUrl({ domain: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear domain filter"
+                aria-label="Clear domain filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.folder}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Folder:</strong> {activity.filters.folder}</span>
+              <a
+                href={buildFilterUrl({ folder: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear folder filter"
+                aria-label="Clear folder filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.entity}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Entity:</strong> {activity.filters.entity}</span>
+              <a
+                href={buildFilterUrl({ entity: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear entity filter"
+                aria-label="Clear entity filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.entityType && activity.filters.entityType !== 'all'}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Type:</strong> {activity.filters.entityType}</span>
+              <a
+                href={buildFilterUrl({ entityType: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear entity type filter"
+                aria-label="Clear entity type filter"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          {#if activity.filters.q}
+            <span class="badge neutral" style="gap: 6px; font-size: 11px; padding: 2px 8px; height: 26px;">
+              <span><strong>Search:</strong> "{activity.filters.q}"</span>
+              <a
+                href={buildFilterUrl({ q: null, page: 1 })}
+                style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
+                title="Clear search query"
+                aria-label="Clear search query"
+              >
+                <X size={12} />
+              </a>
+            </span>
+          {/if}
+
+          <a
+            href="/admin/activity"
+            class="button ghost sm"
+            style="font-size: 11px; padding: 2px 8px; height: 24px; color: var(--faint);"
+          >
+            Reset all
+          </a>
+        </div>
+      {/if}
     </form>
   </div>
 

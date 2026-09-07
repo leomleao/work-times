@@ -85,7 +85,7 @@ export function normalizeSelectorValue(type: SelectorType, value: string): strin
   }
 }
 
-function folderMatches(entity: string, prefix: string): boolean {
+export function folderMatches(entity: string, prefix: string): boolean {
   const normalizedEntity = normalizePath(entity);
   const normalizedPrefix = normalizePath(prefix);
   return normalizedEntity === normalizedPrefix || normalizedEntity.startsWith(`${normalizedPrefix}/`);

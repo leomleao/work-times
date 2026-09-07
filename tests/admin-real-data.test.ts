@@ -451,6 +451,56 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
       expect(item.machineIds).toEqual(['laptop-mac']);
       expect(item.editors).toEqual(['cursor']);
     });
+
+    it('dynamically filters slices by selectorType and selectorValue across dates', () => {
+      // 1. Selector type 'project' across all dates
+      const projectResult = getActivityData(db, classification, {
+        selectorType: 'project',
+        selectorValue: 'work-proj',
+        date: 'all'
+      });
+      expect(projectResult.items).toHaveLength(4);
+      expect(projectResult.items.every((i) => i.projectName === 'work-proj')).toBe(true);
+      expect(projectResult.filters.selectedDate).toBe('all');
+
+      // 2. Selector type 'editor' across all dates
+      const editorResult = getActivityData(db, classification, {
+        selectorType: 'editor',
+        selectorValue: 'cursor'
+      });
+      // Automatically defaults to date='all' when selector is present without explicit date
+      expect(editorResult.filters.selectedDate).toBe('all');
+      expect(editorResult.items).toHaveLength(1);
+      expect(editorResult.items[0].entity).toBe('src/auth.ts');
+
+      // 3. Selector type 'folder_prefix'
+      const folderResult = getActivityData(db, classification, {
+        selectorType: 'folder_prefix',
+        selectorValue: 'src',
+        date: 'all'
+      });
+      expect(folderResult.items).toHaveLength(3);
+      expect(folderResult.items.map((i) => i.entity).sort()).toEqual([
+        'src/api.ts',
+        'src/auth.ts',
+        'src/dashboard.svelte'
+      ]);
+    });
+
+    it('filters slices by dimension dropdowns and aggregates distinct values', () => {
+      const dimResult = getActivityData(db, classification, {
+        date: 'all',
+        project: 'other-proj'
+      });
+      expect(dimResult.items).toHaveLength(1);
+      expect(dimResult.items[0].entity).toBe('notes.md');
+
+      // Check distinct projects, editors, and machines aggregated from loaded slices
+      expect(dimResult.distinctProjects).toContain('other-proj');
+      expect(dimResult.distinctProjects).toContain('work-proj');
+      expect(dimResult.distinctEditors).toContain('cursor');
+      expect(dimResult.distinctMachines).toContain('laptop-mac');
+    });
   });
 
   describe('4. Settings Secret Redaction & Non-Sensitive Exposure', () => {
@@ -688,7 +738,17 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
         startDate: '2026-01-01',
         endDate: '2026-01-31',
         classification: 'work',
-        q: 'auth'
+        q: 'auth',
+        selectorType: null,
+        selectorValue: null,
+        project: null,
+        editor: null,
+        machine: null,
+        application: null,
+        domain: null,
+        folder: null,
+        entity: null,
+        entityType: 'all'
       });
     });
 

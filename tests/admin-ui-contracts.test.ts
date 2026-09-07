@@ -89,6 +89,17 @@ describe('Admin UI Acceptance Review Contracts', () => {
       expect(loginSrc).toMatch(/<form[^>]*method="POST"/);
       expect(loginSrc).not.toMatch(/onsubmit=\{handleSubmit\}/);
     });
+
+    it('does not contain scrypt verified hint', () => {
+      expect(loginSrc).not.toContain('scrypt verified');
+    });
+  });
+
+  describe('Badge styling and centering', () => {
+    it('centers badge padding and text and protects badge from metrics span overriding', () => {
+      expect(appCss).toMatch(/\.badge\s*\{[^}]*display:\s*inline-flex;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;/s);
+      expect(appCss).toContain('.metrics span:not(.badge)');
+    });
   });
 
   describe('Requirement 4: Whole-slice overrides description', () => {
@@ -119,6 +130,31 @@ describe('Admin UI Acceptance Review Contracts', () => {
       expect(appShellSrc).not.toMatch(/<a[^>]*href="\/login"[^>]*aria-label="Sign out"/);
       expect(appShellSrc).toMatch(/<form[^>]*method="POST"[^>]*action="\/login\?\/logout"/);
       expect(appShellSrc).toMatch(/<button[^>]*type="submit"[^>]*aria-label="Sign out"/);
+    });
+  });
+
+  describe('Requirement 8: Dynamic telemetry drilldown between Classify and Activity', () => {
+    it('provides an inspect slices drilldown link in Classify staging proposal panel', () => {
+      expect(classifySrc).toContain('/admin/activity?selectorType=');
+      expect(classifySrc).toContain('classification=unclassified');
+      expect(classifySrc).toContain('date=all');
+      expect(classifySrc).toContain('Inspect');
+      expect(classifySrc).toContain('slices in Activity');
+    });
+
+    it('provides All Dates and dynamic filter controls in Activity Explorer', () => {
+      const activitySrc = loadFile('src/routes/admin/activity/+page.svelte');
+      expect(activitySrc).toContain('All Dates');
+      expect(activitySrc).toContain('name="project"');
+      expect(activitySrc).toContain('name="editor"');
+      expect(activitySrc).toContain('name="entityType"');
+      expect(activitySrc).toContain('Active:');
+      expect(activitySrc).toContain('buildFilterUrl');
+    });
+
+    it('displays the timeframe row for candidate slices in Classify staging proposal panel', () => {
+      expect(classifySrc).toContain('Timeframe');
+      expect(classifySrc).toContain('formatTimeframe(activeSuggestion.earliestDate, activeSuggestion.latestDate)');
     });
   });
 });

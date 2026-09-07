@@ -9,6 +9,16 @@ export const load: PageServerLoad = async ({ url }) => {
   const endDate = url.searchParams.get('endDate');
   const classification = url.searchParams.get('classification');
   const q = url.searchParams.get('q');
+  const selectorType = url.searchParams.get('selectorType');
+  const selectorValue = url.searchParams.get('selectorValue');
+  const project = url.searchParams.get('project');
+  const editor = url.searchParams.get('editor');
+  const machine = url.searchParams.get('machine');
+  const application = url.searchParams.get('application');
+  const domain = url.searchParams.get('domain');
+  const folder = url.searchParams.get('folder');
+  const entity = url.searchParams.get('entity');
+  const entityType = url.searchParams.get('entityType');
   const page = url.searchParams.get('page');
   const pageSize = url.searchParams.get('pageSize');
 
@@ -19,6 +29,16 @@ export const load: PageServerLoad = async ({ url }) => {
       endDate,
       classification,
       q,
+      selectorType,
+      selectorValue,
+      project,
+      editor,
+      machine,
+      application,
+      domain,
+      folder,
+      entity,
+      entityType,
       page,
       pageSize
     });

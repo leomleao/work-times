@@ -2,6 +2,14 @@ import type Database from 'better-sqlite3';
 import type { SqliteClassificationService, EvaluatedSlice } from '../classification/sqlite.js';
 import { formatDuration } from './overview.js';
 import { boundedStringList, clampCount, clampSeconds, truncateText, MAX_LABEL_LENGTH } from './sanitize.js';
+import {
+  ruleMatchesSlice,
+  folderMatches,
+  SELECTOR_TYPES,
+  type SelectorType,
+  type ClassifiableSlice,
+  type ClassificationRuleLike
+} from '../classification/model.js';
 
 /** Distinct dates offered by the date picker. */
 export const MAX_DISTINCT_DATES = 60;
@@ -25,6 +33,16 @@ export interface ActivityFilterQuery {
   endDate?: string | null;
   classification?: string | null;
   q?: string | null;
+  selectorType?: string | null;
+  selectorValue?: string | null;
+  project?: string | null;
+  editor?: string | null;
+  machine?: string | null;
+  application?: string | null;
+  domain?: string | null;
+  folder?: string | null;
+  entity?: string | null;
+  entityType?: string | null;
   page?: number | string | null;
   pageSize?: number | string | null;
 }
@@ -68,6 +86,16 @@ export interface ActivityData {
     endDate: string | null;
     classification: 'all' | 'work' | 'personal' | 'unclassified';
     q: string;
+    selectorType: SelectorType | null;
+    selectorValue: string | null;
+    project: string | null;
+    editor: string | null;
+    machine: string | null;
+    application: string | null;
+    domain: string | null;
+    folder: string | null;
+    entity: string | null;
+    entityType: 'all' | 'file' | 'app' | 'domain' | 'unattributed';
   };
   metrics: {
     totalDurationSeconds: number;
@@ -79,6 +107,9 @@ export interface ActivityData {
     aiSessions: number;
   };
   distinctDates: string[];
+  distinctProjects: string[];
+  distinctEditors: string[];
+  distinctMachines: string[];
   latestDate: string | null;
   isEmpty: boolean;
   /**
@@ -97,6 +128,16 @@ export interface ValidatedActivityFilters {
   endDate: string | null;
   classification: 'all' | 'work' | 'personal' | 'unclassified';
   q: string;
+  selectorType: SelectorType | null;
+  selectorValue: string | null;
+  project: string | null;
+  editor: string | null;
+  machine: string | null;
+  application: string | null;
+  domain: string | null;
+  folder: string | null;
+  entity: string | null;
+  entityType: 'all' | 'file' | 'app' | 'domain' | 'unattributed';
   page: number;
   pageSize: number;
 }
@@ -169,13 +210,17 @@ export function validateActivityFilterQuery(
   let selectedDate: string | null = null;
   if (rawFilters.date !== undefined && rawFilters.date !== null && rawFilters.date !== '') {
     if (typeof rawFilters.date !== 'string') {
-      return { ok: false, error: 'date must be a valid ISO date string (YYYY-MM-DD).' };
+      return { ok: false, error: 'date must be a valid ISO date string (YYYY-MM-DD) or "all".' };
     }
-    const parsed = parseStrictIsoDate(rawFilters.date);
-    if (!parsed) {
-      return { ok: false, error: `Invalid date '${echoValue(rawFilters.date)}': must be a valid ISO calendar date (YYYY-MM-DD).` };
+    if (rawFilters.date.toLowerCase() === 'all') {
+      selectedDate = 'all';
+    } else {
+      const parsed = parseStrictIsoDate(rawFilters.date);
+      if (!parsed) {
+        return { ok: false, error: `Invalid date '${echoValue(rawFilters.date)}': must be a valid ISO calendar date (YYYY-MM-DD) or 'all'.` };
+      }
+      selectedDate = parsed;
     }
-    selectedDate = parsed;
   }
 
   // 2. Validate startDate and endDate
@@ -204,7 +249,7 @@ export function validateActivityFilterQuery(
   }
 
   // Selected date mutually exclusive with range
-  if (selectedDate && (startDate || endDate)) {
+  if (selectedDate && selectedDate !== 'all' && (startDate || endDate)) {
     return { ok: false, error: 'Selected date cannot be combined with startDate or endDate range filters.' };
   }
 
@@ -272,6 +317,75 @@ export function validateActivityFilterQuery(
     q = rawFilters.q.trim();
   }
 
+  // 7. Dynamic selector type & value
+  let selectorType: SelectorType | null = null;
+  if (rawFilters.selectorType !== undefined && rawFilters.selectorType !== null && rawFilters.selectorType !== '') {
+    const st = String(rawFilters.selectorType).trim() as SelectorType;
+    if (!SELECTOR_TYPES.includes(st)) {
+      return {
+        ok: false,
+        error: `Invalid selectorType '${echoValue(rawFilters.selectorType)}': must be one of ${SELECTOR_TYPES.join(', ')}.`
+      };
+    }
+    selectorType = st;
+  }
+
+  let selectorValue: string | null = null;
+  if (rawFilters.selectorValue !== undefined && rawFilters.selectorValue !== null && rawFilters.selectorValue !== '') {
+    if (typeof rawFilters.selectorValue !== 'string') {
+      return { ok: false, error: 'Query parameter selectorValue must be a string.' };
+    }
+    if (rawFilters.selectorValue.length > 500) {
+      return { ok: false, error: 'Query parameter selectorValue cannot exceed 500 characters.' };
+    }
+    selectorValue = rawFilters.selectorValue.trim();
+  }
+
+  // 8. Individual dimension filters
+  const validateTextFilter = (val: unknown, name: string, maxLen = 200): { ok: true; val: string | null } | { ok: false; error: string } => {
+    if (val === undefined || val === null || val === '') return { ok: true, val: null };
+    if (typeof val !== 'string') return { ok: false, error: `Query parameter ${name} must be a string.` };
+    if (val.length > maxLen) return { ok: false, error: `Query parameter ${name} cannot exceed ${maxLen} characters.` };
+    return { ok: true, val: val.trim() };
+  };
+
+  const projectRes = validateTextFilter(rawFilters.project, 'project');
+  if (!projectRes.ok) return projectRes;
+  const project = projectRes.val;
+
+  const editorRes = validateTextFilter(rawFilters.editor, 'editor');
+  if (!editorRes.ok) return editorRes;
+  const editor = editorRes.val;
+
+  const machineRes = validateTextFilter(rawFilters.machine, 'machine');
+  if (!machineRes.ok) return machineRes;
+  const machine = machineRes.val;
+
+  const appRes = validateTextFilter(rawFilters.application, 'application');
+  if (!appRes.ok) return appRes;
+  const application = appRes.val;
+
+  const domainRes = validateTextFilter(rawFilters.domain, 'domain');
+  if (!domainRes.ok) return domainRes;
+  const domain = domainRes.val;
+
+  const folderRes = validateTextFilter(rawFilters.folder, 'folder', 500);
+  if (!folderRes.ok) return folderRes;
+  const folder = folderRes.val;
+
+  const entityRes = validateTextFilter(rawFilters.entity, 'entity', 500);
+  if (!entityRes.ok) return entityRes;
+  const entity = entityRes.val;
+
+  let entityType: 'all' | 'file' | 'app' | 'domain' | 'unattributed' = 'all';
+  if (rawFilters.entityType !== undefined && rawFilters.entityType !== null && rawFilters.entityType !== '') {
+    const et = String(rawFilters.entityType).trim().toLowerCase();
+    if (et !== 'all' && et !== 'file' && et !== 'app' && et !== 'domain' && et !== 'unattributed') {
+      return { ok: false, error: `Invalid entityType '${echoValue(rawFilters.entityType)}': must be 'all', 'file', 'app', 'domain', or 'unattributed'.` };
+    }
+    entityType = et as any;
+  }
+
   return {
     ok: true,
     filters: {
@@ -280,6 +394,16 @@ export function validateActivityFilterQuery(
       endDate,
       classification,
       q,
+      selectorType,
+      selectorValue,
+      project,
+      editor,
+      machine,
+      application,
+      domain,
+      folder,
+      entity,
+      entityType,
       page,
       pageSize
     }
@@ -340,7 +464,17 @@ export function getActivityData(
         startDate: validated.startDate,
         endDate: validated.endDate,
         classification: validated.classification,
-        q: validated.q
+        q: validated.q,
+        selectorType: validated.selectorType,
+        selectorValue: validated.selectorValue,
+        project: validated.project,
+        editor: validated.editor,
+        machine: validated.machine,
+        application: validated.application,
+        domain: validated.domain,
+        folder: validated.folder,
+        entity: validated.entity,
+        entityType: validated.entityType
       },
       metrics: {
         totalDurationSeconds: 0,
@@ -352,6 +486,9 @@ export function getActivityData(
         aiSessions: 0
       },
       distinctDates: [],
+      distinctProjects: [],
+      distinctEditors: [],
+      distinctMachines: [],
       latestDate: null,
       isEmpty: true,
       isTruncated: false,
@@ -364,9 +501,22 @@ export function getActivityData(
   const startDate = validated.startDate;
   const endDate = validated.endDate;
 
-  // "Default to the latest slice-bearing date/range"
+  // "Default to the latest slice-bearing date/range" UNLESS a selector or dimension filter is specified without an explicit date
   if (!selectedDate && !startDate && !endDate) {
-    selectedDate = latestDate;
+    if (
+      validated.selectorType ||
+      validated.project ||
+      validated.editor ||
+      validated.machine ||
+      validated.application ||
+      validated.domain ||
+      validated.folder ||
+      validated.entity
+    ) {
+      selectedDate = 'all';
+    } else {
+      selectedDate = latestDate;
+    }
   }
 
   const classificationFilter = validated.classification;
@@ -376,9 +526,9 @@ export function getActivityData(
 
   // 3. Load classified slices for the bounded date or range
   const sliceFilter: { date?: string; startDate?: string; endDate?: string } = {};
-  if (selectedDate) {
+  if (selectedDate && selectedDate !== 'all') {
     sliceFilter.date = selectedDate;
-  } else {
+  } else if (!selectedDate || selectedDate === 'all') {
     if (startDate) sliceFilter.startDate = startDate;
     if (endDate) sliceFilter.endDate = endDate;
   }
@@ -388,6 +538,16 @@ export function getActivityData(
   const classifiedSlices = isTruncated
     ? loadedSlices.slice(0, MAX_ACTIVITY_SLICES)
     : loadedSlices;
+
+  const distinctProjects = Array.from(
+    new Set(loadedSlices.map((s) => s.projectName).filter((p): p is string => Boolean(p)))
+  ).sort();
+  const distinctEditors = Array.from(
+    new Set(loadedSlices.flatMap((s) => s.editors).filter(Boolean))
+  ).sort();
+  const distinctMachines = Array.from(
+    new Set(loadedSlices.flatMap((s) => s.machineIds).filter(Boolean))
+  ).sort();
 
   // Load telemetry metrics (ai_sessions, additions, deletions) for these slices
   const sliceIds = classifiedSlices.map((s) => s.id);
@@ -429,7 +589,7 @@ export function getActivityData(
     }
   }
 
-  // 4. Apply in-memory classification and query text filters
+  // 4. Apply in-memory classification, query text, and dynamic selector filters
   const lowerQ = q.toLowerCase();
   const filteredSlices = classifiedSlices.filter((s) => {
     if (classificationFilter !== 'all' && s.decision.classification !== classificationFilter) {
@@ -442,6 +602,81 @@ export function getActivityData(
       const machineMatch = s.machineIds.some((m) => m.toLowerCase().includes(lowerQ));
       const editorMatch = s.editors.some((e) => e.toLowerCase().includes(lowerQ));
       if (!entityMatch && !projMatch && !machineMatch && !editorMatch) {
+        return false;
+      }
+    }
+
+    // Dynamic selector rule matching (handles all 7 selector types from Classify drilldown)
+    if (validated.selectorType && validated.selectorValue) {
+      const classifiableSlice: ClassifiableSlice = {
+        id: String(s.id),
+        project: s.projectName,
+        entityType: s.entityType,
+        entity: s.entity,
+        machineIds: s.machineIds,
+        editors: s.editors
+      };
+      const syntheticRule: ClassificationRuleLike = {
+        selectorType: validated.selectorType,
+        selectorValue: validated.selectorValue,
+        priority: 0,
+        createdAt: ''
+      };
+      if (!ruleMatchesSlice(syntheticRule, classifiableSlice)) {
+        return false;
+      }
+    }
+
+    // Individual dimension filters
+    if (validated.project) {
+      const p = validated.project.toLowerCase();
+      if ((s.projectName ?? '').toLowerCase() !== p && String(s.projectId) !== validated.project) {
+        return false;
+      }
+    }
+
+    if (validated.editor) {
+      const e = validated.editor.toLowerCase();
+      if (!s.editors.some((ed) => ed.toLowerCase() === e)) {
+        return false;
+      }
+    }
+
+    if (validated.machine) {
+      const m = validated.machine.toLowerCase();
+      if (!s.machineIds.some((mac) => mac.toLowerCase() === m)) {
+        return false;
+      }
+    }
+
+    if (validated.application) {
+      const a = validated.application.toLowerCase();
+      if (s.entityType !== 'app' || s.entity.toLowerCase() !== a) {
+        return false;
+      }
+    }
+
+    if (validated.domain) {
+      const d = validated.domain.toLowerCase();
+      if (s.entityType !== 'domain' || s.entity.toLowerCase() !== d) {
+        return false;
+      }
+    }
+
+    if (validated.folder) {
+      if (s.entityType !== 'file' || !folderMatches(s.entity, validated.folder)) {
+        return false;
+      }
+    }
+
+    if (validated.entity) {
+      if (s.entity.toLowerCase() !== validated.entity.toLowerCase()) {
+        return false;
+      }
+    }
+
+    if (validated.entityType && validated.entityType !== 'all') {
+      if (s.entityType !== validated.entityType) {
         return false;
       }
     }
@@ -543,7 +778,17 @@ export function getActivityData(
       startDate,
       endDate,
       classification: classificationFilter,
-      q
+      q,
+      selectorType: validated.selectorType,
+      selectorValue: validated.selectorValue,
+      project: validated.project,
+      editor: validated.editor,
+      machine: validated.machine,
+      application: validated.application,
+      domain: validated.domain,
+      folder: validated.folder,
+      entity: validated.entity,
+      entityType: validated.entityType
     },
     metrics: {
       totalDurationSeconds,
@@ -555,6 +800,9 @@ export function getActivityData(
       aiSessions: totalAiSessions
     },
     distinctDates,
+    distinctProjects,
+    distinctEditors,
+    distinctMachines,
     latestDate,
     isEmpty: false,
     isTruncated,
