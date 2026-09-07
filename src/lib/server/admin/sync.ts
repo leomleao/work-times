@@ -61,15 +61,21 @@ export interface SyncViewData {
   syncRuns: SyncRunItem[];
   syncDays: SyncDayItem[];
   capabilityState: CapabilityPolicyState | null;
-  apiKeyConfigured: boolean;
+  oauthAppConfigured: boolean;
+  oauthConnected: boolean;
   discoveryReady: boolean;
   backgroundSyncDeferred: boolean;
   isEmpty: boolean;
 }
 
 export function getSyncData(db: Database.Database, config: RuntimeConfig): SyncViewData {
-  const apiKeyConfigured = Boolean(config.wakatimeApiKey);
-  const discoveryReady = apiKeyConfigured;
+  const oauthAppConfigured = Boolean(
+    config.wakatimeOAuthClientId && config.wakatimeOAuthClientSecret && config.sessionSecret
+  );
+  const oauthConnected = Boolean(
+    db.prepare('SELECT 1 AS present FROM wakatime_oauth_connection WHERE id = 1').get()
+  );
+  const discoveryReady = oauthAppConfigured && oauthConnected;
   const backgroundSyncDeferred = true;
 
   // 1. Fetch real sync_runs
@@ -177,7 +183,8 @@ export function getSyncData(db: Database.Database, config: RuntimeConfig): SyncV
     syncRuns,
     syncDays,
     capabilityState,
-    apiKeyConfigured,
+    oauthAppConfigured,
+    oauthConnected,
     discoveryReady,
     backgroundSyncDeferred,
     isEmpty

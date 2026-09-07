@@ -59,14 +59,23 @@
 
   <!-- Truthful status banners -->
   <div style="max-width: 1180px; margin: 0 auto 20px; display: flex; flex-direction: column; gap: 12px;">
-    {#if !sync.apiKeyConfigured}
+    {#if !sync.oauthAppConfigured}
       <div class="notice info" role="status">
         <Key size={18} style="flex-shrink: 0; color: var(--accent);" />
         <div>
-          <strong>WAKATIME_API_KEY is unconfigured.</strong>
+          <strong>The WakaTime OAuth app is unconfigured.</strong>
           <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
-            No WakaTime API key is configured in the local environment (<code>WAKATIME_API_KEY</code> or <code>WAKATIME_API_KEY_FILE</code>).
-            Historical data can be imported directly via dump archives. To enable live API probing and sync, set the environment variable.
+            Add <code>WAKATIME_OAUTH_CLIENT_ID</code>, the App Secret, and a persistent <code>SESSION_SECRET</code> to the server environment.
+          </p>
+        </div>
+      </div>
+    {:else if !sync.oauthConnected}
+      <div class="notice info" role="status">
+        <Key size={18} style="flex-shrink: 0; color: var(--accent);" />
+        <div>
+          <strong>WakaTime authorization is required.</strong>
+          <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
+            <a href="/integrations/wakatime" style="color: var(--text); text-decoration: underline;">Open the secure connection page</a> to authorize read-only access.
           </p>
         </div>
       </div>
@@ -74,7 +83,7 @@
       <div class="notice safe" role="status">
         <CheckCircle2 size={18} style="flex-shrink: 0; color: var(--work);" />
         <div>
-          <strong>WAKATIME_API_KEY is configured. Safe capability discovery is ready.</strong>
+          <strong>WakaTime OAuth is connected. Safe capability discovery is ready.</strong>
           <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
             Run safe discovery from your terminal: <code>pnpm wakatime:discover</code>.
             This probes the upstream API without modifying telemetry and stores discovered account limits.
@@ -98,11 +107,11 @@
   <!-- KPI Metrics -->
   <section class="metrics" aria-label="Sync engine status overview">
     <MetricCard
-      label="WakaTime API Key"
-      value={sync.apiKeyConfigured ? 'Configured' : 'Unconfigured'}
-      subtext={sync.apiKeyConfigured ? 'Ready for CLI discovery' : 'Missing environment variable'}
-      badge={sync.apiKeyConfigured ? 'Active' : 'Unset'}
-      badgeVariant={sync.apiKeyConfigured ? 'work' : 'neutral'}
+      label="WakaTime OAuth"
+      value={sync.oauthConnected ? 'Connected' : 'Disconnected'}
+      subtext={sync.oauthConnected ? 'Encrypted server-side tokens' : 'Authorization required'}
+      badge={sync.discoveryReady ? 'Ready' : 'Setup'}
+      badgeVariant={sync.discoveryReady ? 'work' : 'neutral'}
     />
     <MetricCard
       label="Recorded Sync Runs"

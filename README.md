@@ -48,13 +48,13 @@ Real export verification confirms the following aggregate baseline facts (no dum
 - **Mathematical Invariant**: Exact equality between daily total seconds and slice total seconds across all days (`work + personal + unclassified = daily_total_seconds`), with exactly one historical 900-second unattributed divergence between summary entities and daily grand total.
 
 > [!IMPORTANT]
-> Live background synchronization against the WakaTime REST API using `WAKATIME_API_KEY` is **deferred** in this release. The application currently functions as a dump-backed archive; recurring polling reconciliation workers and background schedulers are not yet mounted. Use the safe read-only discovery command (`pnpm wakatime:discover`) to inspect API capabilities and credentials without recurring ingestion.
+> Live background synchronization against the WakaTime REST API is **deferred** in this release. The application currently functions as a dump-backed archive; recurring polling reconciliation workers and background schedulers are not yet mounted. The WakaTime OAuth connection and safe read-only discovery command are available now.
 
 ### 4. Safe Read-Only WakaTime Capability Discovery
-The CLI tool `pnpm wakatime:discover` provides a safe, read-only mechanism to probe WakaTime API credentials and plan-gated capabilities:
-- **Zero Network Calls Without Key**: When no key is configured, the command performs zero network calls, exits with code 1, and prints concise instructions to configure the key without echoing file contents.
-- **Credential Storage**: Reads strictly from `WAKATIME_API_KEY` in your gitignored `.env` or from a permissions-restricted secret file via `WAKATIME_API_KEY_FILE`.
-- **No CLI Key Arguments**: Passing API keys via command-line arguments (such as `--api-key`) is strictly forbidden and rejected at parsing time to prevent credential leakage into shell histories, process listings (`ps aux`), or logs.
+The CLI tool `pnpm wakatime:discover` uses the encrypted WakaTime OAuth connection to probe plan-gated capabilities safely:
+- **Zero Network Calls Without a Connection**: When WakaTime has not been authorized, the command performs zero network calls and directs the operator to `/integrations/wakatime`.
+- **Credential Storage**: Access and refresh tokens are encrypted with AES-256-GCM using key material derived from the persistent `SESSION_SECRET`; plaintext tokens never enter browser storage.
+- **No CLI Credentials**: Passing access tokens or API keys via command-line arguments is forbidden to prevent leakage into shell histories, process listings, or logs.
 - **Bounded Non-PII Reporting**: Reports are strictly bounded:
   - Dumps listing is capped to at most 10 items (`MAX_DUMP_ITEMS = 10`) with aggregate total counts and a truncation indicator (`truncated: boolean`).
   - Dump types and statuses are mapped strictly to known safe values (`daily`, `heartbeats`, `pending`, `processing`, `completed`, `failed`) or `"unknown"`; arbitrary upstream strings are never echoed.
@@ -82,7 +82,7 @@ Work Times implements standards-compliant OAuth 2.0 authorization server routes:
 - **Refresh Token Rotation & Reuse Detection**: Refresh tokens rotate on every exchange. If an old refresh token is reused, the entire authorization family is revoked immediately to prevent replay attacks.
 - **Token Revocation (`/oauth/revoke`)**: RFC 7009 endpoint revoking access and refresh tokens.
 - **Constrained Dynamic Registration (`/oauth/register`)**: RFC 7591 dynamic client registration endpoint for public clients, protected by IP-based rate limiting, strict redirect URI validation, and constrained client names.
-- **Cloudflare Access Ingress**: When deployed behind Cloudflare Access, bypass rules must be configured for machine protocol paths (`/oauth/*`, `/.well-known/*`, `/mcp`) so automated AI agents are not redirected to interactive HTML login pages.
+- **Cloudflare Access Ingress**: When deployed behind Cloudflare Access, bypass rules must be configured for machine protocol paths (`/oauth/*`, `/.well-known/*`, `/mcp`) and the public WakaTime install page (`/integrations/wakatime`). Application authentication still protects every privileged operation.
 
 ### 7. Security & Session Model
 - **Authentication**: Administrator access is protected by `scrypt` password hashing and login rate limiting (5 consecutive failures per 15-minute window per IP).
@@ -156,10 +156,29 @@ Verify the migration status:
 pnpm db:migrate --status
 ```
 
-### 4. (Optional) Safe WakaTime API Capability Discovery
-To safely probe your WakaTime account credentials and capabilities without modifying upstream state:
+### 4. Connect WakaTime with OAuth
+
+Create an app at <https://wakatime.com/apps>. For a production origin of `https://times.byleo.uk`, register:
+
+```text
+Install URL: https://times.byleo.uk/integrations/wakatime
+Authorized Redirect URI: https://times.byleo.uk/oauth/wakatime/callback
+Authorized Redirect URI: http://localhost:3002/oauth/wakatime/callback
+```
+
+If the final production hostname changes, replace `times.byleo.uk` in both production URLs. Redirect URIs must match `PUBLIC_URL` exactly. Configure the App ID and App Secret locally:
+
+```dotenv
+PUBLIC_URL=http://localhost:3002
+WAKATIME_OAUTH_CLIENT_ID=your-app-id
+WAKATIME_OAUTH_CLIENT_SECRET=your-app-secret
+```
+
+Keep a persistent `SESSION_SECRET`; changing it makes existing encrypted WakaTime tokens unreadable and requires reconnecting. Start the app, sign in, then open <http://localhost:3002/integrations/wakatime> and choose **Authorize with WakaTime**.
+
+To probe the connected account without modifying upstream state:
+
 ```bash
-# Set WAKATIME_API_KEY in .env or WAKATIME_API_KEY_FILE in secrets/
 pnpm wakatime:discover
 ```
 To emit a bounded JSON report:
@@ -203,7 +222,7 @@ The service includes a production-ready `Dockerfile` and `docker-compose.yml` ba
 - **Build Stage**: The multi-stage build installs native compilation tools (`python3`, `make`, `g++`) to build native `better-sqlite3` bindings before assembling the minimal runtime container.
 - **Non-Root Execution**: Runs under non-root user `node` (UID 1000).
 - **In-Process Migrations**: The container automatically executes pending migrations in-process on boot before listening on port 3002.
-- **Read-Only Secret Mount**: `docker-compose.yml` mounts the host `./secrets` directory read-only at `/run/secrets`. In the `.env` consumed by Compose, point the `*_FILE` variables at the container paths — `WAKATIME_API_KEY_FILE=/run/secrets/wakatime_api_key`, `ADMIN_PASSWORD_HASH_FILE=/run/secrets/admin_password_hash`, and `SESSION_SECRET_FILE=/run/secrets/session_secret`. The host-relative `./secrets/...` paths shown in the Quickstart apply only to local, non-container runs.
+- **Read-Only Secret Mount**: `docker-compose.yml` mounts the host `./secrets` directory read-only at `/run/secrets`. In the `.env` consumed by Compose, point the `*_FILE` variables at the container paths — `WAKATIME_OAUTH_CLIENT_SECRET_FILE=/run/secrets/wakatime_oauth_client_secret`, `ADMIN_PASSWORD_HASH_FILE=/run/secrets/admin_password_hash`, and `SESSION_SECRET_FILE=/run/secrets/session_secret`. The App ID is non-secret and remains a normal environment value.
 - **No Background Sync**: Live recurring background API synchronization is not active.
 
 ```bash

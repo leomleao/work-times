@@ -178,8 +178,9 @@ Operational rules derived from that review:
 - Keep API traffic well below the documented limit of fewer than 10 requests
   per second averaged over five minutes. The synchronizer will serialize calls
   and normally stay at or below one request per second.
-- Use OAuth rather than a personal API key if the product ever supports other
-  WakaTime users.
+- Use OAuth authorization-code flow for upstream access, including this
+  single-operator deployment; never provision a personal WakaTime API key to
+  the application.
 - Keep real exports, API responses, and personal data out of the source
   repository and distributable Docker image.
 - Select the Work Times source-code licence separately. A private/proprietary
@@ -855,15 +856,17 @@ Repository safety must precede credential creation:
 2. Commit an `.env.example` with empty placeholders only.
 3. Create an ignored `.env` with mode `0600` for the operator to populate.
 4. Verify the paths using `git check-ignore` before accepting a credential.
-5. Load `WAKATIME_API_KEY` inside the process.
+5. Register the exact install and callback URLs, then load the OAuth App ID and
+   App Secret only inside the server process.
 
-The discovery command will use HTTP Basic authorization in memory. It will not
-put the key or its reversible Base64 encoding in a URL, command-line argument,
-error object, or log message.
+The admin initiates an OAuth authorization-code flow at
+`/integrations/wakatime`. Access and refresh tokens are encrypted at rest with
+AES-256-GCM using key material derived from the persistent session secret.
+API requests use an `Authorization: Bearer` header; credentials never appear
+in URLs, command-line arguments, error objects, or log messages.
 
 Initial read-only discovery calls:
 
-- current user/account
 - projects
 - recent summaries
 - a recent non-empty duration/day
@@ -871,7 +874,9 @@ Initial read-only discovery calls:
 - recent stats and insights
 - existing data-dump list
 
-Private samples go under `.local/wakatime-discovery/` with directory mode
+The discovery path deliberately avoids `/users/current`, whose documented
+OAuth scope is `email`; account plan flags are inferred from capability results
+instead of requesting unrelated identity access. Private samples go under `.local/wakatime-discovery/` with directory mode
 `0700` and file mode `0600`. Console output contains only status, counts, field
 names, and validation results. Sanitized synthetic fixtures are produced from
 the learned shape; real values are never committed.
@@ -1278,7 +1283,8 @@ never attempt to infer or query personal activity.
 Expected variables include:
 
 ```text
-WAKATIME_API_KEY=
+WAKATIME_OAUTH_CLIENT_ID=
+WAKATIME_OAUTH_CLIENT_SECRET=
 ADMIN_USERNAME=
 ADMIN_PASSWORD_HASH=
 SESSION_SECRET=
@@ -1294,7 +1300,7 @@ The committed `.env.example` contains no real or realistic secret values.
 Prefer file-backed Docker secrets:
 
 ```text
-WAKATIME_API_KEY_FILE=/run/secrets/wakatime_api_key
+WAKATIME_OAUTH_CLIENT_SECRET_FILE=/run/secrets/wakatime_oauth_client_secret
 ADMIN_PASSWORD_HASH_FILE=/run/secrets/admin_password_hash
 SESSION_SECRET_FILE=/run/secrets/session_secret
 ```
@@ -1306,7 +1312,7 @@ instead.
 The application supports direct environment values for development but gives
 `*_FILE` precedence in production.
 
-The WakaTime key, MCP/API tokens, OAuth codes/tokens, session cookies, and
+The WakaTime App Secret and OAuth tokens, MCP/API tokens, OAuth codes, session cookies, and
 pre-signed data-dump URLs are all credentials. They must never appear in:
 
 - URLs or query strings
@@ -1494,19 +1500,60 @@ Exit criteria verified on real export archive:
 - Zero heartbeat conflicts in the archive.
 - 220,067 canonical dependency rows stored.
 - 74,739 identity rows across seven selector types.
+
+### 4.6 Live API response contract (2026-09-07)
+
+Nineteen gitignored Bruno response envelopes were inspected structurally without
+copying identity values. Every captured request returned HTTP 200, including
+summaries, durations, heartbeats, projects, machine names, user agents, data
+dumps, stats, and supporting metadata. Availability is still treated as a
+probed capability rather than inferred from plan fields.
+
+The implementation uses these observed contracts:
+
+- `GET /users/current/summaries?start=...&end=...` returns one item per day;
+  the canonical calendar date is `data[n].range.date`, not `data[n].date`.
+- `GET /users/current/durations?date=...` returns calculated project-oriented
+  intervals. It does not contain the entity, branch, machine, or editor identity
+  needed for rule classification.
+- `GET /users/current/heartbeats?date=...` returns identity-bearing raw events,
+  including entity, type, project, branch, language, dependency list,
+  `machine_name_id`, and `user_agent_id`. It is the primary incremental source
+  for classifiable slices.
+- `GET /users/current/projects`, `/machine_names`, and `/user_agents` are
+  paginated. Sync must follow `next_page` until null and must join heartbeat IDs
+  to these registries. Rules target normalized project names, machine `value`,
+  editor, and OS rather than volatile registry IDs, host/IP display names, or raw
+  user-agent strings.
+- The captured `/users/current` payload has nullable `username` and does not
+  reliably expose historical feature flags. OAuth discovery avoids this endpoint
+  because its documented scope is `email`; no email permission is needed.
+- Summary dimension arrays are parallel views of the same grand total. They are
+  never added together, and account-level aggregation always guards against
+  summing project-nested breakdowns a second time.
+
+Required outbound scopes are `read_heartbeats`, `read_summaries`,
+`read_stats.machines`, `read_stats.editors`, and `read_stats.projects`. No
+email or write scope is requested.
 - Repeated import is idempotent.
 - Direct parser stays under the explicit import memory/container budget and refuses inputs above its configured size limit.
 - Additive classification slice totals match daily totals with exact equality across all days, with one 900-second historical unattributed divergence.
 
-### Phase 2 — Safe WakaTime API client and discovery
-**Status: Discovery Complete; Recurring Ingestion Deferred**
+### Phase 2 — Safe WakaTime OAuth client and discovery
+**Status: OAuth Connection and Discovery Complete; Recurring Ingestion Deferred**
 
-- Create the ignored blank `.env` and credential loader.
+- Create the ignored blank `.env` and OAuth App ID/App Secret loader.
+- Implement a public install page, exact callback handling, one-time state
+  verification, authorization-code exchange, refresh, and revocation.
+- Encrypt upstream access and refresh tokens in the dedicated
+  `wakatime_oauth_connection` table; keep it separate from the inbound MCP OAuth server.
 - Implemented `pnpm wakatime:discover` CLI and runner for safe, read-only discovery.
-- Enforced zero network calls when API key is missing, exiting with code 1 and concise setup instructions.
-- Configured credential loading strictly via `WAKATIME_API_KEY` in `.env` or `WAKATIME_API_KEY_FILE`.
-- Explicitly rejected CLI arguments attempting to pass API keys (e.g. `--api-key`).
+- Enforced zero network calls when the OAuth connection is missing, exiting with code 1 and concise setup instructions.
+- Explicitly rejected CLI arguments attempting to pass credentials.
 - Strictly validated `--probe-date` as real UTC calendar date with leap-year and month boundary checks.
+- Corrected the live summary contract (`range.date` is canonical), nullable
+  username, and page metadata for projects, machines, and user agents based on
+  the captured endpoint responses.
 - Bounded non-PII report: max 10 dump items with truncation indicator, safe mapped dump types and statuses, allowlisted response schema field names, zero PII or credentials.
 - Soft degradation: HTTP 402/403 restrictions on durations or heartbeats record `status: "restricted"` without failing overall discovery if summaries succeed.
 - Read-only dump listing via `GET /users/current/data_dumps` without creating dumps.

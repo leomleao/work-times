@@ -70,9 +70,11 @@ export type ProjectSummaryItem = z.infer<typeof ProjectSummaryItemSchema>;
 // Summaries Endpoint
 // ==========================================
 
-export const SummaryDaySchema = z
+const SummaryDayWireSchema = z
   .object({
-    date: z.string(), // "YYYY-MM-DD"
+    // Current API responses put the calendar date in range.date. Older
+    // fixtures/export-derived payloads may still expose a top-level date.
+    date: z.string().optional(),
     grand_total: GrandTotalSchema,
     categories: z.array(TimeBreakdownItemSchema).optional().default([]),
     editors: z.array(TimeBreakdownItemSchema).optional().default([]),
@@ -93,6 +95,12 @@ export const SummaryDaySchema = z
       .optional()
   })
   .passthrough();
+
+export const SummaryDaySchema = SummaryDayWireSchema
+  .refine((day) => Boolean(day.date ?? day.range?.date), {
+    message: 'Summary day must contain date or range.date'
+  })
+  .transform((day) => ({ ...day, date: day.date ?? day.range!.date! }));
 
 export type SummaryDay = z.infer<typeof SummaryDaySchema>;
 
@@ -257,7 +265,7 @@ export const CurrentUserSchema = z
   .object({
     id: z.string(),
     email: z.string().optional(),
-    username: z.string().optional(),
+    username: z.string().nullable().optional(),
     timezone: z.string().optional(),
     timeout: z.number().optional(),
     weekday_start: z.number().optional(),
@@ -276,3 +284,64 @@ export const CurrentUserResponseSchema = z
   .passthrough();
 
 export type CurrentUserResponse = z.infer<typeof CurrentUserResponseSchema>;
+
+// ==========================================
+// Identity registries used to normalize heartbeat foreign keys
+// ==========================================
+
+const PaginationSchema = z.object({
+  page: z.number().int().positive(),
+  total: z.number().int().nonnegative(),
+  total_pages: z.number().int().nonnegative(),
+  next_page: z.number().int().positive().nullable().optional(),
+  prev_page: z.number().int().positive().nullable().optional()
+});
+
+export const ProjectRegistryItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  repository: z.string().nullable().optional(),
+  color: z.string().nullable().optional(),
+  last_heartbeat_at: z.string().nullable().optional(),
+  first_heartbeat_at: z.string().nullable().optional()
+}).passthrough();
+
+export const ProjectsResponseSchema = PaginationSchema.extend({
+  data: z.array(ProjectRegistryItemSchema)
+}).passthrough();
+export type ProjectsResponse = z.infer<typeof ProjectsResponseSchema>;
+
+export const MachineNameItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  value: z.string(),
+  ip: z.string(),
+  timezone: z.string().nullable().optional(),
+  last_seen_at: z.string().nullable().optional(),
+  created_at: z.string().optional()
+}).passthrough();
+
+export const MachineNamesResponseSchema = PaginationSchema.extend({
+  data: z.array(MachineNameItemSchema)
+}).passthrough();
+export type MachineNamesResponse = z.infer<typeof MachineNamesResponseSchema>;
+
+export const UserAgentItemSchema = z.object({
+  id: z.string(),
+  value: z.string(),
+  editor: z.string(),
+  os: z.string(),
+  version: z.string().nullable().optional(),
+  ai_model: z.string().nullable().optional(),
+  ai_model_version: z.string().nullable().optional(),
+  ai_model_complexity: z.string().nullable().optional(),
+  is_browser_extension: z.boolean().optional(),
+  is_desktop_app: z.boolean().optional(),
+  last_seen_at: z.string().nullable().optional(),
+  created_at: z.string().optional()
+}).passthrough();
+
+export const UserAgentsResponseSchema = PaginationSchema.extend({
+  data: z.array(UserAgentItemSchema)
+}).passthrough();
+export type UserAgentsResponse = z.infer<typeof UserAgentsResponseSchema>;

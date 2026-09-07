@@ -23,13 +23,21 @@ import {
   type DumpStatusResponse,
   CurrentUserResponseSchema,
   type CurrentUserResponse,
+  ProjectsResponseSchema,
+  type ProjectsResponse,
+  MachineNamesResponseSchema,
+  type MachineNamesResponse,
+  UserAgentsResponseSchema,
+  type UserAgentsResponse,
   CreateDumpInputSchema,
   type DumpType
 } from './schemas.js';
 
 export interface WakaTimeClientOptions {
-  /** WakaTime API key. Must not be empty. */
-  apiKey: string;
+  /** Static OAuth access token, primarily useful for isolated probes and tests. */
+  accessToken?: string;
+  /** Refresh-capable server-side OAuth token provider. */
+  tokenProvider?: WakaTimeAccessTokenProvider;
   /** Base URL for the WakaTime API (default: 'https://api.wakatime.com/api/v1'). */
   baseUrl?: string;
   /** Injectable fetch implementation for tests or custom dispatch. */
@@ -48,6 +56,11 @@ export interface WakaTimeClientOptions {
   maxBackoffMs?: number;
   /** Maximum jitter in milliseconds (default: 500). */
   jitterMs?: number;
+}
+
+export interface WakaTimeAccessTokenProvider {
+  getAccessToken(): Promise<string>;
+  refreshAccessToken(): Promise<string>;
 }
 
 export interface SummariesQueryOptions {
@@ -111,20 +124,21 @@ function inferCapability(pathname: string): string {
 }
 
 /**
- * Dump-independent WakaTime HTTP Client.
+ * Dump-independent WakaTime OAuth HTTP Client.
  *
  * Enforces:
- * - Basic auth using base64 of the API key itself, never query-string auth.
+ * - OAuth Bearer authentication, never query-string authentication.
  * - redirect: 'manual'
  * - Treating data-endpoint 302 and 429 as throttling with bounded exponential backoff/jitter and Retry-After.
  * - Retrying eligible 5xx up to 3 times.
  * - Treating 401 as non-retriable authentication failure.
  * - Surfacing 402/403 as non-retriable CapabilityRestrictedError.
- * - Absolute omission of API keys, PII, entity paths, and raw bodies in errors/logs.
+ * - Absolute omission of OAuth tokens, PII, entity paths, and raw bodies in errors/logs.
  * - Injectable sleep/random/fetch for deterministic tests.
  */
 export class WakaTimeClient {
-  #apiKey: string;
+  readonly #accessToken: string | null;
+  readonly #tokenProvider: WakaTimeAccessTokenProvider | null;
   readonly baseUrl: string;
   readonly #fetch: typeof fetch;
   readonly #sleep: (ms: number) => Promise<void>;
@@ -136,11 +150,12 @@ export class WakaTimeClient {
   readonly jitterMs: number;
 
   constructor(options: WakaTimeClientOptions) {
-    const trimmedKey = options.apiKey?.trim();
-    if (!trimmedKey) {
-      throw new WakaTimeError('API key is required for WakaTimeClient');
+    const accessToken = options.accessToken?.trim() || null;
+    if ((!accessToken && !options.tokenProvider) || (accessToken && options.tokenProvider)) {
+      throw new WakaTimeError('Provide exactly one OAuth access token source for WakaTimeClient');
     }
-    this.#apiKey = trimmedKey;
+    this.#accessToken = accessToken;
+    this.#tokenProvider = options.tokenProvider ?? null;
     this.baseUrl = (options.baseUrl || 'https://api.wakatime.com/api/v1').replace(/\/+$/, '');
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -184,22 +199,17 @@ export class WakaTimeClient {
       searchParams?: Record<string, string | undefined>;
     }
   ): Promise<T> {
-    // Build URL ensuring query params NEVER include api_key or secrets
+    // Build URL ensuring query params NEVER include tokens, API keys, or secrets.
     const url = new URL(`${this.baseUrl}${endpointPath.startsWith('/') ? '' : '/'}${endpointPath}`);
     if (init?.searchParams) {
       for (const [k, v] of Object.entries(init.searchParams)) {
-        if (v !== undefined && k !== 'api_key' && k !== 'apiKey') {
+        if (v !== undefined && !['api_key', 'apiKey', 'access_token', 'token'].includes(k)) {
           url.searchParams.set(k, v);
         }
       }
     }
 
-    // Prepare Basic authorization: base64 of the API key itself (official docs requirement)
-    const basicAuth = Buffer.from(this.#apiKey).toString('base64');
-    const headers: Record<string, string> = {
-      Authorization: `Basic ${basicAuth}`,
-      Accept: 'application/json'
-    };
+    const headers: Record<string, string> = { Accept: 'application/json' };
 
     let requestBody: string | undefined;
     if (init?.body !== undefined) {
@@ -209,8 +219,11 @@ export class WakaTimeClient {
 
     let retries5xx = 0;
     let throttleRetries = 0;
+    let authenticationRetried = false;
+    let accessToken = this.#accessToken ?? await this.#tokenProvider!.getAccessToken();
 
     while (true) {
+      headers.Authorization = `Bearer ${accessToken}`;
       let response: Response;
       try {
         response = await this.#fetch(url.toString(), {
@@ -267,6 +280,11 @@ export class WakaTimeClient {
 
       // 3. Authentication failure: treat 401 as non-retriable authentication failure
       if (status === 401) {
+        if (this.#tokenProvider && !authenticationRetried) {
+          authenticationRetried = true;
+          accessToken = await this.#tokenProvider.refreshAccessToken();
+          continue;
+        }
         throw new WakaTimeAuthError(url.pathname);
       }
 
@@ -418,6 +436,30 @@ export class WakaTimeClient {
   async getCurrentUser(): Promise<CurrentUserResponse> {
     return this.request('/users/current', CurrentUserResponseSchema, {
       method: 'GET'
+    });
+  }
+
+  /** Fetch one documented page of the project identity registry. */
+  async getProjects(page = 1): Promise<ProjectsResponse> {
+    return this.request('/users/current/projects', ProjectsResponseSchema, {
+      method: 'GET',
+      searchParams: { page: String(page) }
+    });
+  }
+
+  /** Fetch one documented page of stable machine metadata. */
+  async getMachineNames(page = 1): Promise<MachineNamesResponse> {
+    return this.request('/users/current/machine_names', MachineNamesResponseSchema, {
+      method: 'GET',
+      searchParams: { page: String(page) }
+    });
+  }
+
+  /** Fetch one documented page of user-agent/editor metadata. */
+  async getUserAgents(page = 1): Promise<UserAgentsResponse> {
+    return this.request('/users/current/user_agents', UserAgentsResponseSchema, {
+      method: 'GET',
+      searchParams: { page: String(page) }
     });
   }
 }

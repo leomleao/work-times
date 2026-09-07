@@ -13,8 +13,8 @@ import {
 } from './errors.js';
 
 describe('WakaTime Client and Error Handling', () => {
-  const dummyApiKey = 'sec_waka_test_key_12345';
-  const expectedAuthHeader = `Basic ${Buffer.from(dummyApiKey).toString('base64')}`;
+  const dummyAccessToken = 'sec_waka_test_key_12345';
+  const expectedAuthHeader = `Bearer ${dummyAccessToken}`;
 
   // Helper to create mock response
   function createResponse(
@@ -34,32 +34,32 @@ describe('WakaTime Client and Error Handling', () => {
     });
   }
 
-  it('rejects an empty API key at construction', () => {
-    expect(() => new WakaTimeClient({ apiKey: '' })).toThrow(WakaTimeError);
-    expect(() => new WakaTimeClient({ apiKey: '   ' })).toThrow(WakaTimeError);
+  it('rejects an empty access token at construction', () => {
+    expect(() => new WakaTimeClient({ accessToken: '' })).toThrow(WakaTimeError);
+    expect(() => new WakaTimeClient({ accessToken: '   ' })).toThrow(WakaTimeError);
   });
 
-  it('does not leak API key via JSON.stringify or properties', () => {
-    const client = new WakaTimeClient({ apiKey: dummyApiKey });
+  it('does not leak OAuth token via JSON.stringify or properties', () => {
+    const client = new WakaTimeClient({ accessToken: dummyAccessToken });
     const serialized = JSON.stringify(client);
-    expect(serialized).not.toContain(dummyApiKey);
+    expect(serialized).not.toContain(dummyAccessToken);
     expect(serialized).not.toContain('sec_waka');
-    expect((client as unknown as Record<string, unknown>).apiKey).toBeUndefined();
+    expect((client as unknown as Record<string, unknown>).accessToken).toBeUndefined();
   });
 
-  describe('Basic Authentication & URL Construction', () => {
+  describe('Bearer Authentication & URL Construction', () => {
     it('defaults baseUrl to https://api.wakatime.com/api/v1 and normalizes trailing slashes', () => {
-      const clientDefault = new WakaTimeClient({ apiKey: dummyApiKey });
+      const clientDefault = new WakaTimeClient({ accessToken: dummyAccessToken });
       expect(clientDefault.baseUrl).toBe('https://api.wakatime.com/api/v1');
 
       const clientCustom = new WakaTimeClient({
-        apiKey: dummyApiKey,
+        accessToken: dummyAccessToken,
         baseUrl: 'https://custom.api.wakatime.com/api/v1///'
       });
       expect(clientCustom.baseUrl).toBe('https://custom.api.wakatime.com/api/v1');
     });
 
-    it('authenticates with Base64 of the API key itself and never puts key in query params', async () => {
+    it('authenticates with an OAuth Bearer token and never puts it in query params', async () => {
       let interceptedUrl: string | undefined;
       let interceptedHeaders: Headers | undefined;
       let interceptedRedirect: RequestRedirect | undefined;
@@ -76,7 +76,7 @@ describe('WakaTime Client and Error Handling', () => {
       };
 
       const client = new WakaTimeClient({
-        apiKey: dummyApiKey,
+        accessToken: dummyAccessToken,
         fetch: mockFetch
       });
 
@@ -88,8 +88,31 @@ describe('WakaTime Client and Error Handling', () => {
         'https://api.wakatime.com/api/v1/users/current/summaries?start=2026-09-01&end=2026-09-02'
       );
       expect(interceptedUrl).not.toContain('api_key');
-      expect(interceptedUrl).not.toContain(dummyApiKey);
+      expect(interceptedUrl).not.toContain(dummyAccessToken);
     });
+  });
+
+  it('refreshes once after a 401 and retries with the rotated Bearer token', async () => {
+    const authorizations: string[] = [];
+    let refreshed = 0;
+    const tokenProvider = {
+      getAccessToken: async () => 'expired-token',
+      refreshAccessToken: async () => {
+        refreshed += 1;
+        return 'fresh-token';
+      }
+    };
+    const mockFetch: typeof fetch = async (_input, init) => {
+      authorizations.push(new Headers(init?.headers).get('Authorization') ?? '');
+      return authorizations.length === 1
+        ? createResponse(401, { error: 'expired' })
+        : createResponse(200, { data: [] });
+    };
+
+    const client = new WakaTimeClient({ tokenProvider, fetch: mockFetch });
+    await expect(client.getHeartbeats('2026-09-01')).resolves.toMatchObject({ data: [] });
+    expect(authorizations).toEqual(['Bearer expired-token', 'Bearer fresh-token']);
+    expect(refreshed).toBe(1);
   });
 
   describe('Privacy, Redaction and Sanitization', () => {
@@ -106,7 +129,7 @@ describe('WakaTime Client and Error Handling', () => {
       expect(sanitizeEndpoint('')).toBe('');
     });
 
-    it('never exposes API keys, PII, entity paths or raw bodies in errors', async () => {
+    it('never exposes OAuth tokens, PII, entity paths or raw bodies in errors', async () => {
       const mockFetch: typeof fetch = async () => {
         // Upstream returns private PII and raw body in response
         return createResponse(
@@ -119,7 +142,7 @@ describe('WakaTime Client and Error Handling', () => {
 
       const recordedSleeps: number[] = [];
       const client = new WakaTimeClient({
-        apiKey: dummyApiKey,
+        accessToken: dummyAccessToken,
         fetch: mockFetch,
         sleep: async (ms) => {
           recordedSleeps.push(ms);
@@ -135,7 +158,7 @@ describe('WakaTime Client and Error Handling', () => {
         const errMessage = (err as Error).message;
         expect(errMessage).not.toContain('secret@example.com');
         expect(errMessage).not.toContain('/Users/private');
-        expect(errMessage).not.toContain(dummyApiKey);
+        expect(errMessage).not.toContain(dummyAccessToken);
         expect(errMessage).not.toContain('secret.ts');
         expect((err as WakaTimeServerError).endpoint).toBe('/api/v1/users/current/heartbeats');
       }
@@ -177,12 +200,24 @@ describe('WakaTime Client and Error Handling', () => {
         });
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
       const res = await client.getSummaries('2026-09-01', '2026-09-01');
 
       expect(res.data).toHaveLength(1);
       expect(res.data[0].grand_total.total_seconds).toBe(3600);
       expect(res.data[0].projects[0].name).toBe('work-times');
+    });
+
+    it('normalizes the live summaries range.date field into the canonical date', async () => {
+      const mockFetch: typeof fetch = async () => createResponse(200, {
+        data: [{
+          grand_total: { total_seconds: 42 },
+          range: { date: '2026-09-06', start: '2026-09-06T00:00:00Z', end: '2026-09-06T23:59:59Z' }
+        }]
+      });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
+      const response = await client.getSummaries('2026-09-06', '2026-09-06');
+      expect(response.data[0].date).toBe('2026-09-06');
     });
 
     it('successfully calls getHeartbeats and parses response shape', async () => {
@@ -205,7 +240,7 @@ describe('WakaTime Client and Error Handling', () => {
         });
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
       const res = await client.getHeartbeats('2026-09-01');
 
       expect(res.data).toHaveLength(1);
@@ -230,12 +265,38 @@ describe('WakaTime Client and Error Handling', () => {
         });
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
       const res = await client.getDurations('2026-09-01');
 
       expect(res.data).toHaveLength(1);
       expect(res.data[0].project).toBe('work-times');
       expect(res.data[0].duration).toBe(1200);
+    });
+
+    it('uses the paginated registry endpoints observed in live responses', async () => {
+      const requested: string[] = [];
+      const mockFetch: typeof fetch = async (input) => {
+        const url = input.toString();
+        requested.push(url);
+        const page = { page: 2, total: 101, total_pages: 3, next_page: 3, prev_page: 1 };
+        if (url.includes('/projects')) {
+          return createResponse(200, { ...page, data: [{ id: 'project-id', name: 'project' }] });
+        }
+        if (url.includes('/machine_names')) {
+          return createResponse(200, { ...page, data: [{ id: 'machine-id', name: 'host', value: 'host', ip: '0.0.0.0' }] });
+        }
+        return createResponse(200, { ...page, data: [{ id: 'agent-id', value: 'agent', editor: 'Editor', os: 'OS' }] });
+      };
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
+
+      expect((await client.getProjects(2)).data[0].name).toBe('project');
+      expect((await client.getMachineNames(2)).data[0].value).toBe('host');
+      expect((await client.getUserAgents(2)).data[0].editor).toBe('Editor');
+      expect(requested).toEqual([
+        'https://api.wakatime.com/api/v1/users/current/projects?page=2',
+        'https://api.wakatime.com/api/v1/users/current/machine_names?page=2',
+        'https://api.wakatime.com/api/v1/users/current/user_agents?page=2'
+      ]);
     });
 
     describe('Data Dumps (list, create, status polling)', () => {
@@ -260,7 +321,7 @@ describe('WakaTime Client and Error Handling', () => {
           });
         };
 
-        const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+        const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
         const list = await client.listDumps();
 
         expect(interceptedUrl).toBe('https://api.wakatime.com/api/v1/users/current/data_dumps');
@@ -295,7 +356,7 @@ describe('WakaTime Client and Error Handling', () => {
           });
         };
 
-        const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+        const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
         const res = await client.createDump({ type: 'daily' });
 
         expect(interceptedUrl).toBe('https://api.wakatime.com/api/v1/users/current/data_dumps');
@@ -322,7 +383,7 @@ describe('WakaTime Client and Error Handling', () => {
           });
         };
 
-        const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+        const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
         await client.createDump({ type: 'heartbeats', email_when_finished: false });
 
         expect(interceptedBody).toBe(JSON.stringify({ type: 'heartbeats', email_when_finished: false }));
@@ -343,7 +404,7 @@ describe('WakaTime Client and Error Handling', () => {
           });
         };
 
-        const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+        const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
         await client.createDump({ type: 'heartbeats', email_when_finished: true });
 
         expect(interceptedBody).toBe(JSON.stringify({ type: 'heartbeats', email_when_finished: true }));
@@ -356,7 +417,7 @@ describe('WakaTime Client and Error Handling', () => {
           return createResponse(200, {});
         };
 
-        const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+        const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
 
         // @ts-expect-error test runtime validation of invalid dump type
         await expect(client.createDump({ type: 'monthly' })).rejects.toThrow(WakaTimeError);
@@ -395,7 +456,7 @@ describe('WakaTime Client and Error Handling', () => {
           });
         };
 
-        const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+        const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
         const status = await client.getDumpStatus('dump_target');
 
         expect(fetchCalls).toHaveLength(1);
@@ -423,7 +484,7 @@ describe('WakaTime Client and Error Handling', () => {
           });
         };
 
-        const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+        const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
 
         try {
           await client.getDumpStatus('non_existent_id');
@@ -438,7 +499,7 @@ describe('WakaTime Client and Error Handling', () => {
       });
 
       it('rejects getDumpStatus when dumpId is empty', async () => {
-        const client = new WakaTimeClient({ apiKey: dummyApiKey });
+        const client = new WakaTimeClient({ accessToken: dummyAccessToken });
         await expect(client.getDumpStatus('')).rejects.toThrow(WakaTimeError);
         await expect(client.getDumpStatus('   ')).rejects.toThrow(WakaTimeError);
       });
@@ -456,7 +517,7 @@ describe('WakaTime Client and Error Handling', () => {
         });
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
       const res = await client.getCurrentUser();
       expect(res.data.id).toBe('usr_abc123');
       expect(res.data.timezone).toBe('America/New_York');
@@ -483,7 +544,7 @@ describe('WakaTime Client and Error Handling', () => {
       };
 
       const client = new WakaTimeClient({
-        apiKey: dummyApiKey,
+        accessToken: dummyAccessToken,
         fetch: mockFetch,
         sleep: async (ms) => {
           sleepDelays.push(ms);
@@ -513,7 +574,7 @@ describe('WakaTime Client and Error Handling', () => {
       };
 
       const client = new WakaTimeClient({
-        apiKey: dummyApiKey,
+        accessToken: dummyAccessToken,
         fetch: mockFetch,
         sleep: async (ms) => {
           sleepDelays.push(ms);
@@ -538,7 +599,7 @@ describe('WakaTime Client and Error Handling', () => {
 
       const sleepDelays: number[] = [];
       const client = new WakaTimeClient({
-        apiKey: dummyApiKey,
+        accessToken: dummyAccessToken,
         fetch: mockFetch,
         sleep: async (ms) => {
           sleepDelays.push(ms);
@@ -569,7 +630,7 @@ describe('WakaTime Client and Error Handling', () => {
       };
 
       const client = new WakaTimeClient({
-        apiKey: dummyApiKey,
+        accessToken: dummyAccessToken,
         fetch: mockFetch,
         sleep: async (ms) => {
           sleepDelays.push(ms);
@@ -594,7 +655,7 @@ describe('WakaTime Client and Error Handling', () => {
       };
 
       const client = new WakaTimeClient({
-        apiKey: dummyApiKey,
+        accessToken: dummyAccessToken,
         fetch: mockFetch,
         sleep: async () => {},
         maxRetries5xx: 3
@@ -615,7 +676,7 @@ describe('WakaTime Client and Error Handling', () => {
         return createResponse(401, null);
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
 
       await expect(client.getSummaries('2026-09-01', '2026-09-01')).rejects.toThrow(
         WakaTimeAuthError
@@ -630,7 +691,7 @@ describe('WakaTime Client and Error Handling', () => {
         return createResponse(402, null);
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
 
       try {
         await client.getDurations('2026-09-01');
@@ -651,7 +712,7 @@ describe('WakaTime Client and Error Handling', () => {
         return createResponse(403, null);
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
 
       try {
         await client.getHeartbeats('2026-09-01');
@@ -670,7 +731,7 @@ describe('WakaTime Client and Error Handling', () => {
         return createResponse(404, null);
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
       await expect(client.getSummaries('2026-09-01', '2026-09-01')).rejects.toThrow(
         WakaTimeApiError
       );
@@ -681,7 +742,7 @@ describe('WakaTime Client and Error Handling', () => {
         throw new Error('connect ECONNREFUSED 127.0.0.1:443');
       };
 
-      const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
+      const client = new WakaTimeClient({ accessToken: dummyAccessToken, fetch: mockFetch });
       await expect(client.getSummaries('2026-09-01', '2026-09-01')).rejects.toThrow(
         WakaTimeNetworkError
       );

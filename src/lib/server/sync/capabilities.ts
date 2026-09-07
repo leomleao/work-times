@@ -418,10 +418,9 @@ export class CapabilityPolicy {
  * Probe live capabilities against WakaTime API.
  *
  * Probes:
- * 1. Current user credentials (fails fast on 401).
- * 2. Summaries range (baseline).
- * 3. Durations (optional).
- * 4. Heartbeats (optional).
+ * 1. Summaries range (baseline and OAuth verification).
+ * 2. Durations (optional).
+ * 3. Heartbeats (optional).
  *
  * Returns updated CapabilityPolicy reflecting discovered capability boundaries.
  */
@@ -438,27 +437,19 @@ export async function probeCapabilities(
   const now = options?.now ?? new Date();
   const probeDate = options?.probeDate ?? getYesterdayDate(now); // Yesterday
 
-  // 1. Authenticate & verify credentials
-  try {
-    await client.getCurrentUser();
-  } catch (err) {
-    if (err instanceof WakaTimeAuthError) {
-      policy.recordError('summaries', err, now);
-      policy.recordError('durations', err, now);
-      policy.recordError('heartbeats', err, now);
-      throw err;
-    }
-    // Network or other failure
-    policy.recordError('summaries', err as Error, now);
-    return policy;
-  }
-
-  // 2. Probe Summaries (baseline)
+  // 1. Probe Summaries (baseline). Avoid /users/current because that endpoint's
+  // documented OAuth scope is `email`, which Work Times does not request.
   if (options?.force || policy.shouldReprobe('summaries', now)) {
     try {
       await client.getSummaries(probeDate, probeDate);
       policy.recordSuccess('summaries', now);
     } catch (err) {
+      if (err instanceof WakaTimeAuthError) {
+        policy.recordError('summaries', err, now);
+        policy.recordError('durations', err, now);
+        policy.recordError('heartbeats', err, now);
+        throw err;
+      }
       if (err instanceof CapabilityRestrictedError) {
         policy.recordRestriction('summaries', err.statusCode, now);
       } else {
@@ -467,7 +458,7 @@ export async function probeCapabilities(
     }
   }
 
-  // 3. Probe Durations
+  // 2. Probe Durations
   if (options?.force || policy.shouldReprobe('durations', now)) {
     try {
       await client.getDurations(probeDate);
@@ -481,7 +472,7 @@ export async function probeCapabilities(
     }
   }
 
-  // 4. Probe Heartbeats
+  // 3. Probe Heartbeats
   if (options?.force || policy.shouldReprobe('heartbeats', now)) {
     try {
       await client.getHeartbeats(probeDate);

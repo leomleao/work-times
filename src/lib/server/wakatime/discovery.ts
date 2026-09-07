@@ -2,7 +2,6 @@ import {
   WakaTimeClient
 } from "./client.js";
 import {
-  type CurrentUserResponse,
   type SummariesResponse,
   type DurationsResponse,
   type HeartbeatsResponse,
@@ -15,7 +14,6 @@ import {
   sanitizeEndpoint
 } from "./errors.js";
 import { getYesterdayDate, type SyncCapability, type CapabilityStatus } from "../sync/capabilities.js";
-import { getRuntimeConfig } from "../config.js";
 
 /** Maximum number of dump items included in discovery output. */
 export const MAX_DUMP_ITEMS = 10;
@@ -81,7 +79,7 @@ export interface DiscoveryResult {
 }
 
 export interface DiscoveryOptions {
-  apiKey?: string | null;
+  accessToken?: string | null;
   baseUrl?: string;
   probeDate?: string;
   now?: Date;
@@ -300,7 +298,7 @@ function pushSafeError(
 }
 
 /**
- * Validate that CLI arguments do not attempt to pass an API key.
+ * Validate that CLI arguments do not attempt to pass an access token.
  * Strictly rejects flags like --api-key, -k, --key, or flags containing "apikey" / "api_key".
  * Also strictly validates that --probe-date is a real UTC calendar date.
  */
@@ -317,7 +315,7 @@ export function validateDiscoveryArgs(argv: readonly string[]): {
     const arg = argv[i];
     const lower = arg.toLowerCase();
 
-    // Explicit rejection of any API key style arguments
+    // Explicit rejection of any access token style arguments
     if (
       lower === "-k" ||
       lower.startsWith("-k=") ||
@@ -331,7 +329,7 @@ export function validateDiscoveryArgs(argv: readonly string[]): {
       lower.includes("apikey")
     ) {
       throw new Error(
-        "Passing API keys via CLI arguments is strictly forbidden. Configure WAKATIME_API_KEY in .env or WAKATIME_API_KEY_FILE instead."
+        "Passing access tokens via CLI arguments is strictly forbidden. Connect WakaTime through /integrations/wakatime instead."
       );
     }
 
@@ -375,9 +373,9 @@ export function validateDiscoveryArgs(argv: readonly string[]): {
  * Perform safe, opt-in discovery of WakaTime account credentials and capabilities.
  *
  * Invariants:
- * - With no key configured: makes zero network calls and returns credentialStatus: "missing".
+ * - With no OAuth connection: makes zero network calls and returns credentialStatus: "missing".
  * - Never modifies upstream state: does not create dumps.
- * - Single currentUser check avoids duplicate verification calls.
+ * - Capability endpoints verify the OAuth connection without requesting the optional email scope.
  * - Soft-degraded optional capabilities (402/403) do not fail the discovery when summaries succeed.
  * - Absolutely zero PII, entity paths, download URLs, or raw bodies in output.
  * - Output is strictly bounded: dumps capped to MAX_DUMP_ITEMS with truncation indicator.
@@ -424,21 +422,21 @@ export async function runWakaTimeDiscovery(
   }
   result.probeDate = probeDate;
 
-  const apiKey = options.apiKey?.trim();
-  if (!apiKey) {
-    // Zero network calls when API key is missing
+  const accessToken = options.accessToken?.trim();
+  if (!accessToken) {
+    // Zero network calls when access token is missing
     return result;
   }
 
-  // A key was supplied, but it is not accepted or rejected until the current-user
-  // request completes. Network and response-validation failures must not be
-  // misreported as a missing credential.
+  // A token source exists, but it is not accepted or rejected until a scoped
+  // capability request completes. Network and response-validation failures
+  // must not be misreported as a missing credential.
   result.credentialStatus = "unverified";
 
   const client =
     options.client ??
     new WakaTimeClient({
-      apiKey,
+      accessToken,
       baseUrl: options.baseUrl,
       fetch: options.fetch,
       sleep: options.sleep,
@@ -446,60 +444,20 @@ export async function runWakaTimeDiscovery(
       maxRetries5xx: 2
     });
 
-  // 1. Verify credentials and inspect user metadata (single call)
-  try {
-    const userRes: CurrentUserResponse = await client.getCurrentUser();
-    result.credentialStatus = "accepted";
-    result.responseFields.currentUser = extractRecognizedFields(userRes, "currentUser");
-
-    if (userRes.data && typeof userRes.data === "object") {
-      const data = userRes.data as Record<string, unknown>;
-      result.responseFields.currentUserData = extractRecognizedFields(
-        data,
-        "currentUserData"
-      );
-
-      if (typeof data.has_basic_features === "boolean") {
-        result.planFeatures.hasBasicFeatures = data.has_basic_features;
-      } else if (typeof data.hasBasicFeatures === "boolean") {
-        result.planFeatures.hasBasicFeatures = data.hasBasicFeatures;
-      }
-
-      if (typeof data.has_premium_features === "boolean") {
-        result.planFeatures.hasPremiumFeatures = data.has_premium_features;
-      } else if (typeof data.hasPremiumFeatures === "boolean") {
-        result.planFeatures.hasPremiumFeatures = data.hasPremiumFeatures;
-      }
-
-      if (typeof data.writes_only === "boolean") {
-        result.planFeatures.writesOnly = data.writes_only;
-      } else if (typeof data.writesOnly === "boolean") {
-        result.planFeatures.writesOnly = data.writesOnly;
-      }
-    }
-  } catch (err) {
-    if (err instanceof WakaTimeAuthError) {
-      result.credentialStatus = "rejected";
-      pushSafeError(result.errors, "/users/current", 401, err);
-      result.ok = false;
-      return result;
-    }
-
-    const status = err instanceof WakaTimeError ? err.status : undefined;
-    const endpoint =
-      err instanceof WakaTimeError ? err.endpoint ?? "/users/current" : "/users/current";
-    pushSafeError(result.errors, endpoint, status, err);
-    result.ok = false;
-    return result;
-  }
-
-  // 2. Probe baseline summaries
+  // 1. Probe baseline summaries. We intentionally do not call /users/current:
+  // its documented OAuth scope is `email`, which this integration does not need.
   try {
     const summariesRes: SummariesResponse = await client.getSummaries(probeDate, probeDate);
+    result.credentialStatus = "accepted";
     result.capabilities.summaries = { status: "available" };
     result.responseFields.summaries = extractRecognizedFields(summariesRes, "summaries");
   } catch (err) {
-    if (err instanceof CapabilityRestrictedError) {
+    if (err instanceof WakaTimeAuthError) {
+      result.credentialStatus = "rejected";
+      pushSafeError(result.errors, err.endpoint ?? "/users/current/summaries", 401, err);
+      return result;
+    } else if (err instanceof CapabilityRestrictedError) {
+      result.credentialStatus = "accepted";
       result.capabilities.summaries = {
         status: "restricted",
         restrictionCode: boundedString(`HTTP_${err.statusCode}`, 20)
@@ -521,13 +479,19 @@ export async function runWakaTimeDiscovery(
     }
   }
 
-  // 3. Probe durations (optional, plan-gated)
+  // 2. Probe durations (optional, plan-gated)
   try {
     const durationsRes: DurationsResponse = await client.getDurations(probeDate);
+    result.credentialStatus = "accepted";
     result.capabilities.durations = { status: "available" };
     result.responseFields.durations = extractRecognizedFields(durationsRes, "durations");
   } catch (err) {
-    if (err instanceof CapabilityRestrictedError) {
+    if (err instanceof WakaTimeAuthError) {
+      result.credentialStatus = "rejected";
+      pushSafeError(result.errors, err.endpoint ?? "/users/current/durations", 401, err);
+      return result;
+    } else if (err instanceof CapabilityRestrictedError) {
+      result.credentialStatus = "accepted";
       result.capabilities.durations = {
         status: "restricted",
         restrictionCode: boundedString(`HTTP_${err.statusCode}`, 20)
@@ -549,13 +513,19 @@ export async function runWakaTimeDiscovery(
     }
   }
 
-  // 4. Probe heartbeats (optional, plan-gated)
+  // 3. Probe heartbeats (optional, plan-gated)
   try {
     const heartbeatsRes: HeartbeatsResponse = await client.getHeartbeats(probeDate);
+    result.credentialStatus = "accepted";
     result.capabilities.heartbeats = { status: "available" };
     result.responseFields.heartbeats = extractRecognizedFields(heartbeatsRes, "heartbeats");
   } catch (err) {
-    if (err instanceof CapabilityRestrictedError) {
+    if (err instanceof WakaTimeAuthError) {
+      result.credentialStatus = "rejected";
+      pushSafeError(result.errors, err.endpoint ?? "/users/current/heartbeats", 401, err);
+      return result;
+    } else if (err instanceof CapabilityRestrictedError) {
+      result.credentialStatus = "accepted";
       result.capabilities.heartbeats = {
         status: "restricted",
         restrictionCode: boundedString(`HTTP_${err.statusCode}`, 20)
@@ -577,9 +547,10 @@ export async function runWakaTimeDiscovery(
     }
   }
 
-  // 5. List existing dumps read-only (never create a dump)
+  // 4. List existing dumps read-only (never create a dump)
   try {
     const dumpsRes: DumpListResponse = await client.listDumps();
+    result.credentialStatus = "accepted";
     result.responseFields.dumps = extractRecognizedFields(dumpsRes, "dumps");
 
     const rawList = Array.isArray(dumpsRes.data) ? dumpsRes.data : [];
@@ -608,6 +579,9 @@ export async function runWakaTimeDiscovery(
       items
     };
   } catch (err) {
+    if (err instanceof WakaTimeAuthError) {
+      result.credentialStatus = "rejected";
+    }
     const status = err instanceof WakaTimeError ? err.status : undefined;
     const endpoint =
       err instanceof WakaTimeError
@@ -701,16 +675,17 @@ export function getDiscoveryHelpText(): string {
     "  --help, -h              Show this help message",
     "",
     "Security:",
-    "  The API key is read strictly from WAKATIME_API_KEY in .env or WAKATIME_API_KEY_FILE.",
-    "  Passing API keys via command-line arguments is strictly rejected.",
-    "  Reports and errors never contain API keys, authorization headers, PII, or entity paths."
+    "  Uses the encrypted OAuth connection created at /integrations/wakatime.",
+    "  Passing credentials via command-line arguments is strictly rejected.",
+    "  Reports and errors never contain tokens, authorization headers, PII, or entity paths."
   ].join("\n");
 }
 
 export async function runDiscoveryCli(
   argv: readonly string[],
   options?: {
-    apiKey?: string | null;
+    client?: WakaTimeClient;
+    accessToken?: string | null;
     baseUrl?: string;
     fetch?: typeof fetch;
     now?: Date;
@@ -739,27 +714,34 @@ export async function runDiscoveryCli(
     return 0;
   }
 
-  let apiKey: string | null = null;
-  if (options?.apiKey !== undefined) {
-    apiKey = options.apiKey;
-  } else {
+  let accessToken: string | null = null;
+  let client = options?.client;
+  if (options?.accessToken !== undefined) {
+    accessToken = options.accessToken;
+  } else if (!client) {
     try {
-      const config = getRuntimeConfig();
-      apiKey = config.wakatimeApiKey;
+      const { runtime } = await import('../runtime.js');
+      if (runtime.wakatimeOAuth.status().connected) {
+        client = new WakaTimeClient({ tokenProvider: runtime.wakatimeOAuth });
+        // A non-secret marker lets the discovery runner distinguish a connected
+        // OAuth provider from a missing credential without reading the token.
+        accessToken = 'oauth-connection';
+      }
     } catch {
-      apiKey = null;
+      accessToken = null;
     }
   }
 
-  if (!apiKey || !apiKey.trim()) {
+  if (!accessToken || !accessToken.trim()) {
     writeErr(
-      "Error: No WakaTime API key configured. Set WAKATIME_API_KEY in your gitignored .env or set WAKATIME_API_KEY_FILE to point to a restricted secret file."
+      "Error: WakaTime is not connected. Sign in as administrator and open /integrations/wakatime to authorize OAuth access."
     );
     return 1;
   }
 
   const result = await runWakaTimeDiscovery({
-    apiKey: apiKey.trim(),
+    accessToken: accessToken.trim(),
+    client,
     baseUrl: options?.baseUrl,
     probeDate: parsedArgs.probeDate,
     now: options?.now,

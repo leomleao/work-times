@@ -80,7 +80,6 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
 
     mockConfig = {
       databasePath: '/Users/test-user/secret-path/dev/work-times/data/work-times.sqlite',
-      wakatimeApiKey: null,
       wakatimeOAuthClientId: null,
       wakatimeOAuthClientSecret: null,
       adminUsername: 'admin',
@@ -126,13 +125,14 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
       expect(activity.pagination.totalItems).toBe(0);
     });
 
-    it('sync page returns honest empty state and states API key is unconfigured', () => {
+    it('sync page returns honest empty OAuth state', () => {
       const syncData = getSyncData(db, mockConfig);
 
       expect(syncData.isEmpty).toBe(true);
       expect(syncData.syncRuns).toEqual([]);
       expect(syncData.syncDays).toEqual([]);
-      expect(syncData.apiKeyConfigured).toBe(false);
+      expect(syncData.oauthAppConfigured).toBe(false);
+      expect(syncData.oauthConnected).toBe(false);
       expect(syncData.discoveryReady).toBe(false);
       expect(syncData.backgroundSyncDeferred).toBe(true);
     });
@@ -468,11 +468,12 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
 
       // Secret values must NOT be present on the returned payload
       expect((settings as any).adminPasswordHash).toBeUndefined();
-      expect((settings as any).wakatimeApiKey).toBeUndefined();
+      expect((settings as any).wakatimeOAuthClientSecret).toBeUndefined();
       expect((settings as any).sessionSecret).toBeUndefined();
 
       // Non-secret booleans and public info only
-      expect(settings.wakatimeApiKeyConfigured).toBe(false);
+      expect(settings.wakatimeOAuthAppConfigured).toBe(false);
+      expect(settings.wakatimeOAuthConnected).toBe(false);
       expect(settings.adminPasswordConfigured).toBe(true);
       expect(settings.sessionSecretConfigured).toBe(true);
       expect(settings.publicOrigin).toBe('http://localhost:3002');

@@ -42,7 +42,6 @@ describe('server runtime singleton', () => {
     const testRuntime = createRuntime(
       {
         databasePath: ':memory:',
-        wakatimeApiKey: null,
         wakatimeOAuthClientId: null,
         wakatimeOAuthClientSecret: null,
         adminUsername: 'testadmin',

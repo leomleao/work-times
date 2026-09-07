@@ -40,7 +40,9 @@ export interface SettingsViewData {
   abbreviatedDbPath: string;
   cookieSecure: boolean;
   adminUsername: string;
-  wakatimeApiKeyConfigured: boolean;
+  wakatimeOAuthAppConfigured: boolean;
+  wakatimeOAuthConnected: boolean;
+  wakatimeOAuthCallbackUrl: string;
   adminPasswordConfigured: boolean;
   sessionSecretConfigured: boolean;
   sqliteStatus: SqliteStatus;
@@ -88,7 +90,13 @@ export function getSettingsData(db: Database.Database, config: RuntimeConfig): S
   const abbreviatedDbPath = abbreviateDatabasePath(config.databasePath);
   const cookieSecure = config.cookieSecure;
   const adminUsername = config.adminUsername;
-  const wakatimeApiKeyConfigured = Boolean(config.wakatimeApiKey);
+  const wakatimeOAuthAppConfigured = Boolean(
+    config.wakatimeOAuthClientId && config.wakatimeOAuthClientSecret
+  );
+  const wakatimeOAuthConnected = Boolean(
+    db.prepare('SELECT 1 AS present FROM wakatime_oauth_connection WHERE id = 1').get()
+  );
+  const wakatimeOAuthCallbackUrl = new URL('/oauth/wakatime/callback', config.publicUrl).toString();
   const adminPasswordConfigured = Boolean(config.adminPasswordHash);
   const sessionSecretConfigured = Boolean(config.sessionSecret);
 
@@ -172,7 +180,9 @@ export function getSettingsData(db: Database.Database, config: RuntimeConfig): S
     abbreviatedDbPath,
     cookieSecure,
     adminUsername,
-    wakatimeApiKeyConfigured,
+    wakatimeOAuthAppConfigured,
+    wakatimeOAuthConnected,
+    wakatimeOAuthCallbackUrl,
     adminPasswordConfigured,
     sessionSecretConfigured,
     sqliteStatus,

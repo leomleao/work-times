@@ -221,10 +221,22 @@
           </div>
 
           <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
-            <span style="color: var(--muted);">WakaTime API Key</span>
-            <span class="badge {settings.wakatimeApiKeyConfigured ? 'safe' : 'neutral'}">
-              {settings.wakatimeApiKeyConfigured ? 'Configured' : 'Unconfigured'}
+            <span style="color: var(--muted);">WakaTime OAuth App</span>
+            <span class="badge {settings.wakatimeOAuthAppConfigured ? 'safe' : 'neutral'}">
+              {settings.wakatimeOAuthAppConfigured ? 'Configured' : 'Unconfigured'}
             </span>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 8px;">
+            <span style="color: var(--muted);">WakaTime Connection</span>
+            <a href="/integrations/wakatime" class="badge {settings.wakatimeOAuthConnected ? 'safe' : 'accent'}">
+              {settings.wakatimeOAuthConnected ? 'Connected' : 'Connect'}
+            </a>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 8px; gap: 20px;">
+            <span style="color: var(--muted);">OAuth Callback</span>
+            <code style="font-size: 11px; overflow-wrap: anywhere; text-align: right;">{settings.wakatimeOAuthCallbackUrl}</code>
           </div>
 
           <div style="display: flex; justify-content: space-between;">

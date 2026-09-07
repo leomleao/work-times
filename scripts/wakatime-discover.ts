@@ -6,9 +6,9 @@
  *   pnpm wakatime:discover [--json] [--probe-date YYYY-MM-DD]
  *
  * Security:
- *   The API key is read strictly from WAKATIME_API_KEY in .env or WAKATIME_API_KEY_FILE.
- *   Passing API keys in CLI arguments is forbidden and will fail execution immediately.
- *   Reports and errors never contain API keys, authorization headers, PII, or entity paths.
+ *   Uses the encrypted OAuth connection created through /integrations/wakatime.
+ *   Passing access tokens in CLI arguments is forbidden and fails immediately.
+ *   Reports and errors never contain tokens, authorization headers, PII, or entity paths.
  */
 
 import { runDiscoveryCli } from "../src/lib/server/wakatime/discovery.js";

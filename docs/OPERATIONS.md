@@ -97,7 +97,7 @@ Set the `*_FILE` variables accordingly:
 
 | Variable | Local (non-container) run | Docker Compose run |
 | :--- | :--- | :--- |
-| `WAKATIME_API_KEY_FILE` | `./secrets/wakatime_api_key` | `/run/secrets/wakatime_api_key` |
+| `WAKATIME_OAUTH_CLIENT_SECRET_FILE` | `./secrets/wakatime_oauth_client_secret` | `/run/secrets/wakatime_oauth_client_secret` |
 | `ADMIN_PASSWORD_HASH_FILE` | `./secrets/admin_password_hash` | `/run/secrets/admin_password_hash` |
 | `SESSION_SECRET_FILE` | `./secrets/session_secret` | `/run/secrets/session_secret` |
 
@@ -121,17 +121,34 @@ All runtime configuration is evaluated in `src/lib/server/config.ts` and `server
 | `HOST` | — | `127.0.0.1` | Network interface to bind (`0.0.0.0` in container). |
 | `COOKIE_SECURE` | — | `false` (dev) / `true` (HTTPS) | Enforces `Secure` attribute on admin session cookies. |
 | `MAX_DIRECT_IMPORT_BYTES` | — | `100663296` (96 MB) | Memory safety ceiling for parsing large JSON dump files. |
-| `WAKATIME_API_KEY` | `WAKATIME_API_KEY_FILE` | *None* | API key for safe read-only capability discovery (`pnpm wakatime:discover`). Background recurring sync remains deferred. |
+| `WAKATIME_OAUTH_CLIENT_ID` | — | *None* | App ID from the WakaTime OAuth application. Not a secret. |
+| `WAKATIME_OAUTH_CLIENT_SECRET` | `WAKATIME_OAUTH_CLIENT_SECRET_FILE` | *None* | App Secret used only for server-side token exchange, refresh, and revocation. |
 | `WORK_TIMES_PORT` | — | `3002` | Host port mapping in `docker-compose.yml`. |
 
 > [!IMPORTANT]
-> Real recurring WakaTime API synchronization using `WAKATIME_API_KEY` is **deferred** in this release. The application currently operates as a dump-backed archive; no background polling scheduler is running. Use `pnpm wakatime:discover` to inspect credentials and capabilities safely.
+> Real recurring WakaTime API synchronization is **deferred** in this release. The OAuth connection and read-only capability discovery are implemented; no background polling scheduler is running yet.
+
+### WakaTime OAuth App Registration
+
+For the planned production origin, enter the following at <https://wakatime.com/apps>:
+
+```text
+Install URL: https://times.byleo.uk/integrations/wakatime
+Authorized Redirect URI: https://times.byleo.uk/oauth/wakatime/callback
+Authorized Redirect URI: http://localhost:3002/oauth/wakatime/callback
+```
+
+Change both production URLs if a different hostname is chosen. `PUBLIC_URL`
+must be the exact origin used by the active redirect URI. WakaTime's public
+documentation requires an exact authorized redirect but does not document a
+loopback HTTP exception; if its app form rejects the localhost URI, use a
+stable HTTPS development tunnel origin and register its callback instead.
 
 ### Safe Read-Only WakaTime Capability Discovery (`pnpm wakatime:discover`)
 The discovery CLI inspects WakaTime account credentials, endpoint availability, and plan-gated restrictions without writing to the database or modifying upstream account state:
 
 ```bash
-# Run discovery using configured WAKATIME_API_KEY or WAKATIME_API_KEY_FILE
+# Run after authorizing at /integrations/wakatime
 pnpm wakatime:discover
 
 # Emit bounded JSON output on stdout
@@ -142,8 +159,8 @@ pnpm wakatime:discover --probe-date 2026-09-05
 ```
 
 #### Security & Discovery Invariants
-- **Missing-Key Behavior**: When no API key is configured, the CLI performs zero network calls, exits with code 1, and writes a safe guidance message to stderr without echoing file paths or environment contents.
-- **No CLI Key Arguments**: API keys must **never** be passed via CLI arguments (flags like `--api-key` are explicitly forbidden and rejected at argument parsing).
+- **Missing-Connection Behavior**: When OAuth has not been authorized, the CLI performs zero network calls, exits with code 1, and points to the install page.
+- **No CLI Credentials**: Access tokens and API keys must never be passed via CLI arguments.
 - **Strict UTC Calendar Date Validation**: The `--probe-date` option is strictly validated as a real UTC calendar date with month-boundary and leap-year enforcement (rejecting non-calendar dates like `2026-02-31`).
 - **Bounded Non-PII Reporting**:
   - Dumps listing is capped to at most 10 items (`MAX_DUMP_ITEMS = 10`) with total aggregate count and a truncation indicator (`truncated: boolean`).
@@ -298,7 +315,7 @@ A production-ready `docker-compose.yml` and multi-stage `Dockerfile` are include
 - **Data Persistence**: Backed by a named Docker volume (`work-times-data`) mapped to `/data`.
 - **Host Port Binding**: Bound strictly to loopback `127.0.0.1:3002` (configurable via `WORK_TIMES_PORT`).
 - **Reverse Proxy**: Includes labels for integration with Traefik on the `traefik-net` network.
-- **Read-Only Secret Mount**: Mounts the host `./secrets` directory read-only at `/run/secrets`, so container `*_FILE` variables resolve to `/run/secrets/wakatime_api_key`, `/run/secrets/admin_password_hash`, and `/run/secrets/session_secret`.
+- **Read-Only Secret Mount**: Mounts the host `./secrets` directory read-only at `/run/secrets`, so container `*_FILE` variables resolve to `/run/secrets/wakatime_oauth_client_secret`, `/run/secrets/admin_password_hash`, and `/run/secrets/session_secret`.
 - **No Background Sync**: Does not execute live recurring API sync or background polling workers.
 
 ### Docker Compose Service Definition
@@ -594,6 +611,7 @@ Create an Access Application covering `work-times.yourdomain.com`.
      - `/.well-known/*`
      - `/oauth/*`
      - `/mcp`
+     - `/integrations/wakatime`
    - Selector: `Everyone` (or restricted by Client Certificate / IP if desired).
 
 > [!WARNING]

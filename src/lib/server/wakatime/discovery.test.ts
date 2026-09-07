@@ -12,7 +12,7 @@ import {
 } from "./discovery.js";
 
 describe("WakaTime API Discovery", () => {
-  const secretApiKey = "waka_sec_999888777_super_secret_token";
+  const secretAccessToken = "waka_sec_999888777_super_secret_token";
 
   function createJsonResponse(status: number, data: unknown): Response {
     return new Response(JSON.stringify(data), {
@@ -108,7 +108,7 @@ describe("WakaTime API Discovery", () => {
 
     // Direct runner with null key
     const directResult = await runWakaTimeDiscovery({
-      apiKey: null,
+      accessToken: null,
       fetch: fetchMock as unknown as typeof fetch
     });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -117,7 +117,7 @@ describe("WakaTime API Discovery", () => {
 
     // CLI runner with empty key
     const exitCode = await runDiscoveryCli([], {
-      apiKey: "",
+      accessToken: "",
       fetch: fetchMock as unknown as typeof fetch,
       stdout: stdoutMock,
       stderr: stderrMock
@@ -127,14 +127,13 @@ describe("WakaTime API Discovery", () => {
     expect(exitCode).toBe(1);
     expect(stderrMock).toHaveBeenCalledTimes(1);
     const errText = stderrMock.mock.calls[0][0];
-    expect(errText).toContain("No WakaTime API key configured");
-    expect(errText).toContain("WAKATIME_API_KEY");
-    expect(errText).toContain("WAKATIME_API_KEY_FILE");
+    expect(errText).toContain("WakaTime is not connected");
+    expect(errText).toContain("/integrations/wakatime");
   });
 
   it("reports a supplied credential as unverified when transport prevents validation", async () => {
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: vi.fn(async () => {
         throw new TypeError("fetch failed");
       }) as unknown as typeof fetch
@@ -143,19 +142,19 @@ describe("WakaTime API Discovery", () => {
     expect(result.ok).toBe(false);
     expect(result.credentialStatus).toBe("unverified");
     expect(result.errors).toContainEqual({
-      endpoint: "/api/v1/users/current",
+      endpoint: "/api/v1/users/current/summaries",
       status: undefined,
       errorName: "WakaTimeNetworkError"
     });
     const textOutput = formatDiscoveryText(result);
     expect(textOutput).toContain("Credential Status: unverified");
     expect(textOutput).toContain("WakaTimeNetworkError");
-    expect(JSON.stringify(result)).not.toContain(secretApiKey);
-    expect(textOutput).not.toContain(secretApiKey);
+    expect(JSON.stringify(result)).not.toContain(secretAccessToken);
+    expect(textOutput).not.toContain(secretAccessToken);
   });
 
   // Requirement: CLI args cannot carry a key
-  it("strictly rejects any CLI argument attempting to pass an API key", async () => {
+  it("strictly rejects any CLI argument attempting to pass an access token", async () => {
     const forbiddenArgs = [
       ["--api-key", "some-key"],
       ["--api-key=some-key"],
@@ -170,23 +169,23 @@ describe("WakaTime API Discovery", () => {
 
     for (const args of forbiddenArgs) {
       expect(() => validateDiscoveryArgs(args)).toThrow(
-        /Passing API keys via CLI arguments is strictly forbidden/
+        /Passing access tokens via CLI arguments is strictly forbidden/
       );
 
       const stderrMock = vi.fn();
       const exitCode = await runDiscoveryCli(args, {
-        apiKey: secretApiKey,
+        accessToken: secretAccessToken,
         stderr: stderrMock
       });
       expect(exitCode).toBe(1);
       expect(stderrMock.mock.calls[0][0]).toContain(
-        "Passing API keys via CLI arguments is strictly forbidden"
+        "Passing access tokens via CLI arguments is strictly forbidden"
       );
     }
   });
 
-  // API key absent from output/errors/JSON
-  it("guarantees API key is absent from text output, JSON, and errors", async () => {
+  // access token absent from output/errors/JSON
+  it("guarantees access token is absent from text output, JSON, and errors", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes("/users/current/summaries")) {
         return createJsonResponse(200, mockSummariesPayload);
@@ -207,23 +206,23 @@ describe("WakaTime API Discovery", () => {
     });
 
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch
     });
 
     const textOutput = formatDiscoveryText(result);
     const jsonOutput = formatDiscoveryJson(result);
-    const base64Key = Buffer.from(secretApiKey).toString("base64");
+    const base64Key = Buffer.from(secretAccessToken).toString("base64");
 
     // The key must never appear in raw or encoded form in text or json
-    expect(textOutput).not.toContain(secretApiKey);
+    expect(textOutput).not.toContain(secretAccessToken);
     expect(textOutput).not.toContain(base64Key);
-    expect(jsonOutput).not.toContain(secretApiKey);
+    expect(jsonOutput).not.toContain(secretAccessToken);
     expect(jsonOutput).not.toContain(base64Key);
 
     // Errors must not contain the key
     for (const err of result.errors) {
-      expect(JSON.stringify(err)).not.toContain(secretApiKey);
+      expect(JSON.stringify(err)).not.toContain(secretAccessToken);
     }
   });
 
@@ -249,7 +248,7 @@ describe("WakaTime API Discovery", () => {
     });
 
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch
     });
 
@@ -277,9 +276,9 @@ describe("WakaTime API Discovery", () => {
     expect(jsonOutput).not.toContain("dump_uuid_888");
 
     // Verify only safe metadata is preserved
-    expect(result.planFeatures.hasBasicFeatures).toBe(false);
-    expect(result.planFeatures.hasPremiumFeatures).toBe(false);
-    expect(result.planFeatures.writesOnly).toBe(true);
+    expect(result.planFeatures).toEqual({});
+    expect(result.responseFields.currentUser).toBeUndefined();
+    expect(result.responseFields.currentUserData).toBeUndefined();
     expect(result.dumps.count).toBe(2);
     expect(result.dumps.truncated).toBe(false);
     expect(result.dumps.types).toEqual(["daily", "heartbeats"]);
@@ -312,7 +311,7 @@ describe("WakaTime API Discovery", () => {
     });
 
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch
     });
 
@@ -327,7 +326,7 @@ describe("WakaTime API Discovery", () => {
     // CLI runner returns 0 (success) under soft-degraded conditions
     const stdoutMock = vi.fn();
     const exitCode = await runDiscoveryCli([], {
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch,
       stdout: stdoutMock
     });
@@ -343,14 +342,14 @@ describe("WakaTime API Discovery", () => {
     });
 
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch
     });
 
     expect(result.ok).toBe(false);
     expect(result.credentialStatus).toBe("rejected");
     expect(result.errors).toContainEqual({
-      endpoint: "/users/current",
+      endpoint: "/api/v1/users/current/summaries",
       status: 401,
       errorName: "WakaTimeAuthError"
     });
@@ -358,7 +357,7 @@ describe("WakaTime API Discovery", () => {
     const stdoutMock = vi.fn();
     const stderrMock = vi.fn();
     const exitCode = await runDiscoveryCli([], {
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch,
       stdout: stdoutMock,
       stderr: stderrMock
@@ -367,7 +366,7 @@ describe("WakaTime API Discovery", () => {
   });
 
   // Read-only dump listing, no dump creation, and avoids duplicate getCurrentUser calls
-  it("lists dumps read-only with GET and avoids duplicate getCurrentUser calls", async () => {
+  it("lists dumps read-only with GET and avoids the email-scoped current-user endpoint", async () => {
     const requestedEndpoints: Array<{ method: string; url: string }> = [];
 
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -393,7 +392,7 @@ describe("WakaTime API Discovery", () => {
     });
 
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch
     });
 
@@ -406,7 +405,7 @@ describe("WakaTime API Discovery", () => {
     const currentUserRequests = requestedEndpoints.filter(
       (r) => r.url.endsWith("/users/current") || r.url.endsWith("/users/current/")
     );
-    expect(currentUserRequests.length).toBe(1);
+    expect(currentUserRequests.length).toBe(0);
 
     // Verify data_dumps was requested with GET only
     const dumpRequests = requestedEndpoints.filter((r) => r.url.includes("/data_dumps"));
@@ -444,7 +443,7 @@ describe("WakaTime API Discovery", () => {
     });
 
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch
     });
 
@@ -507,7 +506,7 @@ describe("WakaTime API Discovery", () => {
     });
 
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch
     });
 
@@ -589,28 +588,16 @@ describe("WakaTime API Discovery", () => {
     });
 
     const result = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch
     });
 
-    // Verify hasBasicFeatures is recognized and recorded
-    expect(result.planFeatures.hasBasicFeatures).toBe(true);
-    expect(result.planFeatures.hasPremiumFeatures).toBe(false);
-    expect(result.planFeatures.writesOnly).toBe(true);
+    // Account-plan flags are not requested because /users/current requires the
+    // unrelated email scope. Capabilities are inferred from endpoint results.
+    expect(result.planFeatures).toEqual({});
 
-    // Verify responseFields only contains allowlisted keys
-    expect(result.responseFields.currentUserData).toEqual([
-      "has_basic_features",
-      "has_premium_features",
-      "id",
-      "writes_only"
-    ]);
-
-    expect(result.responseFields.currentUserData).not.toContain(
-      "victim_email_address@secretcorp.internal"
-    );
-    expect(result.responseFields.currentUserData).not.toContain("api_key_leak_secret_998877");
-    expect(result.responseFields.currentUserData).not.toContain("__proto__");
+    // The email-scoped profile response is never fetched or reflected.
+    expect(result.responseFields.currentUserData).toBeUndefined();
 
     expect(result.responseFields.summaries).toEqual(["data", "end", "start"]);
     expect(result.responseFields.summaries).not.toContain("internal_db_connection_string");
@@ -630,7 +617,7 @@ describe("WakaTime API Discovery", () => {
     expect(json).not.toContain("internal_db_connection_string");
     expect(json).not.toContain("confidential_contractor@domain.com");
 
-    expect(text).toContain("hasBasicFeatures=true");
+    expect(text).toContain("hasBasicFeatures=unknown");
   });
 
   // Requirement 5 & 6: Strictly validate --probe-date as a real UTC calendar date
@@ -687,7 +674,7 @@ describe("WakaTime API Discovery", () => {
     const fetchMock = vi.fn();
     const stderrMock = vi.fn();
     const cliExit = await runDiscoveryCli(["--probe-date", "2026-02-31"], {
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       fetch: fetchMock as unknown as typeof fetch,
       stderr: stderrMock
     });
@@ -698,7 +685,7 @@ describe("WakaTime API Discovery", () => {
 
     // 4. Direct runner rejects invalid calendar date without network calls
     const directResult = await runWakaTimeDiscovery({
-      apiKey: secretApiKey,
+      accessToken: secretAccessToken,
       probeDate: "2026-02-31",
       fetch: fetchMock as unknown as typeof fetch
     });

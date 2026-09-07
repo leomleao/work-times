@@ -235,7 +235,7 @@ describe('Sync Capability Policy', () => {
       };
 
       const client = new WakaTimeClient({
-        apiKey: dummyKey,
+        accessToken: dummyKey,
         fetch: mockFetch
       });
 
@@ -287,7 +287,7 @@ describe('Sync Capability Policy', () => {
       };
 
       const client = new WakaTimeClient({
-        apiKey: dummyKey,
+        accessToken: dummyKey,
         fetch: mockFetch
       });
 
@@ -299,7 +299,7 @@ describe('Sync Capability Policy', () => {
       expect(policy.isAvailable('heartbeats')).toBe(true);
 
       // Verify exact URLs requested yesterday's date
-      expect(requestedUrls).toContain('https://api.wakatime.com/api/v1/users/current');
+      expect(requestedUrls).not.toContain('https://api.wakatime.com/api/v1/users/current');
       expect(requestedUrls).toContain(
         'https://api.wakatime.com/api/v1/users/current/summaries?start=2026-09-04&end=2026-09-04'
       );
@@ -317,7 +317,7 @@ describe('Sync Capability Policy', () => {
       };
 
       const client = new WakaTimeClient({
-        apiKey: dummyKey,
+        accessToken: dummyKey,
         fetch: mockFetch
       });
 
