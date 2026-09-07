@@ -665,4 +665,53 @@ describe('SqliteClassificationService - Coverage & Unclassified Suggestions', ()
     expect(service.getRules().length).toBe(rulesCountBefore);
     expect(suggestions[0].specificity).toBeLessThanOrEqual(40);
   });
+
+  it('resolves friendly machine and editor names and matches rules with friendly names', () => {
+    db.prepare(
+      `INSERT OR REPLACE INTO daily_dimension_totals
+       (date, scope, dimension, name, machine_name_id, total_seconds, human_additions, human_deletions, ai_additions, ai_deletions, ai_sessions, source_import_id)
+       VALUES ('2026-06-15', 'account', 'machine', 'MacBook-Pro.local', 'mach-uuid-1', 1000, 0, 0, 0, 0, 0, 1)`
+    ).run();
+
+    db.prepare(
+      `INSERT OR REPLACE INTO daily_dimension_totals
+       (date, scope, dimension, name, total_seconds, human_additions, human_deletions, ai_additions, ai_deletions, ai_sessions, source_import_id)
+       VALUES ('2026-06-15', 'account', 'editor', 'VS Code', 1000, 0, 0, 0, 0, 0, 1)`
+    ).run();
+
+    db.prepare(
+      `INSERT OR REPLACE INTO heartbeats
+       (id, external_id, occurred_at_us, occurred_at, local_date, entity, entity_type, category, user_agent_id, source_import_id, canonical_hash)
+       VALUES (9901, 'hb-uuid-1', 1700000000000000, '2026-06-15T12:00:00Z', '2026-06-15', 'src/app.ts', 'file', 'coding', 'editor-agent-uuid-1', 1, 'hash-hb-1')`
+    ).run();
+
+    service.clearCaches();
+
+    expect(service.resolveMachineName('mach-uuid-1')).toBe('MacBook-Pro.local');
+    expect(service.resolveEditorName('editor-agent-uuid-1')).toBe('VS Code');
+  });
+
+  it('provides unclassified suggestions with fair per-type representation and friendly names', () => {
+    const suggestions = service.getUnclassifiedSuggestions({ limitPerType: 10 });
+    expect(suggestions.length).toBeGreaterThan(0);
+
+    for (let i = 1; i < suggestions.length; i++) {
+      expect(suggestions[i].specificity).toBeGreaterThanOrEqual(suggestions[i - 1].specificity);
+    }
+  });
+
+  it('computes earliestDate and latestDate on unclassified suggestions', () => {
+    const suggestions = service.getUnclassifiedSuggestions();
+    expect(suggestions.length).toBeGreaterThan(0);
+
+    for (const s of suggestions) {
+      if (s.sliceCount > 0) {
+        expect(s.earliestDate).toBeDefined();
+        expect(s.latestDate).toBeDefined();
+        expect(s.earliestDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(s.latestDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(s.earliestDate! <= s.latestDate!).toBe(true);
+      }
+    }
+  });
 });

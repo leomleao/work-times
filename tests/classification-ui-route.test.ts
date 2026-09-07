@@ -1115,5 +1115,42 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
         expect(svelteSrc).toContain(`'${selector}'`);
       }
     });
+
+    it('verifies view state and selector filter persistence via progressive enhancement and hidden fields', async () => {
+      const svelteSrc = loadClassifySvelte();
+
+      // Verify enhance and state imports
+      expect(svelteSrc).toContain("import { enhance } from '$app/forms'");
+      expect(svelteSrc).toContain("import { page } from '$app/state'");
+      expect(svelteSrc).toContain('preserveStateEnhance');
+
+      // Verify forms use progressive enhancement
+      expect(svelteSrc).toContain('use:enhance={preserveStateEnhance}');
+      expect(svelteSrc).toContain('name="returnSelector"');
+      expect(svelteSrc).toContain('name="returnTab"');
+
+      // Verify server actions handle and echo returnTab and returnSelector
+      const formData = new FormData();
+      formData.set('type', 'create');
+      formData.set('name', 'Personal Antigravity');
+      formData.set('selectorType', 'editor');
+      formData.set('selectorValue', 'Antigravity');
+      formData.set('classification', 'personal');
+      formData.set('returnTab', 'suggestions');
+      formData.set('returnSelector', 'editor');
+
+      const { event } = createAuthenticatedEvent({ formData });
+      const previewRes = await (actions.previewRule as any)(event);
+      expect(previewRes.success).toBe(true);
+      expect(previewRes.returnTab).toBe('suggestions');
+      // Verify selector filter buttons display unclassified candidate counts rather than hardcoded specificity rank numbers
+      expect(svelteSrc).toContain('candidateCounts');
+      expect(svelteSrc).toContain('Machine ({candidateCounts.machine})');
+      expect(svelteSrc).toContain('Editor ({candidateCounts.editor})');
+      expect(svelteSrc).toContain('Project ({candidateCounts.project})');
+      expect(svelteSrc).not.toContain('Machine (10)');
+      expect(svelteSrc).not.toContain('Project (40)');
+    });
   });
 });
+

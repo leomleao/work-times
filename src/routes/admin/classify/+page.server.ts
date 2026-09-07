@@ -388,8 +388,10 @@ export const load: PageServerLoad = async ({ locals, url }) => {
   const rules = runtime.classification.getRules();
   const allocations = runtime.classification.getAllocations();
   const revisions = runtime.classification.getRevisions(50);
-  const suggestions = runtime.classification.getUnclassifiedSuggestions({ limit: 50 });
+  const suggestions = runtime.classification.getUnclassifiedSuggestions({ limitPerType: 50 });
   const revisionState = runtime.classification.getRevisionState();
+  const machineNames = Object.fromEntries(runtime.classification.getMachineNameMap());
+  const editorNames = Object.fromEntries(runtime.classification.getEditorNameMap());
 
   const maxDateRow = runtime.db
     .prepare('SELECT MAX(date) AS max_date FROM daily_totals')
@@ -437,6 +439,8 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     archiveMaxDate,
     recentSlices,
     revisionState,
+    machineNames,
+    editorNames,
     csrfToken: locals.csrfToken
   };
 };
@@ -447,11 +451,18 @@ export const actions: Actions = {
     const auth = verifyAuthAndCsrf(locals, request, formData);
     if (auth.error) return auth.error;
 
+    const returnTab = formData.get('returnTab')?.toString();
+    const returnSelector = formData.get('returnSelector')?.toString();
+
     let proposal: RuleChangeInput;
     try {
       proposal = parseProposal(formData);
     } catch (err) {
-      return fail(400, { error: err instanceof Error ? err.message : 'Invalid proposal' });
+      return fail(400, {
+        error: err instanceof Error ? err.message : 'Invalid proposal',
+        returnTab,
+        returnSelector
+      });
     }
 
     try {
@@ -459,10 +470,16 @@ export const actions: Actions = {
       return {
         success: true,
         preview,
-        proposal
+        proposal,
+        returnTab,
+        returnSelector
       };
     } catch (err) {
-      return fail(400, { error: err instanceof Error ? err.message : 'Failed to preview rule change' });
+      return fail(400, {
+        error: err instanceof Error ? err.message : 'Failed to preview rule change',
+        returnTab,
+        returnSelector
+      });
     }
   },
 
@@ -471,11 +488,18 @@ export const actions: Actions = {
     const auth = verifyAuthAndCsrf(locals, request, formData);
     if (auth.error) return auth.error;
 
+    const returnTab = formData.get('returnTab')?.toString();
+    const returnSelector = formData.get('returnSelector')?.toString();
+
     const previewDigest = String(
       formData.get('previewDigest') ?? formData.get('expectedDigest') ?? ''
     ).trim();
     if (!previewDigest) {
-      return fail(400, { error: 'Rule confirmation requires an exact preview digest' });
+      return fail(400, {
+        error: 'Rule confirmation requires an exact preview digest',
+        returnTab,
+        returnSelector
+      });
     }
 
     const previewRevisionRaw = formData.get('previewRevision') ?? formData.get('expectedRevision');
@@ -484,7 +508,11 @@ export const actions: Actions = {
       try {
         expectedRevision = parseStrictInteger(previewRevisionRaw, 'expectedRevision', { nonNegative: true });
       } catch (err) {
-        return fail(400, { error: err instanceof Error ? err.message : 'Invalid expectedRevision' });
+        return fail(400, {
+          error: err instanceof Error ? err.message : 'Invalid expectedRevision',
+          returnTab,
+          returnSelector
+        });
       }
     }
 
@@ -492,7 +520,11 @@ export const actions: Actions = {
     try {
       proposal = parseProposal(formData);
     } catch (err) {
-      return fail(400, { error: err instanceof Error ? err.message : 'Invalid proposal' });
+      return fail(400, {
+        error: err instanceof Error ? err.message : 'Invalid proposal',
+        returnTab,
+        returnSelector
+      });
     }
 
     const actor = locals.admin?.username ?? 'admin';
@@ -523,16 +555,32 @@ export const actions: Actions = {
         success: true,
         confirmed: true,
         proposal,
-        result: mutationResult
+        result: mutationResult,
+        returnTab,
+        returnSelector
       };
     } catch (err) {
       if (err instanceof StalePreviewError) {
-        return fail(409, { error: err.message, stale: true });
+        return fail(409, {
+          error: err.message,
+          stale: true,
+          returnTab,
+          returnSelector
+        });
       }
       if (err instanceof MissingPreviewError) {
-        return fail(400, { error: err.message, missingPreview: true });
+        return fail(400, {
+          error: err.message,
+          missingPreview: true,
+          returnTab,
+          returnSelector
+        });
       }
-      return fail(400, { error: err instanceof Error ? err.message : 'Failed to confirm rule change' });
+      return fail(400, {
+        error: err instanceof Error ? err.message : 'Failed to confirm rule change',
+        returnTab,
+        returnSelector
+      });
     }
   },
 
@@ -540,6 +588,9 @@ export const actions: Actions = {
     const formData = await request.formData();
     const auth = verifyAuthAndCsrf(locals, request, formData);
     if (auth.error) return auth.error;
+
+    const returnTab = formData.get('returnTab')?.toString();
+    const returnSelector = formData.get('returnSelector')?.toString();
 
     const date = String(formData.get('date') ?? '').trim();
     const projectIdRaw = formData.get('projectId');
@@ -549,23 +600,25 @@ export const actions: Actions = {
     const noteRaw = formData.get('note');
 
     if (!date) {
-      return fail(400, { error: 'Date is required for allocation' });
+      return fail(400, { error: 'Date is required for allocation', returnTab, returnSelector });
     }
     if (projectIdRaw === null || projectIdRaw === '') {
-      return fail(400, { error: 'Valid projectId is required for allocation' });
+      return fail(400, { error: 'Valid projectId is required for allocation', returnTab, returnSelector });
     }
     let projectId: number;
     try {
       projectId = parseStrictInteger(projectIdRaw, 'projectId', { nonNegative: true });
     } catch {
-      return fail(400, { error: 'Valid projectId is required for allocation' });
+      return fail(400, { error: 'Valid projectId is required for allocation', returnTab, returnSelector });
     }
     if (!entity) {
-      return fail(400, { error: 'Entity path is required for allocation' });
+      return fail(400, { error: 'Entity path is required for allocation', returnTab, returnSelector });
     }
     if (classification !== 'work' && classification !== 'personal') {
       return fail(400, {
-        error: `Invalid allocation classification '${classification}'. Only work or personal is allowed.`
+        error: `Invalid allocation classification '${classification}'. Only work or personal is allowed.`,
+        returnTab,
+        returnSelector
       });
     }
 
@@ -592,7 +645,9 @@ export const actions: Actions = {
       return {
         success: true,
         allocation: result.allocation,
-        revision: result.revision
+        revision: result.revision,
+        returnTab,
+        returnSelector
       };
     } catch (err) {
       if (err instanceof AllocationConflictError) {
@@ -601,6 +656,8 @@ export const actions: Actions = {
           existingClassification: err.existingClassification,
           proposedClassification: err.proposedClassification,
           error: err.message,
+          returnTab,
+          returnSelector,
           targetSlice: {
             date,
             projectId,
@@ -611,7 +668,11 @@ export const actions: Actions = {
           }
         });
       }
-      return fail(400, { error: err instanceof Error ? err.message : 'Failed to create allocation' });
+      return fail(400, {
+        error: err instanceof Error ? err.message : 'Failed to create allocation',
+        returnTab,
+        returnSelector
+      });
     }
   },
 
@@ -619,6 +680,9 @@ export const actions: Actions = {
     const formData = await request.formData();
     const auth = verifyAuthAndCsrf(locals, request, formData);
     if (auth.error) return auth.error;
+
+    const returnTab = formData.get('returnTab')?.toString();
+    const returnSelector = formData.get('returnSelector')?.toString();
 
     const date = String(formData.get('date') ?? '').trim();
     const projectIdRaw = formData.get('projectId');
@@ -628,23 +692,25 @@ export const actions: Actions = {
     const noteRaw = formData.get('note');
 
     if (!date) {
-      return fail(400, { error: 'Date is required for allocation' });
+      return fail(400, { error: 'Date is required for allocation replacement', returnTab, returnSelector });
     }
     if (projectIdRaw === null || projectIdRaw === '') {
-      return fail(400, { error: 'Valid projectId is required for allocation' });
+      return fail(400, { error: 'Valid projectId is required for allocation replacement', returnTab, returnSelector });
     }
     let projectId: number;
     try {
       projectId = parseStrictInteger(projectIdRaw, 'projectId', { nonNegative: true });
     } catch {
-      return fail(400, { error: 'Valid projectId is required for allocation' });
+      return fail(400, { error: 'Valid projectId is required for allocation replacement', returnTab, returnSelector });
     }
     if (!entity) {
-      return fail(400, { error: 'Entity path is required for allocation' });
+      return fail(400, { error: 'Entity path is required for allocation replacement', returnTab, returnSelector });
     }
     if (classification !== 'work' && classification !== 'personal') {
       return fail(400, {
-        error: `Invalid allocation classification '${classification}'. Only work or personal is allowed.`
+        error: `Invalid allocation classification '${classification}'. Only work or personal is allowed.`,
+        returnTab,
+        returnSelector
       });
     }
 
@@ -669,10 +735,16 @@ export const actions: Actions = {
         success: true,
         replaced: true,
         allocation: result.allocation,
-        revision: result.revision
+        revision: result.revision,
+        returnTab,
+        returnSelector
       };
     } catch (err) {
-      return fail(400, { error: err instanceof Error ? err.message : 'Failed to replace allocation' });
+      return fail(400, {
+        error: err instanceof Error ? err.message : 'Failed to replace allocation',
+        returnTab,
+        returnSelector
+      });
     }
   },
 
@@ -681,9 +753,12 @@ export const actions: Actions = {
     const auth = verifyAuthAndCsrf(locals, request, formData);
     if (auth.error) return auth.error;
 
+    const returnTab = formData.get('returnTab')?.toString();
+    const returnSelector = formData.get('returnSelector')?.toString();
+
     const id = String(formData.get('id') || formData.get('allocationId') || '').trim();
     if (!id) {
-      return fail(400, { error: 'Missing allocation ID to delete' });
+      return fail(400, { error: 'Missing allocation ID to delete', returnTab, returnSelector });
     }
 
     const actor = locals.admin?.username ?? 'admin';
@@ -693,10 +768,16 @@ export const actions: Actions = {
       return {
         success: true,
         deletedId: id,
-        revision: result.revision
+        revision: result.revision,
+        returnTab,
+        returnSelector
       };
     } catch (err) {
-      return fail(400, { error: err instanceof Error ? err.message : 'Failed to delete allocation' });
+      return fail(400, {
+        error: err instanceof Error ? err.message : 'Failed to delete allocation',
+        returnTab,
+        returnSelector
+      });
     }
   }
 };

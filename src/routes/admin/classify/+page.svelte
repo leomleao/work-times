@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { enhance } from '$app/forms';
+  import { page } from '$app/state';
+  import type { SubmitFunction } from '@sveltejs/kit';
   import AppShell from '$lib/components/AppShell.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import type { PageData, ActionData } from './$types';
@@ -12,10 +15,13 @@
     UnclassifiedSuggestion
   } from '$lib/server/classification/sqlite';
   import {
+    Activity,
     AlertTriangle,
     ArrowDown,
+    Calendar,
     Check,
     CircleAlert,
+    ExternalLink,
     FileCode,
     FolderKanban,
     Globe,
@@ -58,6 +64,14 @@
   let suggestions = $derived<UnclassifiedSuggestion[]>(data?.suggestions ?? []);
   let recentSlices = $derived<EvaluatedSlice[]>(data?.recentSlices ?? []);
   let csrfToken = $derived<string | null>(data?.csrfToken ?? null);
+  let machineNames = $derived<Record<string, string>>(data?.machineNames ?? {});
+  let editorNames = $derived<Record<string, string>>(data?.editorNames ?? {});
+
+  function formatSelectorDisplay(type: SelectorType | string, value: string): string {
+    if (type === 'machine' && machineNames[value]) return machineNames[value];
+    if (type === 'editor' && editorNames[value]) return editorNames[value];
+    return value;
+  }
 
   // Navigation tab state
   const ALL_SELECTOR_TYPES: readonly SelectorType[] = [
@@ -69,9 +83,107 @@
     'folder_prefix',
     'entity'
   ] as const;
-  let currentTab = $state<'suggestions' | 'rules' | 'overrides' | 'revisions'>('suggestions');
-  let selectedSelectorFilter = $state<'all' | SelectorType>('all');
+
+  function isValidSelectorType(val: unknown): val is SelectorType {
+    return typeof val === 'string' && ALL_SELECTOR_TYPES.includes(val as SelectorType);
+  }
+
+  function getInitialTab(): 'suggestions' | 'rules' | 'overrides' | 'revisions' {
+    const fromUrl = page?.url?.searchParams?.get('tab');
+    if (fromUrl === 'suggestions' || fromUrl === 'rules' || fromUrl === 'overrides' || fromUrl === 'revisions') {
+      return fromUrl;
+    }
+    const fromForm = form?.returnTab;
+    if (fromForm === 'suggestions' || fromForm === 'rules' || fromForm === 'overrides' || fromForm === 'revisions') {
+      return fromForm;
+    }
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = sessionStorage.getItem('wt_classify_tab');
+        if (stored === 'suggestions' || stored === 'rules' || stored === 'overrides' || stored === 'revisions') {
+          return stored;
+        }
+      } catch {}
+    }
+    return 'suggestions';
+  }
+
+  function getInitialSelector(): 'all' | SelectorType {
+    const fromUrl = page?.url?.searchParams?.get('selector');
+    if (fromUrl === 'all' || isValidSelectorType(fromUrl)) {
+      return fromUrl as 'all' | SelectorType;
+    }
+    const fromForm = form?.returnSelector;
+    if (fromForm === 'all' || isValidSelectorType(fromForm)) {
+      return fromForm as 'all' | SelectorType;
+    }
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = sessionStorage.getItem('wt_classify_selector');
+        if (stored === 'all' || isValidSelectorType(stored)) {
+          return stored as 'all' | SelectorType;
+        }
+      } catch {}
+    }
+    return 'all';
+  }
+
+  let currentTab = $state<'suggestions' | 'rules' | 'overrides' | 'revisions'>(getInitialTab());
+  let selectedSelectorFilter = $state<'all' | SelectorType>(getInitialSelector());
   let searchQuery = $state('');
+
+  // Re-sync tab or selector if server action returned returnTab or returnSelector
+  $effect(() => {
+    if (form?.returnTab && (form.returnTab === 'suggestions' || form.returnTab === 'rules' || form.returnTab === 'overrides' || form.returnTab === 'revisions')) {
+      currentTab = form.returnTab;
+    }
+    if (form?.returnSelector && (form.returnSelector === 'all' || isValidSelectorType(form.returnSelector))) {
+      selectedSelectorFilter = form.returnSelector;
+    }
+  });
+
+  // Persist current tab and selector filter in URL and sessionStorage
+  $effect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        sessionStorage.setItem('wt_classify_tab', currentTab);
+        sessionStorage.setItem('wt_classify_selector', selectedSelectorFilter);
+      } catch {}
+
+      const url = new URL(window.location.href);
+      let changed = false;
+
+      if (currentTab !== 'suggestions') {
+        if (url.searchParams.get('tab') !== currentTab) {
+          url.searchParams.set('tab', currentTab);
+          changed = true;
+        }
+      } else if (url.searchParams.has('tab')) {
+        url.searchParams.delete('tab');
+        changed = true;
+      }
+
+      if (selectedSelectorFilter !== 'all') {
+        if (url.searchParams.get('selector') !== selectedSelectorFilter) {
+          url.searchParams.set('selector', selectedSelectorFilter);
+          changed = true;
+        }
+      } else if (url.searchParams.has('selector')) {
+        url.searchParams.delete('selector');
+        changed = true;
+      }
+
+      if (changed) {
+        window.history.replaceState(null, '', url.toString());
+      }
+    }
+  });
+
+  const preserveStateEnhance: SubmitFunction = () => {
+    return async ({ update }) => {
+      await update({ reset: false });
+    };
+  };
 
   // Suggestion selection and rule proposal state
   let selectedSuggestionKey = $state<string | null>(null);
@@ -106,7 +218,7 @@
     editRuleName = rule.name;
     editRuleClassification = rule.classification;
     editRuleSelectorType = rule.selector_type;
-    editRuleSelectorValue = rule.selector_value;
+    editRuleSelectorValue = rule.display_value || formatSelectorDisplay(rule.selector_type, rule.selector_value);
     editRulePriority = rule.priority;
     editRuleEnabled = rule.enabled;
     editRuleTimesheetCode = rule.timesheet_code ?? '';
@@ -125,6 +237,12 @@
     if (form?.confirmed) {
       showConfirmModal = false;
       selectedSuggestionKey = null;
+      proposalName = '';
+      proposalTimesheetCode = '';
+      proposalPriority = 0;
+    }
+    if (form?.success && !form?.preview) {
+      overrideModalOpen = false;
     }
   });
 
@@ -149,6 +267,24 @@
       return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
     }
     return `${secs}s`;
+  }
+
+  function formatDisplayDate(iso: string): string {
+    if (!iso) return '—';
+    const match = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return iso;
+    const [, year, month, day] = match;
+    return `${day}/${month}/${year}`;
+  }
+
+  function formatTimeframe(earliest?: string | null, latest?: string | null): string {
+    if (!earliest && !latest) return '—';
+    const start = earliest ? formatDisplayDate(earliest) : null;
+    const end = latest ? formatDisplayDate(latest) : null;
+    if (start && end) {
+      return start === end ? start : `${start} -> ${end}`;
+    }
+    return start ?? end ?? '—';
   }
 
   function getSelectorIcon(type: SelectorType) {
@@ -187,6 +323,24 @@
         return 10;
     }
   }
+
+  let candidateCounts = $derived.by(() => {
+    const counts: Record<SelectorType, number> = {
+      machine: 0,
+      editor: 0,
+      application: 0,
+      domain: 0,
+      project: 0,
+      folder_prefix: 0,
+      entity: 0
+    };
+    for (const s of suggestions) {
+      if (s.selectorType in counts) {
+        counts[s.selectorType]++;
+      }
+    }
+    return counts;
+  });
 
   let filteredSuggestions = $derived(
     suggestions.filter((s: UnclassifiedSuggestion) => {
@@ -296,8 +450,10 @@
           </p>
         </div>
       </div>
-      <form method="POST" action="?/replaceAllocation" style="margin-top: 6px;">
+      <form method="POST" action="?/replaceAllocation" style="margin-top: 6px;" use:enhance={preserveStateEnhance}>
         <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
+        <input type="hidden" name="returnTab" value={currentTab} />
+        <input type="hidden" name="returnSelector" value={selectedSelectorFilter} />
         <input type="hidden" name="date" value={form.targetSlice?.date ?? ''} />
         <input type="hidden" name="projectId" value={form.targetSlice?.projectId ?? 0} />
         <input type="hidden" name="entity" value={form.targetSlice?.entity ?? ''} />
@@ -367,56 +523,56 @@
           class="button sm {selectedSelectorFilter === 'all' ? 'secondary' : 'ghost'}"
           onclick={() => (selectedSelectorFilter = 'all')}
         >
-          All Selectors
+          All Selectors ({suggestions.length})
         </button>
         <button
           type="button"
           class="button sm {selectedSelectorFilter === 'machine' ? 'secondary' : 'ghost'}"
           onclick={() => (selectedSelectorFilter = 'machine')}
         >
-          Machine (10)
+          Machine ({candidateCounts.machine})
         </button>
         <button
           type="button"
           class="button sm {selectedSelectorFilter === 'editor' ? 'secondary' : 'ghost'}"
           onclick={() => (selectedSelectorFilter = 'editor')}
         >
-          Editor (10)
+          Editor ({candidateCounts.editor})
         </button>
         <button
           type="button"
           class="button sm {selectedSelectorFilter === 'application' ? 'secondary' : 'ghost'}"
           onclick={() => (selectedSelectorFilter = 'application')}
         >
-          App (10)
+          App ({candidateCounts.application})
         </button>
         <button
           type="button"
           class="button sm {selectedSelectorFilter === 'domain' ? 'secondary' : 'ghost'}"
           onclick={() => (selectedSelectorFilter = 'domain')}
         >
-          Domain (10)
+          Domain ({candidateCounts.domain})
         </button>
         <button
           type="button"
           class="button sm {selectedSelectorFilter === 'project' ? 'secondary' : 'ghost'}"
           onclick={() => (selectedSelectorFilter = 'project')}
         >
-          Project (40)
+          Project ({candidateCounts.project})
         </button>
         <button
           type="button"
           class="button sm {selectedSelectorFilter === 'folder_prefix' ? 'secondary' : 'ghost'}"
           onclick={() => (selectedSelectorFilter = 'folder_prefix')}
         >
-          Folder (50)
+          Folder ({candidateCounts.folder_prefix})
         </button>
         <button
           type="button"
           class="button sm {selectedSelectorFilter === 'entity' ? 'secondary' : 'ghost'}"
           onclick={() => (selectedSelectorFilter = 'entity')}
         >
-          Entity (60)
+          Entity ({candidateCounts.entity})
         </button>
       </div>
     </div>
@@ -581,11 +737,42 @@
                   {activeSuggestion.sliceCount} slices
                 </strong>
               </div>
+              <div style="grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 8px; margin-top: 2px;">
+                <span style="font-size: 11px; color: var(--faint); display: flex; align-items: center; gap: 4px;">
+                  <Calendar size={12} style="color: var(--muted);" />
+                  <span>Timeframe</span>
+                </span>
+                <strong style="display: block; font-size: 13px; color: var(--text); margin-top: 3px; font-family: ui-monospace, monospace; letter-spacing: -0.01em;">
+                  {formatTimeframe(activeSuggestion.earliestDate, activeSuggestion.latestDate)}
+                </strong>
+              </div>
+            </div>
+
+            <!-- Activity Explorer Drilldown Link -->
+            <div style="margin-bottom: 16px;">
+              <a
+                href="/admin/activity?selectorType={encodeURIComponent(activeSuggestion.selectorType)}&selectorValue={encodeURIComponent(activeSuggestion.selectorValue)}&classification=unclassified&date=all"
+                target="_blank"
+                rel="noreferrer"
+                class="button secondary sm"
+                style="width: 100%; justify-content: center; gap: 6px; font-size: 12px;"
+              >
+                <Activity size={13} />
+                <span>Inspect {activeSuggestion.sliceCount} slices in Activity</span>
+                <ExternalLink size={12} style="color: var(--faint);" />
+              </a>
             </div>
 
             <!-- Staging Proposal Form -->
-            <form method="POST" action="?/previewRule" style="display: flex; flex-direction: column; gap: 12px;">
+            <form
+              method="POST"
+              action="?/previewRule"
+              style="display: flex; flex-direction: column; gap: 12px;"
+              use:enhance={preserveStateEnhance}
+            >
               <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
+              <input type="hidden" name="returnTab" value={currentTab} />
+              <input type="hidden" name="returnSelector" value={selectedSelectorFilter} />
               <input type="hidden" name="type" value="create" />
               <input type="hidden" name="selectorType" value={activeSuggestion.selectorType} />
               <input type="hidden" name="selectorValue" value={activeSuggestion.selectorValue} />
@@ -761,7 +948,7 @@
                     <span class="badge neutral">{rule.selector_type}</span>
                   </td>
                   <td>
-                    <code style="font-size: 12px; color: var(--text);">{rule.selector_value}</code>
+                    <code style="font-size: 12px; color: var(--text);">{rule.display_value || formatSelectorDisplay(rule.selector_type, rule.selector_value)}</code>
                   </td>
                   <td>
                     <span>{rule.priority}</span>
@@ -784,8 +971,10 @@
                       <Pencil size={13} />
                       <span>Edit</span>
                     </button>
-                    <form method="POST" action="?/previewRule" style="display: inline;">
+                    <form method="POST" action="?/previewRule" style="display: inline;" use:enhance={preserveStateEnhance}>
                       <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
+                      <input type="hidden" name="returnTab" value={currentTab} />
+                      <input type="hidden" name="returnSelector" value={selectedSelectorFilter} />
                       <input type="hidden" name="type" value="delete" />
                       <input type="hidden" name="id" value={rule.id} />
                       <button type="submit" class="button ghost sm" style="color: var(--danger);" aria-label="Delete rule {rule.name}">
@@ -871,8 +1060,10 @@
                     <td><span>{formatDuration(alloc.allocated_seconds)}</span></td>
                     <td><small>{alloc.note || '—'}</small></td>
                     <td>
-                      <form method="POST" action="?/deleteAllocation" style="display: inline;">
+                      <form method="POST" action="?/deleteAllocation" style="display: inline;" use:enhance={preserveStateEnhance}>
                         <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
+                        <input type="hidden" name="returnTab" value={currentTab} />
+                        <input type="hidden" name="returnSelector" value={selectedSelectorFilter} />
                         <input type="hidden" name="id" value={alloc.id} />
                         <button type="submit" class="button ghost sm" style="color: var(--danger);">
                           <Trash2 size={13} />
@@ -958,8 +1149,8 @@
         {#if proposal.type === 'create'}
           <strong style="color: var(--text); display: block;">{proposal.rule.name}</strong>
           <div style="margin-top: 4px; font-size: 12px; color: var(--muted);">
-            Matches <code>{proposal.rule.selectorType}: {proposal.rule.selectorValue}</code> →
-            <span class="badge {proposal.rule.classification}" style="display: inline-block; vertical-align: middle;">
+            Matches <code>{proposal.rule.selectorType}: {formatSelectorDisplay(proposal.rule.selectorType, proposal.rule.selectorValue)}</code> →
+            <span class="badge {proposal.rule.classification}">
               {proposal.rule.classification.toUpperCase()}
             </span>
           </div>
@@ -972,13 +1163,13 @@
             {#if proposal.rule.classification}
               <div>
                 Classification:
-                <span class="badge {proposal.rule.classification}" style="display: inline-block; vertical-align: middle;">
+                <span class="badge {proposal.rule.classification}">
                   {proposal.rule.classification.toUpperCase()}
                 </span>
               </div>
             {/if}
             {#if proposal.rule.selectorType || proposal.rule.selectorValue}
-              <div>Selector: <code>{proposal.rule.selectorType ?? '—'}: {proposal.rule.selectorValue ?? '—'}</code></div>
+              <div>Selector: <code>{proposal.rule.selectorType ?? '—'}: {formatSelectorDisplay(proposal.rule.selectorType ?? '', proposal.rule.selectorValue ?? '—')}</code></div>
             {/if}
             {#if proposal.rule.priority !== undefined}
               <div>Priority: <b style="color: var(--text);">{proposal.rule.priority}</b></div>
@@ -1071,8 +1262,10 @@
       <button type="button" class="button ghost" onclick={() => (showConfirmModal = false)}>
         Cancel
       </button>
-      <form method="POST" action="?/confirmRule" style="display: inline;">
+      <form method="POST" action="?/confirmRule" style="display: inline;" use:enhance={preserveStateEnhance}>
         <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
+        <input type="hidden" name="returnTab" value={currentTab} />
+        <input type="hidden" name="returnSelector" value={selectedSelectorFilter} />
         <input type="hidden" name="previewDigest" value={preview.previewDigest} />
         <input type="hidden" name="previewRevision" value={preview.previewRevision} />
         <input type="hidden" name="proposal" value={JSON.stringify(proposal)} />
@@ -1092,8 +1285,10 @@
   onclose={() => (overrideModalOpen = false)}
   maxWidth="600px"
 >
-  <form method="POST" action="?/createAllocation" id="slice-override-form">
+  <form method="POST" action="?/createAllocation" id="slice-override-form" use:enhance={preserveStateEnhance}>
     <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
+    <input type="hidden" name="returnTab" value={currentTab} />
+    <input type="hidden" name="returnSelector" value={selectedSelectorFilter} />
     <input type="hidden" name="classification" value={overrideChoice} />
 
     {#if recentSlices.length > 0}
@@ -1253,8 +1448,16 @@
   onclose={() => (editRuleModalOpen = false)}
   maxWidth="560px"
 >
-  <form method="POST" action="?/previewRule" id="edit-rule-form" style="display: flex; flex-direction: column; gap: 12px;">
+  <form
+    method="POST"
+    action="?/previewRule"
+    id="edit-rule-form"
+    style="display: flex; flex-direction: column; gap: 12px;"
+    use:enhance={preserveStateEnhance}
+  >
     <input type="hidden" name="csrfToken" value={csrfToken ?? ''} />
+    <input type="hidden" name="returnTab" value={currentTab} />
+    <input type="hidden" name="returnSelector" value={selectedSelectorFilter} />
     <input type="hidden" name="type" value="update" />
     <input type="hidden" name="id" value={editRuleId} />
     <input type="hidden" name="classification" value={editRuleClassification} />

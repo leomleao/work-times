@@ -46,6 +46,7 @@ export interface ClassificationRuleRecord {
   classification: RuleClassification;
   selector_type: SelectorType;
   selector_value: string;
+  display_value?: string;
   priority: number;
   enabled: boolean;
   timesheet_code: string | null;
@@ -224,6 +225,8 @@ export interface UnclassifiedSuggestion {
   sliceCount: number;
   sampleEntities: string[];
   sampleProjects: string[];
+  earliestDate: string | null;
+  latestDate: string | null;
 }
 
 function roundSeconds(seconds: number): number {
@@ -268,7 +271,103 @@ function canonicalOperationKey(op: NormalizedRuleOperation): string {
 }
 
 export class SqliteClassificationService {
+  private machineNameMap: Map<string, string> | null = null;
+  private editorNameMap: Map<string, string> | null = null;
+
   constructor(private readonly db: Database.Database) {}
+
+  clearCaches(): void {
+    this.machineNameMap = null;
+    this.editorNameMap = null;
+  }
+
+  getMachineNameMap(): Map<string, string> {
+    if (this.machineNameMap) return this.machineNameMap;
+
+    const map = new Map<string, string>();
+    try {
+      const directRows = this.db
+        .prepare(
+          "SELECT DISTINCT name, machine_name_id FROM daily_dimension_totals WHERE dimension = 'machine' AND machine_name_id IS NOT NULL"
+        )
+        .all() as Array<{ name: string; machine_name_id: string }>;
+
+      for (const r of directRows) {
+        if (r.machine_name_id && !map.has(r.machine_name_id)) {
+          map.set(r.machine_name_id, r.name);
+        }
+      }
+
+      const unmapped = (
+        this.db
+          .prepare("SELECT DISTINCT value FROM slice_identities WHERE selector_type = 'machine'")
+          .all() as Array<{ value: string }>
+      )
+        .map((r) => r.value)
+        .filter((id) => !map.has(id));
+
+      if (unmapped.length > 0) {
+        const placeholders = unmapped.map(() => '?').join(',');
+        const hbRows = this.db
+          .prepare(
+            `SELECT h.machine_name_id, d.name AS machine_name, SUM(h.occurrence_count) AS score
+             FROM heartbeats h
+             JOIN daily_dimension_totals d ON d.date = h.local_date AND d.dimension = 'machine'
+             WHERE h.machine_name_id IN (${placeholders})
+             GROUP BY h.machine_name_id, d.name`
+          )
+          .all(...unmapped) as Array<{ machine_name_id: string; machine_name: string; score: number }>;
+
+        for (const r of hbRows) {
+          if (!map.has(r.machine_name_id)) {
+            map.set(r.machine_name_id, r.machine_name);
+          }
+        }
+      }
+    } catch {
+      // Fall back gracefully in test or minimal databases
+    }
+
+    this.machineNameMap = map;
+    return map;
+  }
+
+  getEditorNameMap(): Map<string, string> {
+    if (this.editorNameMap) return this.editorNameMap;
+
+    const map = new Map<string, string>();
+    try {
+      const edRows = this.db
+        .prepare(
+          `SELECT h.user_agent_id, d.name AS editor_name, SUM(h.occurrence_count) AS score
+           FROM heartbeats h
+           JOIN daily_dimension_totals d ON d.date = h.local_date AND d.dimension = 'editor'
+           WHERE h.user_agent_id IS NOT NULL
+           GROUP BY h.user_agent_id, d.name`
+        )
+        .all() as Array<{ user_agent_id: string; editor_name: string; score: number }>;
+
+      for (const r of edRows) {
+        const existing = map.get(r.user_agent_id);
+        if (!existing) {
+          map.set(r.user_agent_id, r.editor_name);
+        }
+      }
+    } catch {
+      // Fall back gracefully in test or minimal databases
+    }
+
+    this.editorNameMap = map;
+    return map;
+  }
+
+  resolveMachineName(value: string): string {
+    return this.getMachineNameMap().get(value) ?? value;
+  }
+
+  resolveEditorName(value: string): string {
+    return this.getEditorNameMap().get(value) ?? value;
+  }
 
   getRules(filter?: { enabledOnly?: boolean }): ClassificationRuleRecord[] {
     let sql = `
@@ -294,10 +393,19 @@ export class SqliteClassificationService {
       updated_at: string;
     }>;
 
-    return rows.map((r) => ({
-      ...r,
-      enabled: Boolean(r.enabled)
-    }));
+    return rows.map((r) => {
+      let display_value = r.selector_value;
+      if (r.selector_type === 'machine') {
+        display_value = this.resolveMachineName(r.selector_value);
+      } else if (r.selector_type === 'editor') {
+        display_value = this.resolveEditorName(r.selector_value);
+      }
+      return {
+        ...r,
+        enabled: Boolean(r.enabled),
+        display_value
+      };
+    });
   }
 
   getRule(id: string): ClassificationRuleRecord | null {
@@ -323,7 +431,13 @@ export class SqliteClassificationService {
       | undefined;
 
     if (!row) return null;
-    return { ...row, enabled: Boolean(row.enabled) };
+    let display_value = row.selector_value;
+    if (row.selector_type === 'machine') {
+      display_value = this.resolveMachineName(row.selector_value);
+    } else if (row.selector_type === 'editor') {
+      display_value = this.resolveEditorName(row.selector_value);
+    }
+    return { ...row, enabled: Boolean(row.enabled), display_value };
   }
 
   getAllocations(filter?: { date?: string; projectId?: number }): DailyTimeAllocationRecord[] {
@@ -1498,9 +1612,21 @@ export class SqliteClassificationService {
         identitiesBySlice.set(r.slice_id, entry);
       }
       if (r.selector_type === 'machine') {
-        entry.machineIds.push(r.value);
+        const friendly = this.resolveMachineName(r.value);
+        if (friendly && !entry.machineIds.includes(friendly)) {
+          entry.machineIds.push(friendly);
+        }
+        if (r.value && r.value !== friendly && !entry.machineIds.includes(r.value)) {
+          entry.machineIds.push(r.value);
+        }
       } else if (r.selector_type === 'editor') {
-        entry.editors.push(r.value);
+        const friendly = this.resolveEditorName(r.value);
+        if (friendly && !entry.editors.includes(friendly)) {
+          entry.editors.push(friendly);
+        }
+        if (r.value && r.value !== friendly && !entry.editors.includes(r.value)) {
+          entry.editors.push(r.value);
+        }
       }
     }
 
@@ -1694,6 +1820,8 @@ export class SqliteClassificationService {
     startDate?: string;
     endDate?: string;
     limit?: number;
+    limitPerType?: number;
+    selectorType?: SelectorType;
   }): UnclassifiedSuggestion[] {
     const slices = this.classifySlices(filter).filter(
       (s) => s.decision.classification === 'unclassified'
@@ -1739,10 +1867,13 @@ export class SqliteClassificationService {
         continue;
       }
 
-      for (const m of s.machineIds) {
+      const sliceMachines = new Set(s.machineIds.map((m) => this.resolveMachineName(m)));
+      for (const m of sliceMachines) {
         recordCandidate('machine', m, s);
       }
-      for (const e of s.editors) {
+
+      const sliceEditors = new Set(s.editors.map((e) => this.resolveEditorName(e)));
+      for (const e of sliceEditors) {
         recordCandidate('editor', e, s);
       }
 
@@ -1778,11 +1909,43 @@ export class SqliteClassificationService {
       recordCandidate('entity', s.entity, s);
     }
 
-    const suggestions: UnclassifiedSuggestion[] = Array.from(candidateMap.values()).map((cg) => {
+    const allCandidates = Array.from(candidateMap.values());
+
+    const filteredCandidates = filter?.selectorType
+      ? allCandidates.filter((cg) => cg.selectorType === filter.selectorType)
+      : allCandidates;
+
+    // Group candidates by selectorType to ensure ALL types (application, domain, project, folder, etc.) are represented
+    const candidatesByType = new Map<SelectorType, CandidateGroup[]>();
+    for (const cg of filteredCandidates) {
+      let list = candidatesByType.get(cg.selectorType);
+      if (!list) {
+        list = [];
+        candidatesByType.set(cg.selectorType, list);
+      }
+      list.push(cg);
+    }
+
+    const limitPerType = filter?.limitPerType ?? (filter?.limit ? Math.max(filter.limit, 50) : 50);
+
+    const selectedCandidates: CandidateGroup[] = [];
+    for (const [, list] of candidatesByType.entries()) {
+      list.sort((a, b) => b.unclassifiedSeconds - a.unclassifiedSeconds);
+      selectedCandidates.push(...list.slice(0, limitPerType));
+    }
+
+    const suggestions: UnclassifiedSuggestion[] = selectedCandidates.map((cg) => {
       const sampleEntities = Array.from(new Set(cg.slices.map((s) => s.entity))).slice(0, 3);
       const sampleProjects = Array.from(
         new Set(cg.slices.map((s) => s.projectName).filter((p): p is string => Boolean(p)))
       ).slice(0, 3);
+
+      const dates = cg.slices
+        .map((s) => s.date)
+        .filter((d): d is string => Boolean(d))
+        .sort();
+      const earliestDate = dates.length > 0 ? dates[0] : null;
+      const latestDate = dates.length > 0 ? dates[dates.length - 1] : null;
 
       return {
         selectorType: cg.selectorType,
@@ -1791,7 +1954,9 @@ export class SqliteClassificationService {
         unclassifiedSeconds: roundSeconds(cg.unclassifiedSeconds),
         sliceCount: cg.slices.length,
         sampleEntities,
-        sampleProjects
+        sampleProjects,
+        earliestDate,
+        latestDate
       };
     });
 
@@ -1802,6 +1967,10 @@ export class SqliteClassificationService {
       return b.unclassifiedSeconds - a.unclassifiedSeconds;
     });
 
-    return suggestions.slice(0, filter?.limit ?? 50);
+    if (filter?.limit && !filter?.limitPerType && !filter?.selectorType) {
+      return suggestions.slice(0, filter.limit);
+    }
+
+    return suggestions;
   }
 }
