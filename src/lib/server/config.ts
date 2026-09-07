@@ -54,6 +54,8 @@ function configuredBoolean(name: string, fallback: boolean): boolean {
 export interface RuntimeConfig {
   databasePath: string;
   wakatimeApiKey: string | null;
+  wakatimeOAuthClientId: string | null;
+  wakatimeOAuthClientSecret: string | null;
   adminUsername: string;
   adminPasswordHash: string | null;
   sessionSecret: string | null;
@@ -76,6 +78,11 @@ export function getRuntimeConfig(): RuntimeConfig {
   return {
     databasePath,
     wakatimeApiKey: optionalSecret('WAKATIME_API_KEY', 'WAKATIME_API_KEY_FILE'),
+    wakatimeOAuthClientId: process.env.WAKATIME_OAUTH_CLIENT_ID?.trim() || null,
+    wakatimeOAuthClientSecret: optionalSecret(
+      'WAKATIME_OAUTH_CLIENT_SECRET',
+      'WAKATIME_OAUTH_CLIENT_SECRET_FILE'
+    ),
     adminUsername: process.env.ADMIN_USERNAME?.trim() || 'admin',
     adminPasswordHash: optionalSecret('ADMIN_PASSWORD_HASH', 'ADMIN_PASSWORD_HASH_FILE'),
     sessionSecret,

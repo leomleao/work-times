@@ -7,7 +7,8 @@ import {
   SqliteAdminSessionRepository,
   SqliteApiKeyRepository,
   SqliteOAuthAuthorizationRepository,
-  SqliteOAuthClientRepository
+  SqliteOAuthClientRepository,
+  SqliteWakaTimeOAuthConnectionRepository
 } from '$lib/server/db/repositories';
 import { AdminAuthenticator, LoginAttemptLimiter } from '$lib/server/auth/admin-auth';
 import { ApiKeyService } from '$lib/server/auth/api-keys';
@@ -19,6 +20,7 @@ import { WorkTimesTokenVerifier } from '$lib/server/mcp/token-verifier';
 import { createWorkTimesMcpHandler } from '$lib/server/mcp/server';
 import { createAuthenticatedMcpHandler, type AuthenticatedMcpHandler } from '$lib/server/mcp/http';
 import { RegistrationRateLimiter } from '$lib/server/oauth/rate-limit';
+import { WakaTimeOAuthService } from '$lib/server/wakatime/oauth';
 
 export interface ServerRuntime {
   readonly config: RuntimeConfig;
@@ -30,6 +32,7 @@ export interface ServerRuntime {
   readonly apiKeys: ApiKeyService;
   readonly oauthClients: OAuthClientService;
   readonly oauthAuth: OAuthAuthorizationService;
+  readonly wakatimeOAuth: WakaTimeOAuthService;
   readonly classification: SqliteClassificationService;
   readonly analytics: SqliteWorkOnlyAnalytics;
   readonly tokenVerifier: WorkTimesTokenVerifier;
@@ -48,6 +51,7 @@ export function createRuntime(customConfig?: RuntimeConfig, customDb?: Database.
   const apiKeyRepo = new SqliteApiKeyRepository(db);
   const oauthClientRepo = new SqliteOAuthClientRepository(db);
   const oauthAuthRepo = new SqliteOAuthAuthorizationRepository(db);
+  const wakatimeOAuthRepo = new SqliteWakaTimeOAuthConnectionRepository(db);
 
   const adminAuth = new AdminAuthenticator({
     username: config.adminUsername,
@@ -61,6 +65,13 @@ export function createRuntime(customConfig?: RuntimeConfig, customDb?: Database.
   const apiKeys = new ApiKeyService(apiKeyRepo);
   const oauthClients = new OAuthClientService(oauthClientRepo);
   const oauthAuth = new OAuthAuthorizationService(oauthClients, oauthAuthRepo);
+  const wakatimeOAuth = new WakaTimeOAuthService({
+    repository: wakatimeOAuthRepo,
+    clientId: config.wakatimeOAuthClientId,
+    clientSecret: config.wakatimeOAuthClientSecret,
+    publicUrl: config.publicUrl,
+    encryptionSecret: config.sessionSecret
+  });
 
   const classification = new SqliteClassificationService(db);
   const analytics = new SqliteWorkOnlyAnalytics(db, classification);
@@ -98,6 +109,7 @@ export function createRuntime(customConfig?: RuntimeConfig, customDb?: Database.
     apiKeys,
     oauthClients,
     oauthAuth,
+    wakatimeOAuth,
     classification,
     analytics,
     tokenVerifier,

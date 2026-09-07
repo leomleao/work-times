@@ -81,6 +81,8 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
     mockConfig = {
       databasePath: '/Users/test-user/secret-path/dev/work-times/data/work-times.sqlite',
       wakatimeApiKey: null,
+      wakatimeOAuthClientId: null,
+      wakatimeOAuthClientSecret: null,
       adminUsername: 'admin',
       adminPasswordHash: '$scrypt$N=32768,r=8,p=1$xyz123',
       sessionSecret: 'super-secret-session-key-at-least-32-chars',

@@ -43,6 +43,8 @@ describe('server runtime singleton', () => {
       {
         databasePath: ':memory:',
         wakatimeApiKey: null,
+        wakatimeOAuthClientId: null,
+        wakatimeOAuthClientSecret: null,
         adminUsername: 'testadmin',
         adminPasswordHash: null,
         sessionSecret: '0123456789abcdef0123456789abcdef',
