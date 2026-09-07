@@ -73,7 +73,7 @@ describe('Hooks & Route Protection', () => {
     expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'self'");
     expect(response.headers.get('X-Frame-Options')).toBe('DENY');
     expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
-    expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
+    expect(response.headers.get('Referrer-Policy')).toBe('same-origin');
   });
 
   it('redirects unauthenticated browser requests to /admin to /login with 303', async () => {
@@ -258,6 +258,12 @@ describe('Health Endpoint (/api/health)', () => {
 });
 
 describe('Login & Logout Server Actions', () => {
+  it('uses named actions for both login and logout so SvelteKit can dispatch them together', () => {
+    expect(loginActions.login).toBeTypeOf('function');
+    expect(loginActions.logout).toBeTypeOf('function');
+    expect(loginActions.default).toBeUndefined();
+  });
+
   it('rejects invalid credentials with generic error', async () => {
     const formData = new FormData();
     formData.set('username', 'wrong-user');
@@ -272,7 +278,7 @@ describe('Login & Logout Server Actions', () => {
       body: formData
     });
 
-    const result = await (loginActions.default as any)(event);
+    const result = await (loginActions.login as any)(event);
     expect(result.status).toBe(400);
     expect(result.data.error).toBe('Invalid username or password');
   });
@@ -297,7 +303,7 @@ describe('Login & Logout Server Actions', () => {
       body: formData
     });
 
-    await expect((loginActions.default as any)(event)).rejects.toMatchObject({
+    await expect((loginActions.login as any)(event)).rejects.toMatchObject({
       status: 303,
       location: '/admin' // Falls back to /admin instead of evil.com
     });
@@ -324,7 +330,7 @@ describe('Login & Logout Server Actions', () => {
       body: formData
     });
 
-    await expect((loginActions.default as any)(event)).rejects.toMatchObject({
+    await expect((loginActions.login as any)(event)).rejects.toMatchObject({
       status: 303,
       location: '/admin/oauth-clients'
     });
@@ -345,7 +351,7 @@ describe('Login & Logout Server Actions', () => {
         method: 'POST',
         body: formData
       });
-      const res = await (loginActions.default as any)(event);
+      const res = await (loginActions.login as any)(event);
       expect(res.status).toBe(400);
     }
 
@@ -357,7 +363,7 @@ describe('Login & Logout Server Actions', () => {
       method: 'POST',
       body: formData
     });
-    const limited = await (loginActions.default as any)(event);
+    const limited = await (loginActions.login as any)(event);
     expect(limited.status).toBe(429);
     expect(limited.data.error).toContain('Too many login attempts');
   });

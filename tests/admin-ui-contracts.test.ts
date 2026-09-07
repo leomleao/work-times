@@ -14,6 +14,22 @@ describe('Admin UI Acceptance Review Contracts', () => {
   const oauthClientsSrc = loadFile('src/routes/admin/oauth-clients/+page.svelte');
   const classifySrc = loadFile('src/routes/admin/classify/+page.svelte');
   const appShellSrc = loadFile('src/lib/components/AppShell.svelte');
+  const appCss = loadFile('src/styles/app.css');
+  const svelteConfigSrc = loadFile('svelte.config.js');
+
+  describe('Production interactivity and responsive layout', () => {
+    it('uses SvelteKit-managed CSP nonces for the hydration bootstrap', () => {
+      expect(svelteConfigSrc).toMatch(/csp:\s*\{/);
+      expect(svelteConfigSrc).toMatch(/mode:\s*'auto'/);
+      expect(svelteConfigSrc).toMatch(/'script-src':\s*\['self'\]/);
+    });
+
+    it('allows grid children and tables to shrink inside a mobile viewport', () => {
+      expect(appCss).toContain('.content-grid > * { min-width: 0; }');
+      expect(appCss).toMatch(/\.panel\s*\{\s*min-width:\s*0;/);
+      expect(classifySrc).toMatch(/display:\s*flex;[^"\n]*overflow-x:\s*auto;/);
+    });
+  });
 
   describe('Requirement 1: Scopes', () => {
     it('removes classification:write entirely and restricts scopes to the allowed set', () => {

@@ -322,7 +322,7 @@
   {/if}
 
   <!-- Main View Navigation Tabs -->
-  <div style="max-width: 1180px; margin: 0 auto 18px; border-bottom: 1px solid var(--border); display: flex; gap: 12px;">
+  <div style="max-width: 1180px; margin: 0 auto 18px; border-bottom: 1px solid var(--border); display: flex; gap: 12px; overflow-x: auto; padding-bottom: 4px;">
     <button
       type="button"
       class="button sm {currentTab === 'suggestions' ? 'primary' : 'ghost'}"
@@ -1385,4 +1385,3 @@
     </button>
   {/snippet}
 </Modal>
-

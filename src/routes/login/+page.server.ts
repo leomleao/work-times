@@ -9,15 +9,15 @@ import { safeLoginRedirect } from '$lib/server/oauth/continuation';
 export { safeLoginRedirect as _safeRedirect };
 
 export const load: PageServerLoad = async ({ locals, url }) => {
+  const redirectTo = safeLoginRedirect(url.searchParams.get('redirectTo'));
   if (locals.admin) {
-    const target = safeLoginRedirect(url.searchParams.get('redirectTo'));
-    throw redirect(303, target);
+    throw redirect(303, redirectTo);
   }
-  return {};
+  return { redirectTo };
 };
 
 export const actions: Actions = {
-  default: async ({ request, url, cookies, getClientAddress }) => {
+  login: async ({ request, url, cookies, getClientAddress }) => {
     let clientIp = '127.0.0.1';
     try {
       clientIp = getClientAddress();

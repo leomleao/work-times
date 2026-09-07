@@ -218,8 +218,10 @@ h3 { font-size: 15px; font-weight: 600; }
   gap: 18px;
   align-items: start;
 }
+.content-grid > * { min-width: 0; }
 .content-grid.single { grid-template-columns: 1fr; }
 .panel {
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--panel);
@@ -377,7 +379,7 @@ h3 { font-size: 15px; font-weight: 600; }
 
 /* Data Tables */
 .table-wrap {
-  width: 100%; overflow-x: auto;
+  width: 100%; max-width: 100%; overflow-x: auto;
   border-top: 1px solid var(--border);
 }
 .data-table {

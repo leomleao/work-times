@@ -7,7 +7,7 @@
     [key: string]: unknown;
   }
 
-  let { form }: { form?: ActionData | null } = $props();
+  let { data, form }: { data: { redirectTo: string }; form?: ActionData | null } = $props();
 
   let username = $state('admin');
   let password = $state('');
@@ -42,7 +42,8 @@
       </div>
     {/if}
 
-    <form method="POST" class="login-form">
+    <form method="POST" action="?/login" class="login-form">
+      <input type="hidden" name="redirectTo" value={data.redirectTo} />
       <div class="form-group">
         <label for="username" class="form-label">
           <span>Username</span>
