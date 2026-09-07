@@ -171,7 +171,7 @@ pnpm wakatime:discover --probe-date 2026-09-05
 - **Read-Only Invariant**: Probes existing data dumps via `GET /users/current/data_dumps` only; never triggers dump creation. Background incremental sync remains deferred.
 
 ### Generating the Admin Password Hash
-Work Times uses `scrypt` with parameters `N=32768, r=8, p=1, maxmem=64MB` and enforces a minimum password length of 12 characters. Use the interactive CLI to generate the hash without echoing your password:
+Work Times uses `scrypt` with parameters `N=32768, r=8, p=1, maxmem=64MB` and enforces a minimum password length of 10 characters. Use the interactive CLI to generate the hash without echoing your password:
 
 ```bash
 pnpm admin:hash-password

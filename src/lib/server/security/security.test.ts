@@ -11,6 +11,11 @@ describe('credential security', () => {
     expect(verifyPassword('a-wrong-horse-battery-staple', encoded)).toBe(false);
   });
 
+  it('requires admin passwords to contain at least 10 characters', () => {
+    expect(() => hashPassword('123456789')).toThrow('Password must contain at least 10 characters');
+    expect(() => hashPassword('1234567890')).not.toThrow();
+  });
+
   it('rejects malformed password hashes without throwing', () => {
     expect(verifyPassword('anything-at-all', 'not-a-valid-hash')).toBe(false);
   });

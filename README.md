@@ -126,7 +126,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Generate the administrator password hash using the hidden-stdin utility (minimum 12 characters):
+Generate the administrator password hash using the hidden-stdin utility (minimum 10 characters):
 ```bash
 pnpm admin:hash-password
 # Enter your desired administrator password when prompted (input is hidden)

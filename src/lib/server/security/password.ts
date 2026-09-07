@@ -5,9 +5,12 @@ const COST = 32_768;
 const BLOCK_SIZE = 8;
 const PARALLELIZATION = 1;
 const MAX_MEMORY = 64 * 1024 * 1024;
+const MIN_PASSWORD_LENGTH = 10;
 
 export function hashPassword(password: string): string {
-  if (password.length < 12) throw new Error('Password must contain at least 12 characters');
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error(`Password must contain at least ${MIN_PASSWORD_LENGTH} characters`);
+  }
 
   const salt = randomBytes(16);
   const digest = scryptSync(password, salt, KEY_LENGTH, {
