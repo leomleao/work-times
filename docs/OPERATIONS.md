@@ -82,30 +82,13 @@ openssl rand -hex 32 > secrets/session_secret
 chmod 600 secrets/session_secret
 ```
 
-#### Secret File Paths: Host vs. Container
+#### Secret File Paths
 The `*_FILE` variables are read as literal filesystem paths inside the process that
-consumes them, so the correct value differs between a local (non-container) run and a
-Docker Compose run. `docker-compose.yml` mounts the host secrets directory read-only at
-`/run/secrets`:
-
-```yaml
-volumes:
-  - ./secrets:/run/secrets:ro
-```
-
-Set the `*_FILE` variables accordingly:
-
-| Variable | Local (non-container) run | Docker Compose run |
-| :--- | :--- | :--- |
-| `WAKATIME_OAUTH_CLIENT_SECRET_FILE` | `./secrets/wakatime_oauth_client_secret` | `/run/secrets/wakatime_oauth_client_secret` |
-| `ADMIN_PASSWORD_HASH_FILE` | `./secrets/admin_password_hash` | `/run/secrets/admin_password_hash` |
-| `SESSION_SECRET_FILE` | `./secrets/session_secret` | `/run/secrets/session_secret` |
-
-Because Compose loads `.env` via `env_file`, a single `.env` cannot hold both variants.
-Use the container paths (`/run/secrets/...`) in the `.env` consumed by Compose, and keep
-host-relative paths (`./secrets/...`) only for local `pnpm dev` / `pnpm start` runs. The
-host filenames under `./secrets/` must match the basenames above, since the mount exposes
-them unchanged at `/run/secrets/`.
+consumes them. Host-relative `./secrets/...` paths work for local `pnpm dev` and
+`pnpm start` runs. The local Docker Compose definition intentionally has no secret bind
+mount, so leave its `*_FILE` variables empty and provide the direct secret variables in
+the ignored `.env`. A future production deployment definition can mount file-backed
+secrets at `/run/secrets`.
 
 ### Configuration Reference
 All runtime configuration is evaluated in `src/lib/server/config.ts` and `server/index.mjs`:
@@ -184,9 +167,12 @@ scrypt$32768$8$1$<salt-base64url>$<digest-base64url>
 ```
 
 Add this hash to `.env`:
-```bash
-ADMIN_PASSWORD_HASH="scrypt$32768$8$1$..."
+```dotenv
+ADMIN_PASSWORD_HASH='scrypt$32768$8$1$...'
 ```
+
+Use single quotes in `.env`; Docker Compose otherwise treats the hash's `$`
+separators as environment-variable interpolation.
 Or write it to a secret file:
 ```bash
 pnpm admin:hash-password > secrets/admin_password_hash
@@ -303,9 +289,9 @@ Real export verification confirms the following aggregate baseline facts (no dum
 
 ---
 
-## 6. Docker Compose Deployment
+## 6. Local Docker Compose
 
-A production-ready `docker-compose.yml` and multi-stage `Dockerfile` are included in the repository.
+A local-development `docker-compose.yml` and production-ready multi-stage `Dockerfile` are included in the repository. Reverse-proxy and public deployment settings are intentionally deferred to a separate deployment definition.
 
 ### Container Architecture
 - **Base Image**: `node:24-bookworm-slim`.
@@ -314,8 +300,8 @@ A production-ready `docker-compose.yml` and multi-stage `Dockerfile` are include
 - **In-Process Migrations**: The container entry point (`node server/index.mjs`) executes pending database migrations on boot before listening on port `3002`.
 - **Data Persistence**: Backed by a named Docker volume (`work-times-data`) mapped to `/data`.
 - **Host Port Binding**: Bound strictly to loopback `127.0.0.1:3002` (configurable via `WORK_TIMES_PORT`).
-- **Reverse Proxy**: Includes labels for integration with Traefik on the `traefik-net` network.
-- **Read-Only Secret Mount**: Mounts the host `./secrets` directory read-only at `/run/secrets`, so container `*_FILE` variables resolve to `/run/secrets/wakatime_oauth_client_secret`, `/run/secrets/admin_password_hash`, and `/run/secrets/session_secret`.
+- **Local Networking**: Has no Traefik labels or external Docker network dependency.
+- **Local Credentials**: Loads direct secret values from the ignored `.env`; file-backed production secrets are deferred to the deployment definition.
 - **No Background Sync**: Does not execute live recurring API sync or background polling workers.
 
 ### Docker Compose Service Definition
@@ -338,36 +324,14 @@ services:
       - "127.0.0.1:${WORK_TIMES_PORT:-3002}:3002"
     volumes:
       - work-times-data:/data
-      - ./secrets:/run/secrets:ro
-    networks:
-      - default
-      - traefik-net
-    labels:
-      traefik.enable: "true"
-      traefik.http.routers.work-times.rule: "Host(`work-times.home`)"
-      traefik.http.routers.work-times.entrypoints: "websecure"
-      traefik.http.routers.work-times.tls: "true"
-      traefik.http.services.work-times.loadbalancer.server.port: "3002"
 
 volumes:
   work-times-data:
-
-networks:
-  traefik-net:
-    external: true
 ```
 
 ### Launching the Service
-Create the host secrets directory before the first launch, because Compose bind-mounts
-`./secrets` into the container. If the path does not exist, Docker creates it as a
-root-owned directory, which the non-root container user cannot read:
-
-```bash
-mkdir -p secrets && chmod 700 secrets
-```
-
-`secrets/` is gitignored (`/secrets/`) and excluded from the build context
-(`.dockerignore`), so its contents never enter git history or an image layer.
+Configure direct local credentials in the ignored `.env`. Do not put production secrets
+in the Compose file or an image layer.
 
 ```bash
 # Build the Docker image and start in detached mode
@@ -387,7 +351,7 @@ docker compose down
 ```
 
 ### Seeding a Locally Imported Database into the Named Volume
-If you ran historical dump ingestion locally on the host (`DATABASE_PATH=./data/work-times.sqlite pnpm import:dumps ...`) before deploying to Docker Compose, safely seed the resulting SQLite database into the named volume `work-times-data`:
+If you ran historical dump ingestion locally on the host (`DATABASE_PATH=./data/work-times.sqlite pnpm import:dumps ...`) before starting Docker Compose, safely seed the resulting SQLite database into the named volume `work-times-data`:
 
 1. Ensure the application container is stopped:
    ```bash

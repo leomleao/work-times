@@ -217,12 +217,13 @@ pnpm build
 pnpm start
 ```
 
-### 8. Docker Compose Deployment
-The service includes a production-ready `Dockerfile` and `docker-compose.yml` backed by a named Docker volume (`work-times-data`) mapped to `/data`:
+### 8. Local Docker Compose
+The service includes a production-ready `Dockerfile` and a local-development `docker-compose.yml` backed by a named Docker volume (`work-times-data`) mapped to `/data`:
 - **Build Stage**: The multi-stage build installs native compilation tools (`python3`, `make`, `g++`) to build native `better-sqlite3` bindings before assembling the minimal runtime container.
 - **Non-Root Execution**: Runs under non-root user `node` (UID 1000).
 - **In-Process Migrations**: The container automatically executes pending migrations in-process on boot before listening on port 3002.
-- **Read-Only Secret Mount**: `docker-compose.yml` mounts the host `./secrets` directory read-only at `/run/secrets`. In the `.env` consumed by Compose, point the `*_FILE` variables at the container paths — `WAKATIME_OAUTH_CLIENT_SECRET_FILE=/run/secrets/wakatime_oauth_client_secret`, `ADMIN_PASSWORD_HASH_FILE=/run/secrets/admin_password_hash`, and `SESSION_SECRET_FILE=/run/secrets/session_secret`. The App ID is non-secret and remains a normal environment value.
+- **Local Credentials**: Compose loads the ignored local `.env` directly. Keep the `*_FILE` variables empty and use the direct OAuth, admin-hash, and session-secret variables for this local container.
+- **Loopback Only**: The service binds to `127.0.0.1:3002` and has no reverse-proxy labels or external network dependency. Production proxy configuration will live in a separate deployment definition.
 - **No Background Sync**: Live recurring background API synchronization is not active.
 
 ```bash
@@ -234,7 +235,7 @@ docker compose logs -f work-times
 ```
 
 #### Seeding a Locally Imported Database into the Docker Volume
-If you ran historical dump ingestion locally on the host (`DATABASE_PATH=./data/work-times.sqlite pnpm import:dumps ...`) before deploying under Docker Compose, seed the resulting SQLite database into the named volume `work-times-data`:
+If you ran historical dump ingestion locally on the host (`DATABASE_PATH=./data/work-times.sqlite pnpm import:dumps ...`) before starting Docker Compose, seed the resulting SQLite database into the named volume `work-times-data`:
 
 1. Ensure the application container is stopped:
    ```bash

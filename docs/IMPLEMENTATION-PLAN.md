@@ -1305,9 +1305,9 @@ ADMIN_PASSWORD_HASH_FILE=/run/secrets/admin_password_hash
 SESSION_SECRET_FILE=/run/secrets/session_secret
 ```
 
-These container paths match the read-only `./secrets:/run/secrets:ro` mount declared in
-`docker-compose.yml`. Local non-container runs use host-relative `./secrets/...` paths
-instead.
+These container paths are reserved for a future production deployment definition with a
+read-only secret mount. The local `docker-compose.yml` uses direct values from the ignored
+`.env`; local non-container runs may instead use host-relative `./secrets/...` paths.
 
 The application supports direct environment values for development but gives
 `*_FILE` precedence in production.
@@ -1375,26 +1375,18 @@ role isolation. The single process performs this startup sequence:
 A migration failure exits non-zero before any route becomes reachable. The
 single-replica deployment and process lock prevent concurrent migrators.
 
-Use the reserved Work Times port consistently inside and outside the container:
+Use the reserved Work Times port consistently inside and outside the local container:
 
 ```text
 127.0.0.1:3002:3002
 work-times-data:/data
-./secrets:/run/secrets:ro
 ```
 
 The shipped `docker-compose.yml` backs `/data` with the named volume `work-times-data`
-rather than a host bind mount, and mounts the host secrets directory read-only at
-`/run/secrets`. Container `*_FILE` variables therefore resolve to
-`/run/secrets/wakatime_api_key`, `/run/secrets/admin_password_hash`, and
-`/run/secrets/session_secret`.
-
-Set `PORT=3002`, attach the service to the existing external `traefik-net`, and
-add a Traefik router for `work-times.home` with load-balancer port `3002`.
-The Cloudflare Tunnel targets `http://127.0.0.1:3002` for the public HTTPS
-origin. No database or diagnostic port is published. Another container using
-port 3002 internally is not a collision because Traefik routes by service and
-container identity; only the host loopback binding must be unique.
+rather than a host bind mount. It loads local direct credentials from the ignored `.env`
+and deliberately has no Traefik labels or external network dependency. A separate
+production deployment definition will add file-backed secrets, Traefik routing, and the
+Cloudflare Tunnel integration. No database or diagnostic port is published locally.
 
 Cloudflare Access requires path-specific Bypass policies for the machine-facing
 protocol surface:
