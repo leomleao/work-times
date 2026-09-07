@@ -6,6 +6,14 @@ process.umask(0o077);
 
 if (existsSync('.env')) loadEnvFile('.env');
 
+// adapter-node needs the externally visible origin to validate form POSTs.
+// PUBLIC_URL is already the application's canonical origin, so keep the
+// adapter on the same source of truth unless an operator explicitly supplies
+// its lower-level ORIGIN setting.
+if (!process.env.ORIGIN && process.env.PUBLIC_URL) {
+  process.env.ORIGIN = process.env.PUBLIC_URL;
+}
+
 const { handler } = await import('../build/handler.js');
 
 const port = Number.parseInt(process.env.PORT ?? '3002', 10);

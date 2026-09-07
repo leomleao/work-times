@@ -28,8 +28,20 @@ export interface OpenDatabaseOptions {
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 
-/** Repository `migrations/` directory, resolved relative to this module. */
-export const MIGRATIONS_DIR = resolve(MODULE_DIR, '../../../../migrations');
+/**
+ * Repository/runtime `migrations/` directory.
+ *
+ * Production bundles relocate this module under `build/server/chunks`, so a
+ * source-relative path alone would resolve outside `/app` in the container.
+ * Prefer the directory shipped beside the application working directory and
+ * retain the source-relative path for callers that execute the module from a
+ * different working directory.
+ */
+const WORKING_DIRECTORY_MIGRATIONS = resolve(process.cwd(), 'migrations');
+const SOURCE_DIRECTORY_MIGRATIONS = resolve(MODULE_DIR, '../../../../migrations');
+export const MIGRATIONS_DIR = existsSync(WORKING_DIRECTORY_MIGRATIONS)
+  ? WORKING_DIRECTORY_MIGRATIONS
+  : SOURCE_DIRECTORY_MIGRATIONS;
 
 /**
  * Migration filenames must be `NNN-name.sql` so lexicographic order is also

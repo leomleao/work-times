@@ -15,6 +15,7 @@ services:
       - "127.0.0.1:${WORK_TIMES_PORT:-3002}:3002"
     volumes:
       - work-times-data:/data
+      - ./secrets:/run/secrets:ro
     networks:
       - default
       - traefik-net

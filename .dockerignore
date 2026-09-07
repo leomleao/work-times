@@ -8,6 +8,7 @@ dump
 dumps
 data
 backups
+secrets
 node_modules
 .svelte-kit
 build
