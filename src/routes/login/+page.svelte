@@ -67,7 +67,6 @@
       <div class="form-group">
         <label for="password" class="form-label">
           <span>Master Password</span>
-          <span class="form-hint">scrypt verified</span>
         </label>
         <div class="input-with-icon">
           <Lock size={16} class="input-icon" />
