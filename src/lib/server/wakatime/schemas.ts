@@ -256,13 +256,13 @@ export type DumpStatusResponse = z.infer<typeof DumpStatusResponseSchema>;
 export const CurrentUserSchema = z
   .object({
     id: z.string(),
-    email: z.string().optional(),
-    username: z.string().optional(),
-    timezone: z.string().optional(),
+    email: z.string().nullish(),
+    username: z.string().nullish(),
+    timezone: z.string().nullish(),
     timeout: z.number().optional(),
     weekday_start: z.number().optional(),
     writes_only: z.boolean().optional(),
-    plan: z.string().optional(),
+    plan: z.string().nullish(),
     has_premium_features: z.boolean().optional()
   })
   .passthrough();
