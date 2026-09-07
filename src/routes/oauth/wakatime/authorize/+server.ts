@@ -1,8 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { redirect, type RequestHandler } from '@sveltejs/kit';
 import { runtime } from '$lib/server/runtime';
-
-export const WAKATIME_OAUTH_STATE_COOKIE = 'wt_wakatime_oauth_state';
+import { WAKATIME_OAUTH_STATE_COOKIE } from '$lib/server/wakatime/oauth-state';
 
 export const GET: RequestHandler = async ({ locals, cookies }) => {
   if (!locals.admin) {
@@ -24,4 +23,3 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 
   throw redirect(303, runtime.wakatimeOAuth.authorizationUrl(state));
 };
-

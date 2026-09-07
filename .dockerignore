@@ -1,4 +1,5 @@
 .git
+.worktrees
 .gitignore
 .env
 .env.*
@@ -19,3 +20,4 @@ playwright-report
 *.sqlite-shm
 *.sqlite-wal
 *.log
+.DS_Store

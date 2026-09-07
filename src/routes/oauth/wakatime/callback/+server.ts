@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { redirect, type RequestHandler } from '@sveltejs/kit';
 import { runtime } from '$lib/server/runtime';
-import { WAKATIME_OAUTH_STATE_COOKIE } from '../authorize/+server.js';
+import { WAKATIME_OAUTH_STATE_COOKIE } from '$lib/server/wakatime/oauth-state';
 
 function statesMatch(expected: string | undefined, received: string | null): boolean {
   if (!expected || !received) return false;
@@ -39,4 +39,3 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
     throw redirect(303, '/integrations/wakatime?result=exchange-failed');
   }
 };
-
