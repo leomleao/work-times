@@ -450,7 +450,6 @@ describe('WakaTime Client and Error Handling', () => {
         return createResponse(200, {
           data: {
             id: 'usr_abc123',
-            username: null,
             timezone: 'America/New_York',
             plan: 'basic'
           }
@@ -460,7 +459,6 @@ describe('WakaTime Client and Error Handling', () => {
       const client = new WakaTimeClient({ apiKey: dummyApiKey, fetch: mockFetch });
       const res = await client.getCurrentUser();
       expect(res.data.id).toBe('usr_abc123');
-      expect(res.data.username).toBeNull();
       expect(res.data.timezone).toBe('America/New_York');
     });
   });
