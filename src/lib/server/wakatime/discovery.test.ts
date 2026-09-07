@@ -132,6 +132,28 @@ describe("WakaTime API Discovery", () => {
     expect(errText).toContain("WAKATIME_API_KEY_FILE");
   });
 
+  it("reports a supplied credential as unverified when transport prevents validation", async () => {
+    const result = await runWakaTimeDiscovery({
+      apiKey: secretApiKey,
+      fetch: vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }) as unknown as typeof fetch
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.credentialStatus).toBe("unverified");
+    expect(result.errors).toContainEqual({
+      endpoint: "/api/v1/users/current",
+      status: undefined,
+      errorName: "WakaTimeNetworkError"
+    });
+    const textOutput = formatDiscoveryText(result);
+    expect(textOutput).toContain("Credential Status: unverified");
+    expect(textOutput).toContain("WakaTimeNetworkError");
+    expect(JSON.stringify(result)).not.toContain(secretApiKey);
+    expect(textOutput).not.toContain(secretApiKey);
+  });
+
   // Requirement: CLI args cannot carry a key
   it("strictly rejects any CLI argument attempting to pass an API key", async () => {
     const forbiddenArgs = [

@@ -72,7 +72,7 @@ export interface DiscoveredError {
 export interface DiscoveryResult {
   ok: boolean;
   probeDate: string;
-  credentialStatus: "accepted" | "rejected" | "missing";
+  credentialStatus: "accepted" | "rejected" | "missing" | "unverified";
   planFeatures: PlanFeatures;
   capabilities: Record<SyncCapability, DiscoveredCapability>;
   dumps: DiscoveredDumps;
@@ -196,7 +196,17 @@ export function sanitizeErrorName(err: unknown): string {
   if (!err) return "UnknownError";
   if (err instanceof CapabilityRestrictedError) return "CapabilityRestrictedError";
   if (err instanceof WakaTimeAuthError) return "WakaTimeAuthError";
-  if (err instanceof WakaTimeError) return "WakaTimeError";
+  if (err instanceof WakaTimeError) {
+    const safeWakaTimeErrorNames = new Set([
+      "WakaTimeError",
+      "WakaTimeNetworkError",
+      "WakaTimeParseError",
+      "WakaTimeApiError",
+      "WakaTimeServerError",
+      "WakaTimeThrottleError"
+    ]);
+    return safeWakaTimeErrorNames.has(err.name) ? err.name : "WakaTimeError";
+  }
   if (err instanceof Error) {
     const name = err.name;
     if (typeof name === "string" && /^[A-Za-z0-9_$]{1,50}$/.test(name)) {
@@ -419,6 +429,11 @@ export async function runWakaTimeDiscovery(
     // Zero network calls when API key is missing
     return result;
   }
+
+  // A key was supplied, but it is not accepted or rejected until the current-user
+  // request completes. Network and response-validation failures must not be
+  // misreported as a missing credential.
+  result.credentialStatus = "unverified";
 
   const client =
     options.client ??
