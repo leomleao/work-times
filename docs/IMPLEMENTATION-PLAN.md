@@ -9,7 +9,8 @@ Implementation alignment decisions:
 - Core delivery completed: dump importer, classification overlay, dark-first SvelteKit
   admin UI with real SQLite views, application API keys, standards-based OAuth protocol
   routes (/oauth/authorize, /oauth/token, /oauth/revoke, /oauth/register), safe read-only
-  WakaTime capability discovery CLI (pnpm wakatime:discover), work-only Streamable HTTP
+  WakaTime capability discovery CLI (`pnpm wakatime:discover` on the host or the
+  profile-gated `work-times-tools` service for Docker), work-only Streamable HTTP
   MCP server at /mcp, and multi-stage Docker packaging.
 - Live recurring background API synchronization and future timeline visualization
   charts remain deferred to a later release milestone; the service functions as a
@@ -1539,7 +1540,8 @@ email or write scope is requested.
   verification, authorization-code exchange, refresh, and revocation.
 - Encrypt upstream access and refresh tokens in the dedicated
   `wakatime_oauth_connection` table; keep it separate from the inbound MCP OAuth server.
-- Implemented `pnpm wakatime:discover` CLI and runner for safe, read-only discovery.
+- Implemented the safe, read-only discovery runner for host and Docker use; the
+  profile-gated `work-times-tools` service shares the web application's data volume.
 - Enforced zero network calls when the OAuth connection is missing, exiting with code 1 and concise setup instructions.
 - Explicitly rejected CLI arguments attempting to pass credentials.
 - Strictly validated `--probe-date` as real UTC calendar date with leap-year and month boundary checks.
@@ -1735,7 +1737,7 @@ The core release milestone is implemented, verified, and operational:
 2. **Admin Web Interface**: All eight administrative views operational under dark-first Svelte 5 styling with CSRF and session protections.
 3. **Application API Keys & OAuth 2.0 Server**: Dual authentication mechanisms mounted, including `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`, and `/oauth/register` with PKCE S256, refresh rotation, and reuse revocation.
 4. **Work-Only MCP Server**: Mounted at `/mcp` with `get_work_summary` and `get_work_evidence`, enforcing strict work-only privacy.
-5. **Safe Read-Only Discovery**: `pnpm wakatime:discover` CLI available for credential and capability probing.
+5. **Safe Read-Only Discovery**: `pnpm wakatime:discover` is available for host runs, and `docker compose run --rm --build work-times-tools wakatime:discover` targets the local Docker database.
 6. **Docker Deployment**: Hardened multi-stage container with native compilation and in-process migrations.
 
 ### Deferred for future milestones:

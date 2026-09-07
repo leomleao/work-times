@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { openTestDatabase } from "../db/connection.js";
 import {
   runWakaTimeDiscovery,
   runDiscoveryCli,
@@ -333,6 +334,55 @@ describe("WakaTime API Discovery", () => {
     expect(exitCode).toBe(0);
     expect(stdoutMock.mock.calls[0][0]).toContain("durations   : restricted (HTTP_402)");
     expect(stdoutMock.mock.calls[0][0]).toContain("heartbeats  : restricted (HTTP_403)");
+  });
+
+  it("persists discovered capability policy state for the active database", async () => {
+    const db = openTestDatabase();
+    const now = new Date("2026-09-07T12:00:00.000Z");
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/users/current/summaries")) {
+        return createJsonResponse(200, mockSummariesPayload);
+      }
+      if (url.includes("/users/current/durations")) {
+        return createJsonResponse(402, { message: "Upgrade required" });
+      }
+      if (url.includes("/users/current/heartbeats")) {
+        return createJsonResponse(403, { message: "Upgrade required" });
+      }
+      if (url.includes("/users/current/data_dumps")) {
+        return createJsonResponse(200, mockDumpsPayload);
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+
+    try {
+      const exitCode = await runDiscoveryCli([], {
+        accessToken: secretAccessToken,
+        fetch: fetchMock as unknown as typeof fetch,
+        stdout: vi.fn(),
+        database: db,
+        now
+      });
+      const row = db
+        .prepare("SELECT value, updated_at FROM app_settings WHERE key = 'capability_policy_state'")
+        .get() as { value: string; updated_at: string };
+      const state = JSON.parse(row.value);
+
+      expect(exitCode).toBe(0);
+      expect(row.updated_at).toBe(now.toISOString());
+      expect(state.updatedAt).toBe(now.toISOString());
+      expect(state.capabilities.summaries.status).toBe("available");
+      expect(state.capabilities.durations).toMatchObject({
+        status: "restricted",
+        restrictionCode: "HTTP_402"
+      });
+      expect(state.capabilities.heartbeats).toMatchObject({
+        status: "restricted",
+        restrictionCode: "HTTP_403"
+      });
+    } finally {
+      db.close();
+    }
   });
 
   // Auth rejection is non-zero

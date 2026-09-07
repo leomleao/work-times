@@ -85,7 +85,7 @@
         <div>
           <strong>WakaTime OAuth is connected. Safe capability discovery is ready.</strong>
           <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
-            Run safe discovery from your terminal: <code>pnpm wakatime:discover</code>.
+            Run safe discovery for this Docker database: <code>docker compose run --rm --build work-times-tools wakatime:discover</code>.
             This probes the upstream API without modifying telemetry and stores discovered account limits.
           </p>
         </div>
@@ -167,7 +167,7 @@
               {#if sumCap?.lastSuccessAt}
                 Last confirmed at {new Date(sumCap.lastSuccessAt).toLocaleString()}.
               {:else}
-                Probed via <code>pnpm wakatime:discover</code>.
+                Run the safe discovery command to probe this capability.
               {/if}
             </p>
           </div>

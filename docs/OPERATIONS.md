@@ -56,6 +56,7 @@ pnpm dev
 | `pnpm db:migrate` | Executes the database migration CLI (`scripts/migrate.ts`). |
 | `pnpm import:dumps` | Executes the WakaTime dump ingestion CLI (`scripts/import-dumps.ts`). |
 | `pnpm wakatime:discover` | Runs safe, read-only discovery of WakaTime credentials and API capabilities (`scripts/wakatime-discover.ts`). |
+| `docker compose run --rm --build work-times-tools wakatime:discover` | Runs discovery against the database in the local Docker named volume. |
 | `pnpm admin:hash-password` | Generates an `scrypt` password hash via hidden interactive stdin. |
 
 ---
@@ -127,18 +128,21 @@ documentation requires an exact authorized redirect but does not document a
 loopback HTTP exception; if its app form rejects the localhost URI, use a
 stable HTTPS development tunnel origin and register its callback instead.
 
-### Safe Read-Only WakaTime Capability Discovery (`pnpm wakatime:discover`)
-The discovery CLI inspects WakaTime account credentials, endpoint availability, and plan-gated restrictions without writing to the database or modifying upstream account state:
+### Safe Read-Only WakaTime Capability Discovery
+The discovery CLI inspects WakaTime account credentials, endpoint availability, and plan-gated restrictions. It persists the bounded capability policy locally but never modifies upstream WakaTime state:
 
 ```bash
-# Run after authorizing at /integrations/wakatime
+# Local Docker: use the same named-volume database as the web app
+docker compose run --rm --build work-times-tools wakatime:discover
+
+# Direct host run: use DATABASE_PATH from the host environment
 pnpm wakatime:discover
 
 # Emit bounded JSON output on stdout
-pnpm wakatime:discover --json
+docker compose run --rm --build work-times-tools wakatime:discover --json
 
 # Probe a specific UTC calendar date
-pnpm wakatime:discover --probe-date 2026-09-05
+docker compose run --rm --build work-times-tools wakatime:discover --probe-date 2026-09-05
 ```
 
 #### Security & Discovery Invariants
@@ -152,6 +156,7 @@ pnpm wakatime:discover --probe-date 2026-09-05
   - Reports strictly omit user IDs, emails, usernames, entity paths, project names, machines, download URLs, raw response bodies, and authorization headers.
 - **Soft Degradation**: Probing optional endpoints (durations and heartbeats) that return HTTP 402 or 403 records `status: "restricted"` with `restrictionCode: "HTTP_402"` or `"HTTP_403"` without failing discovery if baseline summaries succeed.
 - **Read-Only Invariant**: Probes existing data dumps via `GET /users/current/data_dumps` only; never triggers dump creation. Background incremental sync remains deferred.
+- **Local Persistence**: Stores only the sanitized capability policy in `app_settings`; tokens and upstream response bodies are never written by discovery.
 
 ### Generating the Admin Password Hash
 Work Times uses `scrypt` with parameters `N=32768, r=8, p=1, maxmem=64MB` and enforces a minimum password length of 10 characters. Use the interactive CLI to generate the hash without echoing your password:
@@ -302,6 +307,7 @@ A local-development `docker-compose.yml` and production-ready multi-stage `Docke
 - **Host Port Binding**: Bound strictly to loopback `127.0.0.1:3002` (configurable via `WORK_TIMES_PORT`).
 - **Local Networking**: Has no Traefik labels or external Docker network dependency.
 - **Local Credentials**: Loads direct secret values from the ignored `.env`; file-backed production secrets are deferred to the deployment definition.
+- **One-Shot Operator Tools**: The profile-gated `work-times-tools` service shares the named data volume and contains `tsx` plus the source CLI without bloating the web runtime image.
 - **No Background Sync**: Does not execute live recurring API sync or background polling workers.
 
 ### Docker Compose Service Definition
@@ -325,6 +331,22 @@ services:
     volumes:
       - work-times-data:/data
 
+  work-times-tools:
+    profiles:
+      - tools
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: tools
+    image: work-times-tools:local
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/work-times.sqlite
+    user: "1000:1000"
+    volumes:
+      - work-times-data:/data
+
 volumes:
   work-times-data:
 ```
@@ -342,6 +364,9 @@ docker compose logs -f work-times
 
 # Verify container health status
 docker compose ps
+
+# Run safe WakaTime discovery against this container's database
+docker compose run --rm --build work-times-tools wakatime:discover
 ```
 
 ### Stopping the Service

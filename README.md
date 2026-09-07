@@ -51,7 +51,7 @@ Real export verification confirms the following aggregate baseline facts (no dum
 > Live background synchronization against the WakaTime REST API is **deferred** in this release. The application currently functions as a dump-backed archive; recurring polling reconciliation workers and background schedulers are not yet mounted. The WakaTime OAuth connection and safe read-only discovery command are available now.
 
 ### 4. Safe Read-Only WakaTime Capability Discovery
-The CLI tool `pnpm wakatime:discover` uses the encrypted WakaTime OAuth connection to probe plan-gated capabilities safely:
+The discovery tool uses the encrypted WakaTime OAuth connection to probe plan-gated capabilities safely. Run `pnpm wakatime:discover` for a host-run app or `docker compose run --rm --build work-times-tools wakatime:discover` for local Docker:
 - **Zero Network Calls Without a Connection**: When WakaTime has not been authorized, the command performs zero network calls and directs the operator to `/integrations/wakatime`.
 - **Credential Storage**: Access and refresh tokens are encrypted with AES-256-GCM using key material derived from the persistent `SESSION_SECRET`; plaintext tokens never enter browser storage.
 - **No CLI Credentials**: Passing access tokens or API keys via command-line arguments is forbidden to prevent leakage into shell histories, process listings, or logs.
@@ -179,11 +179,15 @@ Keep a persistent `SESSION_SECRET`; changing it makes existing encrypted WakaTim
 To probe the connected account without modifying upstream state:
 
 ```bash
+# Local Docker (uses the named-volume database connected by the web app)
+docker compose run --rm --build work-times-tools wakatime:discover
+
+# Direct host run (uses DATABASE_PATH from the host environment)
 pnpm wakatime:discover
 ```
 To emit a bounded JSON report:
 ```bash
-pnpm wakatime:discover --json
+docker compose run --rm --build work-times-tools wakatime:discover --json
 ```
 
 ### 5. (Optional) Ingest Historical WakaTime Dumps
@@ -224,6 +228,7 @@ The service includes a production-ready `Dockerfile` and a local-development `do
 - **In-Process Migrations**: The container automatically executes pending migrations in-process on boot before listening on port 3002.
 - **Local Credentials**: Compose loads the ignored local `.env` directly. Keep the `*_FILE` variables empty and use the direct OAuth, admin-hash, and session-secret variables for this local container.
 - **Loopback Only**: The service binds to `127.0.0.1:3002` and has no reverse-proxy labels or external network dependency. Production proxy configuration will live in a separate deployment definition.
+- **One-Shot Tools Image**: The profile-gated `work-times-tools` service retains development tooling for operator commands while sharing the application database volume; it never starts with the web service.
 - **No Background Sync**: Live recurring background API synchronization is not active.
 
 ```bash

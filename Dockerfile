@@ -18,6 +18,16 @@ FROM dependencies AS build
 
 COPY . .
 RUN pnpm build
+
+FROM build AS tools
+
+RUN cp -R /root/.cache/node/corepack/v1/pnpm/11.13.0 /opt/pnpm \
+  && chmod -R a+rX /opt/pnpm
+
+ENTRYPOINT ["node", "/opt/pnpm/bin/pnpm.cjs"]
+
+FROM build AS production-dependencies
+
 RUN pnpm prune --prod
 
 FROM node:24-bookworm-slim AS runtime
@@ -29,11 +39,11 @@ ENV DATABASE_PATH=/data/work-times.sqlite
 
 WORKDIR /app
 
-COPY --from=build --chown=node:node /app/build ./build
-COPY --from=build --chown=node:node /app/server ./server
-COPY --from=build --chown=node:node /app/migrations ./migrations
-COPY --from=build --chown=node:node /app/node_modules ./node_modules
-COPY --from=build --chown=node:node /app/package.json ./package.json
+COPY --from=production-dependencies --chown=node:node /app/build ./build
+COPY --from=production-dependencies --chown=node:node /app/server ./server
+COPY --from=production-dependencies --chown=node:node /app/migrations ./migrations
+COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
+COPY --from=production-dependencies --chown=node:node /app/package.json ./package.json
 
 RUN mkdir -p /data && chown node:node /data && chmod 0700 /data
 

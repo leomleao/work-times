@@ -13,7 +13,14 @@ import {
   WakaTimeError,
   sanitizeEndpoint
 } from "./errors.js";
-import { getYesterdayDate, type SyncCapability, type CapabilityStatus } from "../sync/capabilities.js";
+import {
+  CapabilityPolicy,
+  getYesterdayDate,
+  type CapabilityPolicyState,
+  type SyncCapability,
+  type CapabilityStatus
+} from "../sync/capabilities.js";
+import type Database from "better-sqlite3";
 
 /** Maximum number of dump items included in discovery output. */
 export const MAX_DUMP_ITEMS = 10;
@@ -86,6 +93,44 @@ export interface DiscoveryOptions {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   client?: WakaTimeClient;
+}
+
+export function capabilityPolicyStateFromDiscovery(
+  result: DiscoveryResult,
+  now: Date = new Date()
+): CapabilityPolicyState {
+  const policy = new CapabilityPolicy();
+
+  for (const capability of ["summaries", "durations", "heartbeats"] as const) {
+    const discovered = result.capabilities[capability];
+    if (discovered.status === "available") {
+      policy.recordSuccess(capability, now);
+    } else if (
+      discovered.status === "restricted" &&
+      (discovered.restrictionCode === "HTTP_402" || discovered.restrictionCode === "HTTP_403")
+    ) {
+      policy.recordRestriction(
+        capability,
+        discovered.restrictionCode === "HTTP_402" ? 402 : 403,
+        now
+      );
+    } else if (discovered.status === "error") {
+      policy.recordError(capability, new Error("Discovery request failed"), now);
+    }
+  }
+
+  return { ...policy.toJSON(), updatedAt: now.toISOString() };
+}
+
+export function persistCapabilityPolicyState(
+  db: Database.Database,
+  state: CapabilityPolicyState
+): void {
+  db.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES ('capability_policy_state', ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).run(JSON.stringify(state), state.updatedAt);
 }
 
 /**
@@ -691,6 +736,7 @@ export async function runDiscoveryCli(
     now?: Date;
     stdout?: (text: string) => void;
     stderr?: (text: string) => void;
+    database?: Database.Database;
   }
 ): Promise<number> {
   const writeOut =
@@ -716,11 +762,13 @@ export async function runDiscoveryCli(
 
   let accessToken: string | null = null;
   let client = options?.client;
+  let database = options?.database;
   if (options?.accessToken !== undefined) {
     accessToken = options.accessToken;
   } else if (!client) {
     try {
       const { runtime } = await import('../runtime.js');
+      database = runtime.db;
       if (runtime.wakatimeOAuth.status().connected) {
         client = new WakaTimeClient({ tokenProvider: runtime.wakatimeOAuth });
         // A non-secret marker lets the discovery runner distinguish a connected
@@ -747,6 +795,13 @@ export async function runDiscoveryCli(
     now: options?.now,
     fetch: options?.fetch
   });
+
+  if (database && result.credentialStatus === "accepted") {
+    persistCapabilityPolicyState(
+      database,
+      capabilityPolicyStateFromDiscovery(result, options?.now)
+    );
+  }
 
   if (parsedArgs.json) {
     writeOut(formatDiscoveryJson(result));
