@@ -7,7 +7,8 @@ import crypto from 'node:crypto';
 import {
   parseAnalysisArguments,
   runRuleConsolidationAnalysis,
-  executeAnalysisCli
+  executeAnalysisCli,
+  parseTimestampToMillis
 } from '../scripts/analyze-rule-consolidation.js';
 import { openDatabase, openTestDatabase } from '../src/lib/server/db/connection.js';
 import { importDumps } from '../src/lib/server/import/importer.js';
@@ -54,6 +55,16 @@ describe('Analyze Rule Consolidation CLI (scripts/analyze-rule-consolidation.ts)
       expect(() => parseAnalysisArguments(['--manifest'])).toThrow('--manifest requires a manifest path');
       expect(() => parseAnalysisArguments(['--out'])).toThrow('--out requires an output path');
       expect(() => parseAnalysisArguments(['--unknown'])).toThrow('Unknown argument: --unknown');
+    });
+  });
+
+  describe('parseTimestampToMillis', () => {
+    it('handles ISO timestamps and SQLite datetime formats robustly', () => {
+      expect(parseTimestampToMillis('2024-03-01T12:00:00.000Z')).toBe(Date.parse('2024-03-01T12:00:00.000Z'));
+      expect(parseTimestampToMillis('2024-03-01 12:00:00')).toBe(Date.parse('2024-03-01T12:00:00Z'));
+      expect(parseTimestampToMillis(null)).toBeNull();
+      expect(parseTimestampToMillis('')).toBeNull();
+      expect(parseTimestampToMillis('invalid-timestamp')).toBeNull();
     });
   });
 
@@ -265,6 +276,45 @@ describe('Analyze Rule Consolidation CLI (scripts/analyze-rule-consolidation.ts)
       expect(result.polarityFlipsCount).toBe(0);
       expect(result.proposed.workSlices).toBe(result.baseline.workSlices);
       expect(result.proposed.personalSlices).toBe(result.baseline.personalSlices);
+    });
+
+    it('preserves existing rule precedence over newly proposed equivalent rule without false transition', async () => {
+      const dbPath = join(tempDir, 'precedence-order-test.sqlite');
+      const db = openDatabase({ path: dbPath, migrate: true, wal: false });
+      await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+      const service = new SqliteClassificationService(db);
+
+      const existingRule = service.unsafeSeedRule({
+        name: 'Existing Alpha Rule',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'alpha',
+        matchMode: 'exact',
+        priority: 0
+      });
+      db.close();
+
+      // Propose an equivalent work rule with equal effective precedence without deleting the existing rule
+      const manifest = {
+        createRules: [
+          {
+            name: 'Newly Proposed Equivalent Work Rule',
+            classification: 'work' as const,
+            selectorType: 'project' as const,
+            selectorValue: 'alpha',
+            matchMode: 'exact' as const,
+            priority: 0
+          }
+        ]
+      };
+
+      const result = runRuleConsolidationAnalysis(dbPath, manifest);
+
+      // The existing retained rule must sort before the newly proposed rule,
+      // so it remains the winner and NO false same-classification rule->rule transition is reported.
+      expect(result.safetyGatePassed).toBe(true);
+      expect(result.transitions['same_classification:rule->rule']).toBeUndefined();
+      expect(result.proposed.workSlices).toBe(result.baseline.workSlices);
     });
 
     it('rejects explicit create rule IDs that already exist in the target database', async () => {

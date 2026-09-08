@@ -173,6 +173,21 @@ export function parseAnalysisArguments(argv: readonly string[]): AnalysisCliArgs
   return args;
 }
 
+/**
+ * Safely parse an ISO or SQLite timestamp into milliseconds epoch.
+ * Handles both standard ISO 8601 strings and SQLite datetime ('YYYY-MM-DD HH:MM:SS') formats.
+ */
+export function parseTimestampToMillis(ts: string | undefined | null): number | null {
+  if (!ts || typeof ts !== 'string') return null;
+  const trimmed = ts.trim();
+  if (!trimmed) return null;
+  const direct = Date.parse(trimmed);
+  if (!Number.isNaN(direct)) return direct;
+  const normalized = Date.parse(trimmed.replace(' ', 'T') + 'Z');
+  if (!Number.isNaN(normalized)) return normalized;
+  return null;
+}
+
 export function runRuleConsolidationAnalysis(
   dbPath: string,
   manifest: ConsolidationManifest
@@ -241,6 +256,21 @@ export function runRuleConsolidationAnalysis(
 
     const deleteSet = new Set(manifest.deleteRuleIds ?? []);
 
+    // Find latest timestamp among existing rules to model actual live creation ordering:
+    // Newly proposed created rules sort chronologically after all retained existing rules,
+    // preventing false winner flips and false same-classification transitions against equal retained rules.
+    let maxExistingMillis = 0;
+    for (const rule of existingRules) {
+      const parsed = parseTimestampToMillis(rule.created_at);
+      if (parsed !== null && parsed > maxExistingMillis) {
+        maxExistingMillis = parsed;
+      }
+    }
+
+    const baseCreatedMillis = maxExistingMillis > 0
+      ? maxExistingMillis + 1000
+      : Date.parse('2026-01-01T00:00:00.000Z');
+
     // Construct proposed ruleset with honored enabled flag and deterministic metadata
     const retainedRules = baselineModelRules.filter((r) => !deleteSet.has(r.id));
     const createdRules: ClassificationRule[] = (manifest.createRules ?? []).map((cr, idx) => ({
@@ -251,7 +281,9 @@ export function runRuleConsolidationAnalysis(
       matchMode: cr.matchMode || 'exact',
       priority: cr.priority ?? 0,
       enabled: cr.enabled !== undefined ? cr.enabled : true,
-      createdAt: '1970-01-01T00:00:00.000Z'
+      // Deterministic timestamp strictly after existing rules, incremented per manifest index
+      // to ensure stable tie-breaking matching consolidation operation order.
+      createdAt: new Date(baseCreatedMillis + idx * 1000).toISOString()
     }));
 
     const proposedModelRules: ClassificationRule[] = [...retainedRules, ...createdRules];
