@@ -626,4 +626,354 @@ describe('classification model', () => {
     };
     expect(ruleMatchesSlice(unixCaseMatchRule, unixSlice)).toBe(true);
   });
+
+  describe('TC-09: Glob pattern matching across selector types and casing boundaries', () => {
+    it('matches machine selectors with glob patterns case-insensitively against canonical identities', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-machine-glob',
+        selectorType: 'machine',
+        selectorValue: 'desktop-*',
+        matchMode: 'glob',
+        classification: 'work',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const matchSlice: ClassifiableSlice = {
+        id: 's1',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'src/main.ts',
+        machineIds: ['desktop-office-42'],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchSlice)).toBe(true);
+
+      const matchUpperSlice: ClassifiableSlice = {
+        id: 's2',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'src/main.ts',
+        machineIds: ['DESKTOP-BUILDER-01'],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchUpperSlice)).toBe(true);
+
+      const nonMatchSlice: ClassifiableSlice = {
+        id: 's3',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'src/main.ts',
+        machineIds: ['laptop-macbook'],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, nonMatchSlice)).toBe(false);
+    });
+
+    it('matches editor selectors with glob patterns case-insensitively', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-editor-glob',
+        selectorType: 'editor',
+        selectorValue: '*code*',
+        matchMode: 'glob',
+        classification: 'work',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const matchSlice: ClassifiableSlice = {
+        id: 's1',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'src/main.ts',
+        machineIds: [],
+        editors: ['Visual Studio Code']
+      };
+      expect(ruleMatchesSlice(globRule, matchSlice)).toBe(true);
+
+      const nonMatchSlice: ClassifiableSlice = {
+        id: 's2',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'src/main.ts',
+        machineIds: [],
+        editors: ['Sublime Text', 'Vim']
+      };
+      expect(ruleMatchesSlice(globRule, nonMatchSlice)).toBe(false);
+    });
+
+    it('matches application selectors with glob patterns case-insensitively for app slices only', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-app-glob',
+        selectorType: 'application',
+        selectorValue: 'slack*',
+        matchMode: 'glob',
+        classification: 'work',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const matchSlice: ClassifiableSlice = {
+        id: 's1',
+        project: 'proj',
+        entityType: 'app',
+        entity: 'Slack - Announcements',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchSlice)).toBe(true);
+
+      const matchUpperSlice: ClassifiableSlice = {
+        id: 's2',
+        project: 'proj',
+        entityType: 'app',
+        entity: 'SLACK - DEV TEAM',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchUpperSlice)).toBe(true);
+
+      const nonMatchAppSlice: ClassifiableSlice = {
+        id: 's3',
+        project: 'proj',
+        entityType: 'app',
+        entity: 'Discord',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, nonMatchAppSlice)).toBe(false);
+
+      const nonAppSlice: ClassifiableSlice = {
+        id: 's4',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'slack/config.json',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, nonAppSlice)).toBe(false);
+    });
+
+    it('matches domain selectors with glob patterns case-insensitively for domain slices only', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-domain-glob',
+        selectorType: 'domain',
+        selectorValue: '*.github.com',
+        matchMode: 'glob',
+        classification: 'work',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const matchSlice: ClassifiableSlice = {
+        id: 's1',
+        project: null,
+        entityType: 'domain',
+        entity: 'gist.github.com',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchSlice)).toBe(true);
+
+      const matchUpperSlice: ClassifiableSlice = {
+        id: 's2',
+        project: null,
+        entityType: 'domain',
+        entity: 'API.GITHUB.COM',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchUpperSlice)).toBe(true);
+
+      const nonMatchApexSlice: ClassifiableSlice = {
+        id: 's3',
+        project: null,
+        entityType: 'domain',
+        entity: 'github.com',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, nonMatchApexSlice)).toBe(false);
+
+      const otherDomainSlice: ClassifiableSlice = {
+        id: 's4',
+        project: null,
+        entityType: 'domain',
+        entity: 'gitlab.com',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, otherDomainSlice)).toBe(false);
+    });
+
+    it('matches directly drive-qualified Windows paths case-insensitively and normalizes backslashes', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-win-drive-glob',
+        selectorType: 'folder_prefix',
+        selectorValue: 'C:/Projects/*/src/*',
+        matchMode: 'glob',
+        classification: 'work',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const winBackslashSlice: ClassifiableSlice = {
+        id: 's1',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'c:\\projects\\work-app\\src\\index.ts',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, winBackslashSlice)).toBe(true);
+
+      const winUpperSlice: ClassifiableSlice = {
+        id: 's2',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'C:/PROJECTS/CLIENT-APP/SRC/main.ts',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, winUpperSlice)).toBe(true);
+
+      const diffDriveSlice: ClassifiableSlice = {
+        id: 's3',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'D:/Projects/work-app/src/index.ts',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, diffDriveSlice)).toBe(false);
+    });
+
+    it('matches leading-wildcard Windows paths case-insensitively', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-win-lead-glob',
+        selectorType: 'folder_prefix',
+        selectorValue: '*Users/*/Documents/*',
+        matchMode: 'glob',
+        classification: 'personal',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const winSlice: ClassifiableSlice = {
+        id: 's1',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'c:\\Users\\dev\\Documents\\tax-return.pdf',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, winSlice)).toBe(true);
+
+      const winUpperSlice: ClassifiableSlice = {
+        id: 's2',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'C:/USERS/dev/DOCUMENTS/receipt.pdf',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, winUpperSlice)).toBe(true);
+    });
+
+    it('preserves case strictly for Unix paths in glob matching', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-unix-case',
+        selectorType: 'folder_prefix',
+        selectorValue: '/Users/*/Code/*',
+        matchMode: 'glob',
+        classification: 'work',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const matchingUnixSlice: ClassifiableSlice = {
+        id: 's1',
+        project: 'proj',
+        entityType: 'file',
+        entity: '/Users/dev/Code/repo/main.ts',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchingUnixSlice)).toBe(true);
+
+      const lowerUnixSlice: ClassifiableSlice = {
+        id: 's2',
+        project: 'proj',
+        entityType: 'file',
+        entity: '/users/dev/code/repo/main.ts',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, lowerUnixSlice)).toBe(false);
+    });
+
+    it('preserves case strictly for relative paths in glob matching', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-rel-case',
+        selectorType: 'folder_prefix',
+        selectorValue: 'src/*/Components/*',
+        matchMode: 'glob',
+        classification: 'work',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const matchingSlice: ClassifiableSlice = {
+        id: 's1',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'src/admin/Components/Table.svelte',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchingSlice)).toBe(true);
+
+      const mismatchedSlice: ClassifiableSlice = {
+        id: 's2',
+        project: 'proj',
+        entityType: 'file',
+        entity: 'src/admin/components/Table.svelte',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, mismatchedSlice)).toBe(false);
+    });
+
+    it('preserves case strictly for project selectors in glob matching', () => {
+      const globRule: ClassificationRule = {
+        id: 'r-proj-case',
+        selectorType: 'project',
+        selectorValue: 'Client-*',
+        matchMode: 'glob',
+        classification: 'work',
+        priority: 0,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const matchSlice: ClassifiableSlice = {
+        id: 's1',
+        project: 'Client-Portal',
+        entityType: 'file',
+        entity: 'src/main.ts',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, matchSlice)).toBe(true);
+
+      const lowercaseSlice: ClassifiableSlice = {
+        id: 's2',
+        project: 'client-portal',
+        entityType: 'file',
+        entity: 'src/main.ts',
+        machineIds: [],
+        editors: []
+      };
+      expect(ruleMatchesSlice(globRule, lowercaseSlice)).toBe(false);
+    });
+  });
 });

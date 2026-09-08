@@ -80,7 +80,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    const db = openDatabase({ path: databasePath, migrate: false, readonly: true });
+    const db = openDatabase({ path: databasePath, migrate: false, readonly: true, wal: false });
     try {
       const all = listMigrations();
       const appliedRows = db.prepare('SELECT filename, applied_at FROM schema_migrations ORDER BY filename').all() as Array<{ filename: string; applied_at: string }>;

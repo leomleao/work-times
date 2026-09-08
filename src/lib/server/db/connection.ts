@@ -100,7 +100,7 @@ export function configurePragmas(db: Database.Database, options: Partial<OpenDat
 
   db.pragma(`busy_timeout = ${busyTimeoutMs}`);
 
-  const wantsWal = options.wal !== false && db.name !== ':memory:' && db.name !== '';
+  const wantsWal = !options.readonly && options.wal !== false && db.name !== ':memory:' && db.name !== '';
   if (wantsWal) {
     const [row] = db.pragma('journal_mode = WAL') as Array<{ journal_mode: string }>;
     if (row?.journal_mode?.toLowerCase() !== 'wal') {

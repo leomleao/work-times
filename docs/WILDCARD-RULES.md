@@ -111,14 +111,26 @@ pnpm rules:consolidate --db <path> --manifest <manifest-path> --apply --backup <
 
 ### Safety Requirements
 - `--db <path>` is **strictly required**. The CLI never defaults to the live database.
-- Manifest schema is strictly validated (`MAX_PATTERN_LENGTH = 500`, valid selectors, non-empty create/delete operations, no duplicate delete IDs).
-- In dry-run mode:
-  1. Opens target database read-only with `migrate: false`.
-  2. Verifies that all rules in `deleteRuleIds` exist in the target database.
-  3. Previews operations and guarantees zero mutations.
-- In `--apply` mode:
-  1. The target backup file `--backup <backup-path>` must not already exist (refuses overwrite).
-  2. Opens source database read-only with `migrate: false` to create a pre-migration backup via `await sourceDb.backup(backupPath)`.
-  3. Verifies backup file integrity via `PRAGMA integrity_check;`.
-  4. Opens target database with `migrate: true` to run pending migrations and execute consolidation inside a single atomic SQLite transaction.
-  5. Records explicit `classification_revisions` audit records for every mutation.
+- **Strict Manifest Schema Validation**:
+  - Top-level keys restricted to `createRules` and `deleteRuleIds`; unknown keys are rejected.
+  - Create-rule keys restricted to `id`, `name`, `classification`, `selectorType`, `selectorValue`, `matchMode`, `priority`, `enabled`, and `timesheetCode`; unknown keys are rejected.
+  - Supplied `id` must be a non-empty string.
+  - Supplied `timesheetCode` must be string or null (empty string normalizes to null).
+  - Duplicate explicit create IDs are rejected.
+  - Any explicit create ID also present in `deleteRuleIds` is rejected.
+  - Duplicate delete IDs are rejected; non-empty strings required.
+  - Pattern length bound enforced: `MAX_PATTERN_LENGTH = 500`.
+- **Truly Read-Only Preflight**:
+  - In **both dry-run and apply** modes, a strictly non-mutating preflight connection (`readonly: true, migrate: false, wal: false`) inspects the target database before any backup or migration.
+  - Safe on databases in any journal mode (including `DELETE` journal mode); read-only connections never attempt `PRAGMA journal_mode = WAL` or header mutations.
+  - Verifies that all rules in `deleteRuleIds` exist in the target database.
+  - Verifies that every explicit create ID in `createRules` does not already exist in the target database.
+  - If preflight fails in `--apply` mode against a pre-004 database, zero side effects occur: the target remains pre-004 and no backup file is created.
+- **Apply Protocol**:
+  1. Complete target preflight succeeds read-only.
+  2. The target backup file `--backup <backup-path>` must not already exist (refuses overwrite).
+  3. Opens source database read-only (`readonly: true, migrate: false, wal: false`) to capture a genuine pre-migration backup via `await sourceDb.backup(backupPath)`.
+  4. Verifies backup file integrity via `PRAGMA integrity_check;`.
+  5. Opens target database with `migrate: true` to run pending migrations (advancing to schema 004).
+  6. Executes all rule deletions and creations inside a single atomic SQLite transaction via `consolidateRules`.
+  7. Records append-only `classification_revisions` audit records for every mutation.

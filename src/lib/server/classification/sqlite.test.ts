@@ -355,6 +355,55 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
     expect(row.selector_value).toBe('dev-laptop-01');
   });
 
+  it('rejects selectorValue > MAX_PATTERN_LENGTH at service boundary in createRule and updateRule', () => {
+    const longPattern = 'a'.repeat(501);
+
+    // createRule service boundary check
+    expect(() => {
+      service.createRule(
+        {
+          name: 'Long Pattern Rule',
+          classification: 'work',
+          selectorType: 'folder_prefix',
+          selectorValue: longPattern
+        },
+        { expectedDigest: 'dummy-digest' }
+      );
+    }).toThrow(/Pattern length 501 exceeds limit of 500/);
+
+    // Create an initial valid rule
+    const preview = service.previewRuleChange({
+      type: 'create',
+      rule: {
+        name: 'Valid Rule for Update',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'proj-one'
+      }
+    });
+    const { rule: created } = service.createRule(
+      {
+        id: preview.proposedRuleId,
+        name: 'Valid Rule for Update',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'proj-one'
+      },
+      { expectedDigest: preview.previewDigest }
+    );
+
+    // updateRule service boundary check
+    expect(() => {
+      service.updateRule(
+        created.id,
+        {
+          selectorValue: longPattern
+        },
+        { expectedDigest: 'dummy-digest' }
+      );
+    }).toThrow(/Pattern length 501 exceeds limit of 500/);
+  });
+
   it('supports full lifecycle (create, update, delete) with revisions and preview digests', () => {
     // 1. Create
     const createPrev = service.previewRuleChange({
@@ -910,7 +959,7 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
       );
     }).toThrow(StalePreviewError);
 
-    // 5. Deleting a slice and reinserting causes StalePreviewError
+    // 5. Deleting a slice and reinserting causes StalePreviewError (isolating row identity churn)
     const previewReinsert = service.previewRuleChange({
       type: 'create',
       rule: {
@@ -923,11 +972,26 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
     });
 
     const deletedSliceRow = db.prepare('SELECT * FROM day_project_entity_slices LIMIT 1').get() as any;
+    const deletedIdentities = db
+      .prepare('SELECT selector_type, value FROM slice_identities WHERE slice_id = ?')
+      .all(deletedSliceRow.id) as Array<{ selector_type: string; value: string }>;
+
     db.prepare('DELETE FROM day_project_entity_slices WHERE id = ?').run(deletedSliceRow.id);
-    const keys = Object.keys(deletedSliceRow);
+
+    // Reinsert slice with identical duration, project, entity, date, but new slice id
+    const maxIdRow = db.prepare('SELECT COALESCE(MAX(id), 0) AS maxId FROM day_project_entity_slices').get() as { maxId: number };
+    const newSliceId = maxIdRow.maxId + 1000;
+    const newSliceRow = { ...deletedSliceRow, id: newSliceId };
+    const keys = Object.keys(newSliceRow);
     const placeholders = keys.map(() => '?').join(', ');
-    const vals = keys.map((k) => (k === 'total_seconds' ? deletedSliceRow[k] + 10 : deletedSliceRow[k]));
+    const vals = keys.map((k) => newSliceRow[k]);
     db.prepare(`INSERT INTO day_project_entity_slices (${keys.join(', ')}) VALUES (${placeholders})`).run(...vals);
+
+    // Reinsert relevant identities under the new slice id
+    const insertIdent = db.prepare('INSERT INTO slice_identities (slice_id, selector_type, value) VALUES (?, ?, ?)');
+    for (const ident of deletedIdentities) {
+      insertIdent.run(newSliceId, ident.selector_type, ident.value);
+    }
     service.invalidateIdentityCaches();
 
     expect(() => {

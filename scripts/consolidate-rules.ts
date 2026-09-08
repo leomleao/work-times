@@ -98,12 +98,31 @@ export function parseArguments(argv: readonly string[]): CliArgs {
   return args;
 }
 
+const ALLOWED_TOP_LEVEL_KEYS = new Set(['createRules', 'deleteRuleIds']);
+const ALLOWED_CREATE_RULE_KEYS = new Set([
+  'id',
+  'name',
+  'classification',
+  'selectorType',
+  'selectorValue',
+  'matchMode',
+  'priority',
+  'enabled',
+  'timesheetCode'
+]);
+
 export function validateManifest(raw: unknown): ConsolidationManifest {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Manifest must be a JSON object');
   }
 
   const obj = raw as Record<string, unknown>;
+
+  for (const key of Object.keys(obj)) {
+    if (!ALLOWED_TOP_LEVEL_KEYS.has(key)) {
+      throw new Error(`Manifest contains unknown top-level key: '${key}'`);
+    }
+  }
 
   const hasCreate = Array.isArray(obj.createRules) && obj.createRules.length > 0;
   const hasDelete = Array.isArray(obj.deleteRuleIds) && obj.deleteRuleIds.length > 0;
@@ -119,11 +138,32 @@ export function validateManifest(raw: unknown): ConsolidationManifest {
       throw new Error('Manifest createRules must be an array');
     }
     result.createRules = [];
+    const seenCreateIds = new Set<string>();
+
     for (const [idx, item] of obj.createRules.entries()) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) {
         throw new Error(`createRules[${idx}] must be an object`);
       }
       const r = item as Record<string, unknown>;
+
+      for (const key of Object.keys(r)) {
+        if (!ALLOWED_CREATE_RULE_KEYS.has(key)) {
+          throw new Error(`createRules[${idx}] contains unknown key: '${key}'`);
+        }
+      }
+
+      let id: string | undefined = undefined;
+      if ('id' in r && r.id !== undefined) {
+        if (typeof r.id !== 'string' || r.id.trim().length === 0) {
+          throw new Error(`createRules[${idx}].id must be a non-empty string if supplied`);
+        }
+        id = r.id.trim();
+        if (seenCreateIds.has(id)) {
+          throw new Error(`Duplicate rule ID in createRules: '${id}'`);
+        }
+        seenCreateIds.add(id);
+      }
+
       const name = typeof r.name === 'string' ? r.name.trim() : '';
       if (!name) {
         throw new Error(`createRules[${idx}].name cannot be empty`);
@@ -173,12 +213,13 @@ export function validateManifest(raw: unknown): ConsolidationManifest {
         enabled = r.enabled;
       }
 
-      const timesheetCode =
-        typeof r.timesheetCode === 'string' && r.timesheetCode.trim().length > 0
-          ? r.timesheetCode.trim()
-          : null;
-
-      const id = typeof r.id === 'string' && r.id.trim().length > 0 ? r.id.trim() : undefined;
+      let timesheetCode: string | null = null;
+      if ('timesheetCode' in r && r.timesheetCode !== undefined && r.timesheetCode !== null) {
+        if (typeof r.timesheetCode !== 'string') {
+          throw new Error(`createRules[${idx}].timesheetCode must be a string or null`);
+        }
+        timesheetCode = r.timesheetCode.trim().length > 0 ? r.timesheetCode.trim() : null;
+      }
 
       result.createRules.push({
         id,
@@ -213,7 +254,62 @@ export function validateManifest(raw: unknown): ConsolidationManifest {
     }
   }
 
+  // Reject any explicit create ID also present in deleteRuleIds
+  if (result.createRules && result.deleteRuleIds) {
+    const deleteSet = new Set(result.deleteRuleIds);
+    for (const cr of result.createRules) {
+      if (cr.id && deleteSet.has(cr.id)) {
+        throw new Error(`Rule ID '${cr.id}' cannot be present in both createRules and deleteRuleIds`);
+      }
+    }
+  }
+
   return result;
+}
+
+export function preflightTargetConflicts(
+  targetDbPath: string,
+  manifest: ConsolidationManifest
+): void {
+  const targetDb = openDatabase({
+    path: targetDbPath,
+    readonly: true,
+    migrate: false,
+    wal: false
+  });
+  try {
+    if (manifest.deleteRuleIds && manifest.deleteRuleIds.length > 0) {
+      const findRule = targetDb.prepare(
+        'SELECT id FROM classification_rules WHERE id = ?'
+      );
+      for (const id of manifest.deleteRuleIds) {
+        const row = findRule.get(id);
+        if (!row) {
+          throw new Error(
+            `Rule '${id}' specified in deleteRuleIds does not exist in target database`
+          );
+        }
+      }
+    }
+
+    if (manifest.createRules && manifest.createRules.length > 0) {
+      const findRule = targetDb.prepare(
+        'SELECT id FROM classification_rules WHERE id = ?'
+      );
+      for (const rule of manifest.createRules) {
+        if (rule.id) {
+          const row = findRule.get(rule.id);
+          if (row) {
+            throw new Error(
+              `Rule ID '${rule.id}' specified in createRules already exists in target database`
+            );
+          }
+        }
+      }
+    }
+  } finally {
+    targetDb.close();
+  }
 }
 
 export async function executeConsolidationCli(args: CliArgs): Promise<void> {
@@ -255,28 +351,13 @@ export async function executeConsolidationCli(args: CliArgs): Promise<void> {
     `Operations: ${createCount} rule(s) to create, ${deleteCount} rule(s) to retire\n`
   );
 
+  // Preflight target-dependent conflicts read-only BEFORE any backup or migration in BOTH dry-run and apply
+  preflightTargetConflicts(resolvedDbPath, manifest);
+
   if (!args.apply) {
     process.stdout.write(
       '\n[DRY-RUN] Preview mode. No changes written. To apply changes, rerun with --apply --backup <backup-path>.\n'
     );
-
-    // Read-only inspection without running migrations
-    const targetDb = openDatabase({ path: resolvedDbPath, readonly: true, migrate: false });
-    try {
-      if (deleteCount > 0) {
-        const findRule = targetDb.prepare(
-          'SELECT id, name, classification, selector_type, selector_value FROM classification_rules WHERE id = ?'
-        );
-        for (const id of manifest.deleteRuleIds ?? []) {
-          const row = findRule.get(id);
-          if (!row) {
-            throw new Error(`Rule '${id}' specified in deleteRuleIds does not exist in target database`);
-          }
-        }
-      }
-    } finally {
-      targetDb.close();
-    }
 
     if (createCount > 0) {
       process.stdout.write('\nRules to create:\n');
@@ -307,7 +388,7 @@ export async function executeConsolidationCli(args: CliArgs): Promise<void> {
 
   process.stdout.write(`Creating pre-apply backup at ${resolvedBackupPath}...\n`);
   // Open source read-only WITHOUT migrating so the backup captures genuine pre-apply state
-  const sourceDb = openDatabase({ path: resolvedDbPath, readonly: true, migrate: false });
+  const sourceDb = openDatabase({ path: resolvedDbPath, readonly: true, migrate: false, wal: false });
   try {
     await sourceDb.backup(resolvedBackupPath);
     process.stdout.write('Pre-apply backup created successfully.\n');
@@ -317,7 +398,7 @@ export async function executeConsolidationCli(args: CliArgs): Promise<void> {
 
   // Verify backup integrity
   process.stdout.write('Verifying backup database integrity...\n');
-  const backupDb = openDatabase({ path: resolvedBackupPath, readonly: true, migrate: false });
+  const backupDb = openDatabase({ path: resolvedBackupPath, readonly: true, migrate: false, wal: false });
   try {
     const integrityRows = backupDb.pragma('integrity_check') as Array<{ integrity_check: string }>;
     if (!integrityRows.length || integrityRows[0].integrity_check !== 'ok') {

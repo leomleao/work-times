@@ -140,6 +140,160 @@ describe('Consolidate Rules CLI (scripts/consolidate-rules.ts)', () => {
       ).toThrow("matchMode must be 'exact' or 'glob'");
     });
 
+    it('rejects unknown top-level keys', () => {
+      expect(() =>
+        validateManifest({
+          createRules: [{ name: 'A', classification: 'work', selectorType: 'project', selectorValue: 'a' }],
+          unknownTopLevel: true
+        })
+      ).toThrow("Manifest contains unknown top-level key: 'unknownTopLevel'");
+    });
+
+    it('rejects unknown create-rule keys', () => {
+      expect(() =>
+        validateManifest({
+          createRules: [
+            {
+              name: 'A',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'a',
+              extraBogusField: 123
+            }
+          ]
+        })
+      ).toThrow("createRules[0] contains unknown key: 'extraBogusField'");
+    });
+
+    it('rejects supplied id unless it is a non-empty string', () => {
+      expect(() =>
+        validateManifest({
+          createRules: [
+            {
+              id: '',
+              name: 'A',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'a'
+            }
+          ]
+        })
+      ).toThrow('createRules[0].id must be a non-empty string if supplied');
+
+      expect(() =>
+        validateManifest({
+          createRules: [
+            {
+              id: '   ',
+              name: 'A',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'a'
+            }
+          ]
+        })
+      ).toThrow('createRules[0].id must be a non-empty string if supplied');
+
+      expect(() =>
+        validateManifest({
+          createRules: [
+            {
+              id: 12345 as any,
+              name: 'A',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'a'
+            }
+          ]
+        })
+      ).toThrow('createRules[0].id must be a non-empty string if supplied');
+    });
+
+    it('rejects supplied timesheetCode unless string or null', () => {
+      expect(() =>
+        validateManifest({
+          createRules: [
+            {
+              name: 'A',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'a',
+              timesheetCode: 12345 as any
+            }
+          ]
+        })
+      ).toThrow('createRules[0].timesheetCode must be a string or null');
+
+      const normalized = validateManifest({
+        createRules: [
+          {
+            name: 'A',
+            classification: 'work',
+            selectorType: 'project',
+            selectorValue: 'a',
+            timesheetCode: '   '
+          },
+          {
+            name: 'B',
+            classification: 'work',
+            selectorType: 'project',
+            selectorValue: 'b',
+            timesheetCode: null
+          },
+          {
+            name: 'C',
+            classification: 'work',
+            selectorType: 'project',
+            selectorValue: 'c',
+            timesheetCode: 'CODE-123'
+          }
+        ]
+      });
+      expect(normalized.createRules![0].timesheetCode).toBeNull();
+      expect(normalized.createRules![1].timesheetCode).toBeNull();
+      expect(normalized.createRules![2].timesheetCode).toBe('CODE-123');
+    });
+
+    it('rejects duplicate explicit create IDs', () => {
+      expect(() =>
+        validateManifest({
+          createRules: [
+            {
+              id: 'rule-dup',
+              name: 'Rule 1',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'proj-1'
+            },
+            {
+              id: 'rule-dup',
+              name: 'Rule 2',
+              classification: 'personal',
+              selectorType: 'project',
+              selectorValue: 'proj-2'
+            }
+          ]
+        })
+      ).toThrow("Duplicate rule ID in createRules: 'rule-dup'");
+    });
+
+    it('rejects any explicit create ID that is also present in deleteRuleIds', () => {
+      expect(() =>
+        validateManifest({
+          createRules: [
+            {
+              id: 'rule-overlap',
+              name: 'Rule Create',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'proj-1'
+            }
+          ],
+          deleteRuleIds: ['rule-overlap']
+        })
+      ).toThrow("Rule ID 'rule-overlap' cannot be present in both createRules and deleteRuleIds");
+    });
+
     it('accepts and normalizes valid manifests with createRules and deleteRuleIds', () => {
       const parsed = validateManifest({
         createRules: [
@@ -232,6 +386,85 @@ describe('Consolidate Rules CLI (scripts/consolidate-rules.ts)', () => {
           backupPath: null
         })
       ).rejects.toThrow("Rule 'non-existent-rule-id' specified in deleteRuleIds does not exist in target database");
+    });
+
+    it('is safe on databases in DELETE journal mode, leaving journal mode and SHA-256 unchanged', async () => {
+      const dbPath = join(tempDir, 'dryrun-delete-journal.sqlite');
+      const manifestPath = join(tempDir, 'manifest.json');
+
+      const db = openDatabase({ path: dbPath, migrate: true });
+      db.pragma('journal_mode = DELETE');
+      const [jmRow] = db.pragma('journal_mode') as Array<{ journal_mode: string }>;
+      expect(jmRow.journal_mode.toLowerCase()).toBe('delete');
+
+      db.prepare(
+        `INSERT INTO classification_rules (id, name, classification, selector_type, selector_value, match_mode, priority, enabled)
+         VALUES ('del-mode-rule', 'Old Rule', 'work', 'project', 'old-proj', 'exact', 0, 1)`
+      ).run();
+      db.close();
+
+      const initialHash = computeFileSha256(dbPath);
+
+      const manifestContent = JSON.stringify({
+        createRules: [
+          {
+            name: 'New Rule',
+            classification: 'work',
+            selectorType: 'project',
+            selectorValue: 'new-proj'
+          }
+        ],
+        deleteRuleIds: ['del-mode-rule']
+      });
+      writeFileSync(manifestPath, manifestContent, 'utf8');
+
+      await executeConsolidationCli({
+        dbPath,
+        manifestPath,
+        apply: false,
+        backupPath: null
+      });
+
+      // Target database SHA-256 and DELETE journal mode must remain unchanged
+      expect(computeFileSha256(dbPath)).toBe(initialHash);
+      const verifyDb = openDatabase({ path: dbPath, readonly: true, migrate: false, wal: false });
+      const [postJmRow] = verifyDb.pragma('journal_mode') as Array<{ journal_mode: string }>;
+      expect(postJmRow.journal_mode.toLowerCase()).toBe('delete');
+      verifyDb.close();
+    });
+
+    it('fails dry-run when an explicit create ID already exists in target database', async () => {
+      const dbPath = join(tempDir, 'dryrun-create-exists.sqlite');
+      const manifestPath = join(tempDir, 'manifest.json');
+
+      const db = openDatabase({ path: dbPath, migrate: true });
+      db.prepare(
+        `INSERT INTO classification_rules (id, name, classification, selector_type, selector_value, match_mode, priority, enabled)
+         VALUES ('pre-existing-id', 'Existing Rule', 'work', 'project', 'proj', 'exact', 0, 1)`
+      ).run();
+      db.close();
+
+      const manifestContent = JSON.stringify({
+        createRules: [
+          {
+            id: 'pre-existing-id',
+            name: 'Conflict Rule',
+            classification: 'personal',
+            selectorType: 'project',
+            selectorValue: 'other-proj'
+          }
+        ]
+      });
+      writeFileSync(manifestPath, manifestContent, 'utf8');
+
+      await expect(
+        executeConsolidationCli({
+          dbPath,
+          manifestPath,
+          apply: false,
+          backupPath: null
+        })
+      ).rejects.toThrow("Rule ID 'pre-existing-id' specified in createRules already exists in target database");
     });
   });
 
@@ -409,6 +642,142 @@ describe('Consolidate Rules CLI (scripts/consolidate-rules.ts)', () => {
           backupPath
         })
       ).rejects.toThrow(`Backup file already exists at ${backupPath}. Refusing to overwrite.`);
+    });
+
+    it('is safe on databases in DELETE journal mode for pre-apply backup reads without requesting journal transition', async () => {
+      const dbPath = join(tempDir, 'apply-delete-mode.sqlite');
+      const backupPath = join(tempDir, 'apply-delete-backup.sqlite');
+      const manifestPath = join(tempDir, 'manifest.json');
+
+      const db = openDatabase({ path: dbPath, migrate: true });
+      db.pragma('journal_mode = DELETE');
+      db.prepare(
+        `INSERT INTO classification_rules (id, name, classification, selector_type, selector_value, match_mode, priority, enabled)
+         VALUES ('del-journal-rule', 'Old Rule', 'work', 'project', 'old-proj', 'exact', 0, 1)`
+      ).run();
+      db.close();
+
+      const manifestContent = JSON.stringify({
+        createRules: [
+          {
+            name: 'New Rule',
+            classification: 'work',
+            selectorType: 'project',
+            selectorValue: 'new-proj'
+          }
+        ],
+        deleteRuleIds: ['del-journal-rule']
+      });
+      writeFileSync(manifestPath, manifestContent, 'utf8');
+
+      await executeConsolidationCli({
+        dbPath,
+        manifestPath,
+        apply: true,
+        backupPath
+      });
+
+      expect(existsSync(backupPath)).toBe(true);
+      const backupDb = openDatabase({ path: backupPath, readonly: true, migrate: false, wal: false });
+      const [backupJm] = backupDb.pragma('journal_mode') as Array<{ journal_mode: string }>;
+      expect(backupJm.journal_mode.toLowerCase()).toBe('delete');
+      backupDb.close();
+    });
+
+    it('preflights conflicts before backup or migration: invalid delete ID leaves pre-004 target un-migrated with no backup file', async () => {
+      const dbPath = join(tempDir, 'preflight-fail-delete.sqlite');
+      const backupPath = join(tempDir, 'should-not-exist-backup.sqlite');
+      const manifestPath = join(tempDir, 'manifest.json');
+
+      // Scaffold pre-004 database
+      const pre004MigrationsDir = join(tempDir, 'pre004-del');
+      mkdirSync(pre004MigrationsDir, { recursive: true });
+      const repoMigrationsDir = join(process.cwd(), 'migrations');
+      copyFileSync(join(repoMigrationsDir, '001-import-schema.sql'), join(pre004MigrationsDir, '001-import-schema.sql'));
+      copyFileSync(join(repoMigrationsDir, '002-application-state.sql'), join(pre004MigrationsDir, '002-application-state.sql'));
+      copyFileSync(join(repoMigrationsDir, '003-wakatime-oauth.sql'), join(pre004MigrationsDir, '003-wakatime-oauth.sql'));
+
+      const preDb = openDatabase({ path: dbPath, migrate: true, migrationsDir: pre004MigrationsDir });
+      preDb.close();
+
+      const manifestContent = JSON.stringify({
+        deleteRuleIds: ['non-existent-rule-id']
+      });
+      writeFileSync(manifestPath, manifestContent, 'utf8');
+
+      await expect(
+        executeConsolidationCli({
+          dbPath,
+          manifestPath,
+          apply: true,
+          backupPath
+        })
+      ).rejects.toThrow("Rule 'non-existent-rule-id' specified in deleteRuleIds does not exist in target database");
+
+      // Invariant: no backup file is created
+      expect(existsSync(backupPath)).toBe(false);
+
+      // Invariant: target DB remains at migration 003 (pre-004)
+      const targetDb = openDatabase({ path: dbPath, readonly: true, migrate: false, wal: false });
+      const migrations = targetDb.prepare('SELECT filename FROM schema_migrations').all() as Array<{ filename: string }>;
+      expect(migrations.map((m) => m.filename)).not.toContain('004-classification-rules-match-mode.sql');
+      const cols = targetDb.prepare("PRAGMA table_info('classification_rules')").all() as Array<{ name: string }>;
+      expect(cols.some((c) => c.name === 'match_mode')).toBe(false);
+      targetDb.close();
+    });
+
+    it('preflights conflicts before backup or migration: conflicting create ID leaves pre-004 target un-migrated with no backup file', async () => {
+      const dbPath = join(tempDir, 'preflight-fail-create.sqlite');
+      const backupPath = join(tempDir, 'should-not-exist-create-backup.sqlite');
+      const manifestPath = join(tempDir, 'manifest.json');
+
+      // Scaffold pre-004 database with an existing rule
+      const pre004MigrationsDir = join(tempDir, 'pre004-create');
+      mkdirSync(pre004MigrationsDir, { recursive: true });
+      const repoMigrationsDir = join(process.cwd(), 'migrations');
+      copyFileSync(join(repoMigrationsDir, '001-import-schema.sql'), join(pre004MigrationsDir, '001-import-schema.sql'));
+      copyFileSync(join(repoMigrationsDir, '002-application-state.sql'), join(pre004MigrationsDir, '002-application-state.sql'));
+      copyFileSync(join(repoMigrationsDir, '003-wakatime-oauth.sql'), join(pre004MigrationsDir, '003-wakatime-oauth.sql'));
+
+      const preDb = openDatabase({ path: dbPath, migrate: true, migrationsDir: pre004MigrationsDir });
+      preDb.prepare(
+        `INSERT INTO classification_rules (id, name, classification, selector_type, selector_value, priority, enabled)
+         VALUES ('existing-id-123', 'Existing', 'work', 'project', 'proj', 0, 1)`
+      ).run();
+      preDb.close();
+
+      const manifestContent = JSON.stringify({
+        createRules: [
+          {
+            id: 'existing-id-123',
+            name: 'Conflict Create Rule',
+            classification: 'personal',
+            selectorType: 'project',
+            selectorValue: 'other-proj'
+          }
+        ]
+      });
+      writeFileSync(manifestPath, manifestContent, 'utf8');
+
+      await expect(
+        executeConsolidationCli({
+          dbPath,
+          manifestPath,
+          apply: true,
+          backupPath
+        })
+      ).rejects.toThrow("Rule ID 'existing-id-123' specified in createRules already exists in target database");
+
+      // Invariant: no backup file is created
+      expect(existsSync(backupPath)).toBe(false);
+
+      // Invariant: target DB remains at migration 003 (pre-004)
+      const targetDb = openDatabase({ path: dbPath, readonly: true, migrate: false, wal: false });
+      const migrations = targetDb.prepare('SELECT filename FROM schema_migrations').all() as Array<{ filename: string }>;
+      expect(migrations.map((m) => m.filename)).not.toContain('004-classification-rules-match-mode.sql');
+      const cols = targetDb.prepare("PRAGMA table_info('classification_rules')").all() as Array<{ name: string }>;
+      expect(cols.some((c) => c.name === 'match_mode')).toBe(false);
+      targetDb.close();
     });
   });
 });
