@@ -1,11 +1,14 @@
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import {
   classifySlice,
   type ClassifiableSlice,
   type Classification,
   type ClassificationDecision,
   type ClassificationRule,
+  type MatchMode,
+  MATCH_MODES,
   type RuleClassification,
   type SelectorType,
   normalizeSelectorValue,
@@ -46,6 +49,7 @@ export interface ClassificationRuleRecord {
   classification: RuleClassification;
   selector_type: SelectorType;
   selector_value: string;
+  match_mode: MatchMode;
   display_value?: string;
   priority: number;
   enabled: boolean;
@@ -114,6 +118,16 @@ export interface ShiftedSeconds {
   };
 }
 
+export interface PreviewSampleSlice {
+  id: number;
+  date: string;
+  projectId: number;
+  projectName: string | null;
+  entity: string;
+  before: { classification: Classification; source: string; winningRuleId: string | null };
+  after: { classification: Classification; source: string; winningRuleId: string | null };
+}
+
 export interface RulePreviewResult {
   previewRevision: number;
   previewDigest: string;
@@ -121,6 +135,15 @@ export interface RulePreviewResult {
   affectedDates: string[];
   shiftedSeconds: ShiftedSeconds;
   proposedRuleId?: string;
+  matchedBeforeCount: number;
+  matchedAfterCount: number;
+  classificationChangedCount: number;
+  sourceChangedCount: number;
+  ambiguityTransitions: {
+    toAmbiguous: number;
+    fromAmbiguous: number;
+  };
+  sampleSlices: PreviewSampleSlice[];
 }
 
 export interface CreateRuleInput {
@@ -129,6 +152,7 @@ export interface CreateRuleInput {
   classification: RuleClassification;
   selectorType: SelectorType;
   selectorValue: string;
+  matchMode?: MatchMode;
   priority?: number;
   enabled?: boolean;
   timesheetCode?: string | null;
@@ -139,6 +163,7 @@ export interface UpdateRuleInput {
   classification?: RuleClassification;
   selectorType?: SelectorType;
   selectorValue?: string;
+  matchMode?: MatchMode;
   priority?: number;
   enabled?: boolean;
   timesheetCode?: string | null;
@@ -158,6 +183,7 @@ export type NormalizedRuleOperation =
         classification: RuleClassification;
         selectorType: SelectorType;
         selectorValue: string;
+        matchMode: MatchMode;
         priority: number;
         enabled: boolean;
         timesheetCode: string | null;
@@ -171,6 +197,7 @@ export type NormalizedRuleOperation =
         classification?: RuleClassification;
         selectorType?: SelectorType;
         selectorValue?: string;
+        matchMode?: MatchMode;
         priority?: number;
         enabled?: boolean;
         timesheetCode?: string | null;
@@ -220,6 +247,7 @@ export interface ClassificationCoverage {
 export interface UnclassifiedSuggestion {
   selectorType: SelectorType;
   selectorValue: string;
+  matchMode?: MatchMode;
   displayValue: string;
   specificity: number;
   unclassifiedSeconds: number;
@@ -244,6 +272,7 @@ function canonicalOperationKey(op: NormalizedRuleOperation): string {
         classification: op.rule.classification,
         selectorType: op.rule.selectorType,
         selectorValue: op.rule.selectorValue,
+        matchMode: op.rule.matchMode,
         priority: op.rule.priority,
         enabled: op.rule.enabled,
         timesheetCode: op.rule.timesheetCode ?? null
@@ -258,6 +287,7 @@ function canonicalOperationKey(op: NormalizedRuleOperation): string {
         classification: op.rule.classification ?? null,
         selectorType: op.rule.selectorType ?? null,
         selectorValue: op.rule.selectorValue ?? null,
+        matchMode: op.rule.matchMode ?? null,
         priority: op.rule.priority !== undefined ? op.rule.priority : null,
         enabled: op.rule.enabled !== undefined ? op.rule.enabled : null,
         timesheetCode: op.rule.timesheetCode ?? null
@@ -271,6 +301,33 @@ function canonicalOperationKey(op: NormalizedRuleOperation): string {
   }
 }
 
+export function computeCanonicalTelemetryDigest(
+  db: Database.Database,
+  classification: SqliteClassificationService
+): string {
+  classification.invalidateIdentityCaches();
+  const rawSlices = classification.loadSlicesWithContext();
+
+  const hasher = createHash('sha256');
+  // Ordered by date ASC, id ASC
+  for (const s of rawSlices) {
+    const canonicalEntry = JSON.stringify([
+      s.id,
+      s.date,
+      s.projectId,
+      s.projectName,
+      Boolean(s.isUnattributed), // Includes project-level unattributed state
+      s.entityType,
+      s.entity,
+      s.totalSeconds,
+      s.classifiableSlice.machineIds, // Ordered resolved machine candidates
+      s.classifiableSlice.editors     // Ordered resolved editor candidates
+    ]);
+    hasher.update(canonicalEntry);
+  }
+  return hasher.digest('hex');
+}
+
 export class SqliteClassificationService {
   private machineNameMap: Map<string, string> | null = null;
   private readonly editorNameMap = new Map<string, string>();
@@ -279,6 +336,10 @@ export class SqliteClassificationService {
 
   clearCaches(): void {
     this.machineNameMap = null;
+  }
+
+  invalidateIdentityCaches(): void {
+    this.clearCaches();
   }
 
   getMachineNameMap(): Map<string, string> {
@@ -330,7 +391,7 @@ export class SqliteClassificationService {
 
   getRules(filter?: { enabledOnly?: boolean }): ClassificationRuleRecord[] {
     let sql = `
-      SELECT id, name, classification, selector_type, selector_value,
+      SELECT id, name, classification, selector_type, selector_value, match_mode,
              priority, enabled, timesheet_code, created_at, updated_at
       FROM classification_rules
     `;
@@ -345,6 +406,7 @@ export class SqliteClassificationService {
       classification: RuleClassification;
       selector_type: SelectorType;
       selector_value: string;
+      match_mode: MatchMode;
       priority: number;
       enabled: number;
       timesheet_code: string | null;
@@ -370,7 +432,7 @@ export class SqliteClassificationService {
   getRule(id: string): ClassificationRuleRecord | null {
     const row = this.db
       .prepare(
-        `SELECT id, name, classification, selector_type, selector_value,
+        `SELECT id, name, classification, selector_type, selector_value, match_mode,
                 priority, enabled, timesheet_code, created_at, updated_at
          FROM classification_rules WHERE id = ?`
       )
@@ -381,6 +443,7 @@ export class SqliteClassificationService {
           classification: RuleClassification;
           selector_type: SelectorType;
           selector_value: string;
+          match_mode: MatchMode;
           priority: number;
           enabled: number;
           timesheet_code: string | null;
@@ -471,19 +534,22 @@ export class SqliteClassificationService {
 
     const rules = this.db
       .prepare(
-        'SELECT id, updated_at, enabled, priority, classification, selector_type, selector_value FROM classification_rules ORDER BY id ASC'
+        'SELECT id, name, classification, selector_type, selector_value, match_mode, priority, enabled, timesheet_code, updated_at FROM classification_rules ORDER BY id ASC'
       )
       .all();
     const allocations = this.db
       .prepare(
-        'SELECT id, updated_at, classification, allocated_seconds FROM daily_time_allocations ORDER BY id ASC'
+        'SELECT id, date, project_id, entity, classification, allocated_seconds, timesheet_code, updated_at FROM daily_time_allocations ORDER BY id ASC'
       )
       .all();
+
+    const canonicalDigest = computeCanonicalTelemetryDigest(this.db, this);
 
     const hash = createHash('sha256')
       .update(`rev:${revision}`)
       .update(JSON.stringify(rules))
       .update(JSON.stringify(allocations))
+      .update(canonicalDigest)
       .digest('hex');
 
     const digest = `${revision}:${hash}`;
@@ -525,6 +591,14 @@ export class SqliteClassificationService {
         throw new Error('Rule selector_value normalized to empty string');
       }
 
+      let matchMode: MatchMode = 'exact';
+      if (input.matchMode !== undefined) {
+        if (input.matchMode !== 'exact' && input.matchMode !== 'glob') {
+          throw new Error("Invalid matchMode, must be 'exact' or 'glob'");
+        }
+        matchMode = input.matchMode;
+      }
+
       return {
         type: 'create',
         rule: {
@@ -533,6 +607,7 @@ export class SqliteClassificationService {
           classification: input.classification,
           selectorType: input.selectorType,
           selectorValue: normalizedValue,
+          matchMode,
           priority: input.priority ?? 0,
           enabled: input.enabled !== false,
           timesheetCode: input.timesheetCode ? input.timesheetCode.trim() : null
@@ -583,6 +658,14 @@ export class SqliteClassificationService {
         }
       }
 
+      let matchMode = existing.match_mode;
+      if (input.matchMode !== undefined) {
+        if (input.matchMode !== 'exact' && input.matchMode !== 'glob') {
+          throw new Error("Invalid matchMode, must be 'exact' or 'glob'");
+        }
+        matchMode = input.matchMode;
+      }
+
       return {
         type: 'update',
         id: change.id,
@@ -591,6 +674,7 @@ export class SqliteClassificationService {
           classification,
           selectorType,
           selectorValue,
+          matchMode,
           priority: input.priority !== undefined ? input.priority : existing.priority,
           enabled: input.enabled !== undefined ? input.enabled : existing.enabled,
           timesheetCode:
@@ -632,6 +716,7 @@ export class SqliteClassificationService {
         classification: op.rule.classification,
         selectorType: op.rule.selectorType,
         selectorValue: op.rule.selectorValue,
+        matchMode: op.rule.matchMode,
         priority: op.rule.priority,
         enabled: op.rule.enabled,
         createdAt: now
@@ -643,6 +728,7 @@ export class SqliteClassificationService {
           classification: r.classification,
           selectorType: r.selector_type,
           selectorValue: r.selector_value,
+          matchMode: r.match_mode,
           priority: r.priority,
           enabled: r.enabled,
           createdAt: r.created_at
@@ -657,6 +743,7 @@ export class SqliteClassificationService {
             classification: op.rule.classification ?? r.classification,
             selectorType: op.rule.selectorType ?? r.selector_type,
             selectorValue: op.rule.selectorValue ?? r.selector_value,
+            matchMode: op.rule.matchMode ?? r.match_mode,
             priority: op.rule.priority ?? r.priority,
             enabled: op.rule.enabled ?? r.enabled,
             createdAt: r.created_at
@@ -667,6 +754,7 @@ export class SqliteClassificationService {
             classification: r.classification,
             selectorType: r.selector_type,
             selectorValue: r.selector_value,
+            matchMode: r.match_mode,
             priority: r.priority,
             enabled: r.enabled,
             createdAt: r.created_at
@@ -682,6 +770,7 @@ export class SqliteClassificationService {
             classification: r.classification,
             selectorType: r.selector_type,
             selectorValue: r.selector_value,
+            matchMode: r.match_mode,
             priority: r.priority,
             enabled: r.enabled,
             createdAt: r.created_at
@@ -695,6 +784,7 @@ export class SqliteClassificationService {
       classification: r.classification,
       selectorType: r.selector_type,
       selectorValue: r.selector_value,
+      matchMode: r.match_mode,
       priority: r.priority,
       enabled: r.enabled,
       createdAt: r.created_at
@@ -703,6 +793,14 @@ export class SqliteClassificationService {
     const rawSlices = this.loadSlicesWithContext();
     const affectedDatesSet = new Set<string>();
     let affectedSliceCount = 0;
+
+    let matchedBeforeCount = 0;
+    let matchedAfterCount = 0;
+    let classificationChangedCount = 0;
+    let sourceChangedCount = 0;
+    let toAmbiguous = 0;
+    let fromAmbiguous = 0;
+    const sampleSlices: PreviewSampleSlice[] = [];
 
     let workToPersonal = 0;
     let workToUnclassified = 0;
@@ -726,7 +824,28 @@ export class SqliteClassificationService {
       const beforeDecision = classifySlice(item.classifiableSlice, currentModelRules, override);
       const afterDecision = classifySlice(item.classifiableSlice, proposedModelRules, override);
 
-      if (beforeDecision.classification !== afterDecision.classification) {
+      const beforeRuleDecision = override
+        ? classifySlice(item.classifiableSlice, currentModelRules, null)
+        : beforeDecision;
+      const afterRuleDecision = override
+        ? classifySlice(item.classifiableSlice, proposedModelRules, null)
+        : afterDecision;
+
+      const beforeMatched =
+        beforeRuleDecision.source === 'rule' || beforeRuleDecision.source === 'ambiguous';
+      const afterMatched =
+        afterRuleDecision.source === 'rule' || afterRuleDecision.source === 'ambiguous';
+
+      if (beforeMatched) matchedBeforeCount++;
+      if (afterMatched) matchedAfterCount++;
+
+      const isClassificationChanged = beforeDecision.classification !== afterDecision.classification;
+      const isSourceChanged =
+        beforeDecision.source !== afterDecision.source ||
+        beforeDecision.winningRuleId !== afterDecision.winningRuleId;
+
+      if (isClassificationChanged) {
+        classificationChangedCount++;
         affectedSliceCount++;
         affectedDatesSet.add(item.date);
         const seconds = item.totalSeconds;
@@ -752,6 +871,38 @@ export class SqliteClassificationService {
         else if (before === 'unclassified' && after === 'personal')
           unclassifiedToPersonal += seconds;
       }
+
+      if (isSourceChanged) {
+        sourceChangedCount++;
+      }
+
+      if (beforeDecision.source !== 'ambiguous' && afterDecision.source === 'ambiguous') {
+        toAmbiguous++;
+      } else if (beforeDecision.source === 'ambiguous' && afterDecision.source !== 'ambiguous') {
+        fromAmbiguous++;
+      }
+
+      if (isClassificationChanged || isSourceChanged) {
+        if (sampleSlices.length < 5) {
+          sampleSlices.push({
+            id: item.id,
+            date: item.date,
+            projectId: item.projectId,
+            projectName: item.projectName,
+            entity: item.entity,
+            before: {
+              classification: beforeDecision.classification,
+              source: beforeDecision.source,
+              winningRuleId: beforeDecision.winningRuleId
+            },
+            after: {
+              classification: afterDecision.classification,
+              source: afterDecision.source,
+              winningRuleId: afterDecision.winningRuleId
+            }
+          });
+        }
+      }
     }
 
     const affectedDates = Array.from(affectedDatesSet).sort();
@@ -775,7 +926,16 @@ export class SqliteClassificationService {
           unclassified: roundSeconds(netUnclassified)
         }
       },
-      proposedRuleId
+      proposedRuleId,
+      matchedBeforeCount,
+      matchedAfterCount,
+      classificationChangedCount,
+      sourceChangedCount,
+      ambiguityTransitions: {
+        toAmbiguous,
+        fromAmbiguous
+      },
+      sampleSlices
     };
   }
 
@@ -797,9 +957,9 @@ export class SqliteClassificationService {
       this.db
         .prepare(
           `INSERT INTO classification_rules (
-            id, name, classification, selector_type, selector_value,
+            id, name, classification, selector_type, selector_value, match_mode,
             priority, enabled, timesheet_code, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           ruleId,
@@ -807,6 +967,7 @@ export class SqliteClassificationService {
           op.rule.classification,
           op.rule.selectorType,
           op.rule.selectorValue,
+          op.rule.matchMode,
           op.rule.priority,
           op.rule.enabled ? 1 : 0,
           op.rule.timesheetCode,
@@ -820,6 +981,7 @@ export class SqliteClassificationService {
         classification: op.rule.classification,
         selector_type: op.rule.selectorType,
         selector_value: op.rule.selectorValue,
+        match_mode: op.rule.matchMode,
         priority: op.rule.priority,
         enabled: op.rule.enabled,
         timesheet_code: op.rule.timesheetCode,
@@ -903,9 +1065,9 @@ export class SqliteClassificationService {
       this.db
         .prepare(
           `INSERT INTO classification_rules (
-            id, name, classification, selector_type, selector_value,
+            id, name, classification, selector_type, selector_value, match_mode,
             priority, enabled, timesheet_code, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           ruleId,
@@ -913,6 +1075,7 @@ export class SqliteClassificationService {
           op.rule.classification,
           op.rule.selectorType,
           op.rule.selectorValue,
+          op.rule.matchMode,
           op.rule.priority,
           op.rule.enabled ? 1 : 0,
           op.rule.timesheetCode,
@@ -926,6 +1089,7 @@ export class SqliteClassificationService {
         classification: op.rule.classification,
         selector_type: op.rule.selectorType,
         selector_value: op.rule.selectorValue,
+        match_mode: op.rule.matchMode,
         priority: op.rule.priority,
         enabled: op.rule.enabled,
         timesheet_code: op.rule.timesheetCode,
@@ -1022,6 +1186,7 @@ export class SqliteClassificationService {
         classification: op.rule.classification ?? existing.classification,
         selector_type: op.rule.selectorType ?? existing.selector_type,
         selector_value: op.rule.selectorValue ?? existing.selector_value,
+        match_mode: op.rule.matchMode ?? existing.match_mode,
         priority: op.rule.priority !== undefined ? op.rule.priority : existing.priority,
         enabled: op.rule.enabled !== undefined ? op.rule.enabled : existing.enabled,
         timesheet_code:
@@ -1033,7 +1198,7 @@ export class SqliteClassificationService {
       this.db
         .prepare(
           `UPDATE classification_rules
-           SET name = ?, classification = ?, selector_type = ?, selector_value = ?,
+           SET name = ?, classification = ?, selector_type = ?, selector_value = ?, match_mode = ?,
                priority = ?, enabled = ?, timesheet_code = ?, updated_at = ?
            WHERE id = ?`
         )
@@ -1042,6 +1207,7 @@ export class SqliteClassificationService {
           updated.classification,
           updated.selector_type,
           updated.selector_value,
+          updated.match_mode,
           updated.priority,
           updated.enabled ? 1 : 0,
           updated.timesheet_code,
@@ -1171,6 +1337,121 @@ export class SqliteClassificationService {
       };
 
       return { revision };
+    })();
+  }
+
+  consolidateRules(
+    batch: {
+      createRules?: CreateRuleInput[];
+      deleteRuleIds?: string[];
+    },
+    options?: { actor?: string }
+  ): { createdRuleIds: string[]; deletedRuleIds: string[]; revisionIds: number[] } {
+    const creates = batch.createRules ?? [];
+    const deletes = batch.deleteRuleIds ?? [];
+
+    return this.db.transaction(() => {
+      const createdRuleIds: string[] = [];
+      const deletedRuleIds: string[] = [];
+      const revisionIds: number[] = [];
+      const now = new Date().toISOString();
+      const actor = options?.actor ?? 'consolidation';
+
+      for (const input of creates) {
+        const op = this.normalizeRuleOperation({ type: 'create', rule: input });
+        if (op.type !== 'create') throw new Error('Expected create operation');
+        const ruleId = op.rule.id ?? `rule-${randomUUID()}`;
+
+        this.db
+          .prepare(
+            `INSERT INTO classification_rules (
+              id, name, classification, selector_type, selector_value, match_mode,
+              priority, enabled, timesheet_code, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            ruleId,
+            op.rule.name,
+            op.rule.classification,
+            op.rule.selectorType,
+            op.rule.selectorValue,
+            op.rule.matchMode,
+            op.rule.priority,
+            op.rule.enabled ? 1 : 0,
+            op.rule.timesheetCode,
+            now,
+            now
+          );
+
+        const createdRule: ClassificationRuleRecord = {
+          id: ruleId,
+          name: op.rule.name,
+          classification: op.rule.classification,
+          selector_type: op.rule.selectorType,
+          selector_value: op.rule.selectorValue,
+          match_mode: op.rule.matchMode,
+          priority: op.rule.priority,
+          enabled: op.rule.enabled,
+          timesheet_code: op.rule.timesheetCode,
+          created_at: now,
+          updated_at: now
+        };
+
+        const revStmt = this.db.prepare(
+          `INSERT INTO classification_revisions (
+            mutation_type, target_type, target_id,
+            before_json, after_json, affected_json,
+            actor, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+
+        const revRes = revStmt.run(
+          'rule_created',
+          'rule',
+          ruleId,
+          null,
+          JSON.stringify(createdRule),
+          null,
+          actor,
+          now
+        );
+
+        createdRuleIds.push(ruleId);
+        revisionIds.push(Number(revRes.lastInsertRowid));
+      }
+
+      for (const id of deletes) {
+        const existing = this.getRule(id);
+        if (!existing) {
+          throw new Error(`Rule '${id}' not found`);
+        }
+
+        this.db.prepare('DELETE FROM classification_rules WHERE id = ?').run(id);
+
+        const revStmt = this.db.prepare(
+          `INSERT INTO classification_revisions (
+            mutation_type, target_type, target_id,
+            before_json, after_json, affected_json,
+            actor, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+
+        const revRes = revStmt.run(
+          'rule_deleted',
+          'rule',
+          id,
+          JSON.stringify(existing),
+          null,
+          null,
+          actor,
+          now
+        );
+
+        deletedRuleIds.push(id);
+        revisionIds.push(Number(revRes.lastInsertRowid));
+      }
+
+      return { createdRuleIds, deletedRuleIds, revisionIds };
     })();
   }
 
@@ -1476,7 +1757,7 @@ export class SqliteClassificationService {
     })();
   }
 
-  private loadSlicesWithContext(filter?: {
+  loadSlicesWithContext(filter?: {
     date?: string;
     startDate?: string;
     endDate?: string;
@@ -1659,6 +1940,7 @@ export class SqliteClassificationService {
       classification: r.classification,
       selectorType: r.selector_type,
       selectorValue: r.selector_value,
+      matchMode: r.match_mode,
       priority: r.priority,
       enabled: r.enabled,
       createdAt: r.created_at
@@ -1718,44 +2000,39 @@ export class SqliteClassificationService {
     let workSeconds = 0;
     let personalSeconds = 0;
     let unclassifiedSeconds = 0;
+
     let workSlices = 0;
     let personalSlices = 0;
     let unclassifiedSlices = 0;
+
     const dates = new Set<string>();
 
-    for (const s of slices) {
-      totalSeconds += s.totalSeconds;
-      dates.add(s.date);
-      switch (s.decision.classification) {
-        case 'work':
-          workSeconds += s.totalSeconds;
-          workSlices++;
-          break;
-        case 'personal':
-          personalSeconds += s.totalSeconds;
-          personalSlices++;
-          break;
-        case 'unclassified':
-          unclassifiedSeconds += s.totalSeconds;
-          unclassifiedSlices++;
-          break;
+    for (const slice of slices) {
+      totalSeconds += slice.totalSeconds;
+      dates.add(slice.date);
+
+      if (slice.decision.classification === 'work') {
+        workSeconds += slice.totalSeconds;
+        workSlices++;
+      } else if (slice.decision.classification === 'personal') {
+        personalSeconds += slice.totalSeconds;
+        personalSlices++;
+      } else {
+        unclassifiedSeconds += slice.totalSeconds;
+        unclassifiedSlices++;
       }
     }
 
-    totalSeconds = roundSeconds(totalSeconds);
-    workSeconds = roundSeconds(workSeconds);
-    personalSeconds = roundSeconds(personalSeconds);
-    unclassifiedSeconds = roundSeconds(unclassifiedSeconds);
-    const classifiedSeconds = roundSeconds(workSeconds + personalSeconds);
+    const classifiedSeconds = workSeconds + personalSeconds;
     const coverageRatio = totalSeconds > 0 ? classifiedSeconds / totalSeconds : 1.0;
-    const coveragePercentage = roundSeconds(coverageRatio * 100);
+    const coveragePercentage = Math.round(coverageRatio * 10_000) / 100;
 
     return {
-      totalSeconds,
-      classifiedSeconds,
-      workSeconds,
-      personalSeconds,
-      unclassifiedSeconds,
+      totalSeconds: roundSeconds(totalSeconds),
+      classifiedSeconds: roundSeconds(classifiedSeconds),
+      workSeconds: roundSeconds(workSeconds),
+      personalSeconds: roundSeconds(personalSeconds),
+      unclassifiedSeconds: roundSeconds(unclassifiedSeconds),
       coverageRatio,
       coveragePercentage,
       totalSlices: slices.length,
@@ -1783,8 +2060,8 @@ export class SqliteClassificationService {
     interface CandidateGroup {
       selectorType: SelectorType;
       selectorValue: string;
-      unclassifiedSeconds: number;
-      slices: EvaluatedSlice[];
+      matchMode: MatchMode;
+      slices: Map<number, EvaluatedSlice>;
     }
 
     const candidateMap = new Map<string, CandidateGroup>();
@@ -1794,22 +2071,34 @@ export class SqliteClassificationService {
       value: string,
       slice: EvaluatedSlice
     ) => {
-      const normalizedValue = value.trim();
+      let normalizedValue = value.trim();
       if (!normalizedValue || normalizedValue === '__unattributed__') return;
 
-      const key = `${type}:${normalizedValue}`;
+      let matchMode: MatchMode = 'exact';
+      if (type === 'machine') {
+        const match = normalizedValue.match(/^(.*)\s+from\s+(\S+)$/);
+        if (match) {
+          const hostname = match[1].trim();
+          const ip = match[2].replace(/^\[|\]$/g, '');
+          if (hostname && isIP(ip) !== 0) {
+            normalizedValue = `${hostname}*`;
+            matchMode = 'glob';
+          }
+        }
+      }
+
+      const key = `${type}:${matchMode}:${normalizedValue}`;
       let entry = candidateMap.get(key);
       if (!entry) {
         entry = {
           selectorType: type,
           selectorValue: normalizedValue,
-          unclassifiedSeconds: 0,
-          slices: []
+          matchMode,
+          slices: new Map<number, EvaluatedSlice>()
         };
         candidateMap.set(key, entry);
       }
-      entry.unclassifiedSeconds += slice.totalSeconds;
-      entry.slices.push(slice);
+      entry.slices.set(slice.id, slice);
     };
 
     for (const s of slices) {
@@ -1881,17 +2170,23 @@ export class SqliteClassificationService {
 
     const selectedCandidates: CandidateGroup[] = [];
     for (const [, list] of candidatesByType.entries()) {
-      list.sort((a, b) => b.unclassifiedSeconds - a.unclassifiedSeconds);
+      list.sort((a, b) => {
+        const secA = Array.from(a.slices.values()).reduce((sum, s) => sum + s.totalSeconds, 0);
+        const secB = Array.from(b.slices.values()).reduce((sum, s) => sum + s.totalSeconds, 0);
+        return secB - secA;
+      });
       selectedCandidates.push(...list.slice(0, limitPerType));
     }
 
     const suggestions: UnclassifiedSuggestion[] = selectedCandidates.map((cg) => {
-      const sampleEntities = Array.from(new Set(cg.slices.map((s) => s.entity))).slice(0, 3);
+      const sliceList = Array.from(cg.slices.values());
+      const unclassifiedSeconds = sliceList.reduce((sum, s) => sum + s.totalSeconds, 0);
+      const sampleEntities = Array.from(new Set(sliceList.map((s) => s.entity))).slice(0, 3);
       const sampleProjects = Array.from(
-        new Set(cg.slices.map((s) => s.projectName).filter((p): p is string => Boolean(p)))
+        new Set(sliceList.map((s) => s.projectName).filter((p): p is string => Boolean(p)))
       ).slice(0, 3);
 
-      const dates = cg.slices
+      const dates = sliceList
         .map((s) => s.date)
         .filter((d): d is string => Boolean(d))
         .sort();
@@ -1901,6 +2196,7 @@ export class SqliteClassificationService {
       return {
         selectorType: cg.selectorType,
         selectorValue: cg.selectorValue,
+        matchMode: cg.matchMode,
         displayValue:
           cg.selectorType === 'machine'
             ? this.resolveMachineName(cg.selectorValue)
@@ -1908,8 +2204,8 @@ export class SqliteClassificationService {
               ? this.resolveEditorName(cg.selectorValue)
               : cg.selectorValue,
         specificity: SELECTOR_SPECIFICITY[cg.selectorType],
-        unclassifiedSeconds: roundSeconds(cg.unclassifiedSeconds),
-        sliceCount: cg.slices.length,
+        unclassifiedSeconds: roundSeconds(unclassifiedSeconds),
+        sliceCount: sliceList.length,
         sampleEntities,
         sampleProjects,
         earliestDate,
@@ -1930,4 +2226,8 @@ export class SqliteClassificationService {
 
     return suggestions;
   }
+}
+
+export function createClassificationService(db: Database.Database): SqliteClassificationService {
+  return new SqliteClassificationService(db);
 }

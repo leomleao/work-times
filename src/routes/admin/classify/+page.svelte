@@ -5,7 +5,7 @@
   import AppShell from '$lib/components/AppShell.svelte';
   import Modal from '$lib/components/Modal.svelte';
   import type { PageData, ActionData } from './$types';
-  import type { SelectorType } from '$lib/server/classification/model';
+  import type { SelectorType, MatchMode } from '$lib/server/classification/model';
   import type {
     ClassificationCoverage,
     ClassificationRevisionRecord,
@@ -189,6 +189,7 @@
   let selectedSuggestionKey = $state<string | null>(null);
   let proposalChoice = $state<'work' | 'personal'>('work');
   let proposalName = $state('');
+  let proposalMatchMode = $state<MatchMode>('exact');
   let proposalPriority = $state(0);
   let proposalTimesheetCode = $state('');
 
@@ -209,6 +210,7 @@
   let editRuleClassification = $state<'work' | 'personal'>('work');
   let editRuleSelectorType = $state<SelectorType>('project');
   let editRuleSelectorValue = $state('');
+  let editRuleMatchMode = $state<MatchMode>('exact');
   let editRulePriority = $state(0);
   let editRuleEnabled = $state(true);
   let editRuleTimesheetCode = $state('');
@@ -221,6 +223,7 @@
     // Friendly labels are presentation-only. Preserve the canonical selector
     // value so editing an unrelated field cannot silently change rule scope.
     editRuleSelectorValue = rule.selector_value;
+    editRuleMatchMode = rule.match_mode ?? 'exact';
     editRulePriority = rule.priority;
     editRuleEnabled = rule.enabled;
     editRuleTimesheetCode = rule.timesheet_code ?? '';
@@ -240,6 +243,7 @@
       showConfirmModal = false;
       selectedSuggestionKey = null;
       proposalName = '';
+      proposalMatchMode = 'exact';
       proposalTimesheetCode = '';
       proposalPriority = 0;
     }
@@ -386,6 +390,7 @@
   $effect(() => {
     if (activeSuggestion) {
       proposalName = `${proposalChoice === 'work' ? 'Work' : 'Personal'} ${activeSuggestion.selectorType}: ${activeSuggestion.displayValue}`;
+      proposalMatchMode = activeSuggestion.matchMode ?? 'exact';
     }
   });
 
@@ -793,6 +798,36 @@
               <input type="hidden" name="selectorType" value={activeSuggestion.selectorType} />
               <input type="hidden" name="selectorValue" value={activeSuggestion.selectorValue} />
               <input type="hidden" name="classification" value={proposalChoice} />
+              <input type="hidden" name="matchMode" value={proposalMatchMode} />
+
+              <div class="form-group">
+                <span class="form-label">Match Mode</span>
+                <div style="display: flex; gap: 8px; margin-top: 4px;">
+                  <button
+                    type="button"
+                    class="button {proposalMatchMode === 'exact' ? 'primary' : 'secondary'}"
+                    style="flex: 1;"
+                    onclick={() => (proposalMatchMode = 'exact')}
+                  >
+                    Exact
+                  </button>
+                  <button
+                    type="button"
+                    class="button {proposalMatchMode === 'glob' ? 'primary' : 'secondary'}"
+                    style="flex: 1;"
+                    onclick={() => (proposalMatchMode = 'glob')}
+                  >
+                    Glob Pattern
+                  </button>
+                </div>
+                <span class="form-hint">
+                  {#if proposalMatchMode === 'glob'}
+                    Wildcards: <code>*</code> matches zero or more characters; <code>?</code> matches one character. Use <code>[*]</code> or <code>[?]</code> for literal characters.
+                  {:else}
+                    Matches exact string without interpreting wildcards.
+                  {/if}
+                </span>
+              </div>
 
               <div class="form-group">
                 <label for="rule-name" class="form-label">
@@ -942,6 +977,7 @@
                 <th>Classification</th>
                 <th>Selector Type</th>
                 <th>Selector Value</th>
+                <th>Mode</th>
                 <th>Priority</th>
                 <th>Status</th>
                 <th>Created</th>
@@ -965,6 +1001,13 @@
                   </td>
                   <td>
                     <code style="font-size: 12px; color: var(--text);">{rule.display_value || formatSelectorDisplay(rule.selector_type, rule.selector_value)}</code>
+                  </td>
+                  <td>
+                    {#if rule.match_mode === 'glob'}
+                      <span class="badge accent">Glob</span>
+                    {:else}
+                      <span class="badge neutral">Exact</span>
+                    {/if}
                   </td>
                   <td>
                     <span>{rule.priority}</span>
@@ -1164,8 +1207,12 @@
         </div>
         {#if proposal.type === 'create'}
           <strong style="color: var(--text); display: block;">{proposal.rule.name}</strong>
-          <div style="margin-top: 4px; font-size: 12px; color: var(--muted);">
-            Matches <code>{proposal.rule.selectorType}: {formatSelectorDisplay(proposal.rule.selectorType, proposal.rule.selectorValue)}</code> →
+          <div style="margin-top: 4px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+            <span>Matches <code>{proposal.rule.selectorType}: {formatSelectorDisplay(proposal.rule.selectorType, proposal.rule.selectorValue)}</code></span>
+            <span class="badge {proposal.rule.matchMode === 'glob' ? 'warning' : 'neutral'}">
+              {(proposal.rule.matchMode ?? 'exact').toUpperCase()}
+            </span>
+            <span>→</span>
             <span class="badge {proposal.rule.classification}">
               {proposal.rule.classification.toUpperCase()}
             </span>
@@ -1175,6 +1222,9 @@
           <div style="margin-top: 6px; font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px;">
             {#if proposal.rule.name}
               <div>Name: <b style="color: var(--text);">{proposal.rule.name}</b></div>
+            {/if}
+            {#if proposal.rule.matchMode !== undefined}
+              <div>Mode: <span class="badge {proposal.rule.matchMode === 'glob' ? 'warning' : 'neutral'}">{proposal.rule.matchMode.toUpperCase()}</span></div>
             {/if}
             {#if proposal.rule.classification}
               <div>
@@ -1203,20 +1253,66 @@
       </div>
 
       <!-- Historical Impact Surface -->
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-        <div style="padding: 12px; background: #10100e; border: 1px solid var(--border); border-radius: var(--radius-sm);">
-          <span style="font-size: 11px; color: var(--faint);">Affected Slices</span>
-          <strong style="display: block; font-size: 18px; color: var(--text); margin-top: 2px;">
-            {preview.affectedSliceCount} slices
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
+        <div style="padding: 10px; background: #10100e; border: 1px solid var(--border); border-radius: var(--radius-sm);">
+          <span style="font-size: 11px; color: var(--faint);">Matched Slices</span>
+          <strong style="display: block; font-size: 16px; color: var(--text); margin-top: 2px;">
+            {preview.matchedBeforeCount ?? 0} → {preview.matchedAfterCount ?? 0}
           </strong>
         </div>
-        <div style="padding: 12px; background: #10100e; border: 1px solid var(--border); border-radius: var(--radius-sm);">
+        <div style="padding: 10px; background: #10100e; border: 1px solid var(--border); border-radius: var(--radius-sm);">
+          <span style="font-size: 11px; color: var(--faint);">Classified Shifted</span>
+          <strong style="display: block; font-size: 16px; color: var(--text); margin-top: 2px;">
+            {preview.classificationChangedCount ?? preview.affectedSliceCount} slices
+          </strong>
+        </div>
+        <div style="padding: 10px; background: #10100e; border: 1px solid var(--border); border-radius: var(--radius-sm);">
           <span style="font-size: 11px; color: var(--faint);">Affected Dates</span>
-          <strong style="display: block; font-size: 18px; color: var(--text); margin-top: 2px;">
+          <strong style="display: block; font-size: 16px; color: var(--text); margin-top: 2px;">
             {preview.affectedDates.length} dates
           </strong>
         </div>
       </div>
+
+      {#if (preview.ambiguityTransitions?.toAmbiguous ?? 0) > 0 || (preview.ambiguityTransitions?.fromAmbiguous ?? 0) > 0}
+        <div class="notice warning" style="margin: 0;">
+          <AlertTriangle size={16} />
+          <div>
+            <strong>Ambiguity Transitions</strong>
+            <div style="font-size: 12px; margin-top: 2px;">
+              {#if (preview.ambiguityTransitions?.toAmbiguous ?? 0) > 0}
+                <div>Transitioned to Ambiguous (Unclassified): <b>{preview.ambiguityTransitions.toAmbiguous} slices</b></div>
+              {/if}
+              {#if (preview.ambiguityTransitions?.fromAmbiguous ?? 0) > 0}
+                <div>Resolved from Ambiguous: <b>{preview.ambiguityTransitions.fromAmbiguous} slices</b></div>
+              {/if}
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      {#if preview.sampleSlices && preview.sampleSlices.length > 0}
+        <div style="padding: 12px; background: #11110f; border: 1px solid var(--border); border-radius: var(--radius-sm);">
+          <strong style="font-size: 11px; text-transform: uppercase; color: var(--faint); display: block; margin-bottom: 8px;">
+            Sample Affected Slices (up to 5)
+          </strong>
+          <div style="display: flex; flex-direction: column; gap: 6px; font-size: 12px;">
+            {#each preview.sampleSlices.slice(0, 5) as sample}
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid #1a1a18; padding-bottom: 4px;">
+                <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;">
+                  <span style="color: var(--faint); font-family: monospace; font-size: 11px; margin-right: 6px;">{sample.date}</span>
+                  <span title={sample.entity} style="color: var(--text); font-family: monospace;">{sample.entity}</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
+                  <span class="badge {sample.beforeClassification}" style="font-size: 10px; padding: 2px 4px;">{sample.beforeClassification}</span>
+                  <span style="color: var(--faint); font-size: 10px;">→</span>
+                  <span class="badge {sample.afterClassification}" style="font-size: 10px; padding: 2px 4px;">{sample.afterClassification}</span>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
 
       <!-- Shifted Seconds Breakdown -->
       <div style="padding: 14px; background: #11110f; border: 1px solid var(--border); border-radius: var(--radius-sm);">
@@ -1477,7 +1573,37 @@
     <input type="hidden" name="type" value="update" />
     <input type="hidden" name="id" value={editRuleId} />
     <input type="hidden" name="classification" value={editRuleClassification} />
+    <input type="hidden" name="matchMode" value={editRuleMatchMode} />
     <input type="hidden" name="enabled" value={editRuleEnabled ? 'true' : 'false'} />
+
+    <div class="form-group">
+      <span class="form-label">Match Mode</span>
+      <div style="display: flex; gap: 8px; margin-top: 4px;">
+        <button
+          type="button"
+          class="button {editRuleMatchMode === 'exact' ? 'primary' : 'secondary'}"
+          style="flex: 1;"
+          onclick={() => (editRuleMatchMode = 'exact')}
+        >
+          Exact
+        </button>
+        <button
+          type="button"
+          class="button {editRuleMatchMode === 'glob' ? 'primary' : 'secondary'}"
+          style="flex: 1;"
+          onclick={() => (editRuleMatchMode = 'glob')}
+        >
+          Glob Pattern
+        </button>
+      </div>
+      <span class="form-hint">
+        {#if editRuleMatchMode === 'glob'}
+          Wildcards: <code>*</code> matches zero or more characters; <code>?</code> matches one character. Use <code>[*]</code> or <code>[?]</code> for literal characters.
+        {:else}
+          Matches exact string without interpreting wildcards.
+        {/if}
+      </span>
+    </div>
 
     <div class="form-group">
       <label for="edit-rule-name" class="form-label">

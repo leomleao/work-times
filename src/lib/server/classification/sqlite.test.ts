@@ -1,8 +1,11 @@
 import type Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { openTestDatabase } from '../db/connection.js';
+import { openDatabase, openTestDatabase } from '../db/connection.js';
 import { importDumps } from '../import/importer.js';
 import {
   AllocationConflictError,
@@ -723,3 +726,224 @@ describe('SqliteClassificationService - Coverage & Unclassified Suggestions', ()
     }
   });
 });
+
+describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)', () => {
+  it('TC-10: modifying telemetry (duration, project name, slice identity) causes confirmRule to reject with StalePreviewError', async () => {
+    const db = openTestDatabase();
+    await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+    const service = new SqliteClassificationService(db);
+
+    // 1. Modifying slice duration causes StalePreviewError
+    const previewDuration = service.previewRuleChange({
+      type: 'create',
+      rule: {
+        name: 'Work Rule 1',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'work-project',
+        matchMode: 'exact'
+      }
+    });
+
+    db.prepare('UPDATE day_project_entity_slices SET total_seconds = total_seconds + 30 WHERE id = (SELECT id FROM day_project_entity_slices LIMIT 1)').run();
+    service.invalidateIdentityCaches();
+
+    expect(() => {
+      service.createRule(
+        {
+          name: 'Work Rule 1',
+          classification: 'work',
+          selectorType: 'project',
+          selectorValue: 'work-project',
+          matchMode: 'exact'
+        },
+        { expectedDigest: previewDuration.previewDigest }
+      );
+    }).toThrow(StalePreviewError);
+
+    // 2. Renaming a project causes StalePreviewError
+    const previewRename = service.previewRuleChange({
+      type: 'create',
+      rule: {
+        name: 'Work Rule 2',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'work-project',
+        matchMode: 'exact'
+      }
+    });
+
+    db.prepare("UPDATE projects SET name = name || '-renamed' WHERE id = (SELECT project_id FROM day_project_entity_slices WHERE is_unattributed = 0 LIMIT 1)").run();
+    service.invalidateIdentityCaches();
+
+    expect(() => {
+      service.createRule(
+        {
+          name: 'Work Rule 2',
+          classification: 'work',
+          selectorType: 'project',
+          selectorValue: 'work-project',
+          matchMode: 'exact'
+        },
+        { expectedDigest: previewRename.previewDigest }
+      );
+    }).toThrow(StalePreviewError);
+
+    // 3. Updating slice_identities causes StalePreviewError
+    const previewIdentity = service.previewRuleChange({
+      type: 'create',
+      rule: {
+        name: 'Work Rule 3',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'work-project',
+        matchMode: 'exact'
+      }
+    });
+
+    db.prepare("INSERT INTO slice_identities (slice_id, selector_type, value) VALUES ((SELECT id FROM day_project_entity_slices LIMIT 1), 'machine', 'new-test-machine')").run();
+    service.invalidateIdentityCaches();
+
+    expect(() => {
+      service.createRule(
+        {
+          name: 'Work Rule 3',
+          classification: 'work',
+          selectorType: 'project',
+          selectorValue: 'work-project',
+          matchMode: 'exact'
+        },
+        { expectedDigest: previewIdentity.previewDigest }
+      );
+    }).toThrow(StalePreviewError);
+
+    // 4. Deleting a slice causes StalePreviewError
+    const previewDelete = service.previewRuleChange({
+      type: 'create',
+      rule: {
+        name: 'Work Rule 4',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'work-project',
+        matchMode: 'exact'
+      }
+    });
+
+    db.prepare('DELETE FROM day_project_entity_slices WHERE id = (SELECT id FROM day_project_entity_slices LIMIT 1)').run();
+    service.invalidateIdentityCaches();
+
+    expect(() => {
+      service.createRule(
+        {
+          name: 'Work Rule 4',
+          classification: 'work',
+          selectorType: 'project',
+          selectorValue: 'work-project',
+          matchMode: 'exact'
+        },
+        { expectedDigest: previewDelete.previewDigest }
+      );
+    }).toThrow(StalePreviewError);
+  });
+
+  it('TC-11: batch rollback triggers cleanly on mid-batch error, leaving pre-flight backup intact and 0 mutations', async () => {
+    const testDir = mkdtempSync(join(tmpdir(), 'work-times-test-tc11-'));
+    const testDbPath = join(testDir, 'test.sqlite');
+    const backupPath = join(testDir, 'pre-flight-backup.sqlite');
+
+    try {
+      const db = openDatabase({ path: testDbPath, migrate: true });
+      const service = new SqliteClassificationService(db);
+
+      // Seed 2 initial rules
+      service.unsafeSeedRule({
+        name: 'Initial Work Rule',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'init-p1'
+      });
+      service.unsafeSeedRule({
+        name: 'Initial Personal Rule',
+        classification: 'personal',
+        selectorType: 'project',
+        selectorValue: 'init-p2'
+      });
+
+      expect(service.getRules()).toHaveLength(2);
+      const initialRevisions = db.prepare('SELECT count(*) as c FROM classification_revisions').get() as { c: number };
+
+      // Create pre-flight backup
+      await db.backup(backupPath);
+      expect(existsSync(backupPath)).toBe(true);
+
+      // Verify backup is valid SQLite database
+      const backupDb = openDatabase({ path: backupPath, readonly: true, migrate: false });
+      const integrityRows = backupDb.pragma('integrity_check') as Array<{ integrity_check: string }>;
+      expect(integrityRows[0]?.integrity_check).toBe('ok');
+      backupDb.close();
+
+      // Attempt consolidation with an intentional mid-batch error (attempting to delete non-existent rule)
+      expect(() => {
+        service.consolidateRules({
+          createRules: [
+            {
+              name: 'Failed Attempt Rule',
+              classification: 'work',
+              selectorType: 'project',
+              selectorValue: 'failed-p'
+            }
+          ],
+          deleteRuleIds: ['non-existent-rule-id-99999']
+        });
+      }).toThrow("Rule 'non-existent-rule-id-99999' not found");
+
+      // Assert complete transaction rollback:
+      // Exactly 2 original rules remain
+      const rulesAfter = service.getRules();
+      expect(rulesAfter).toHaveLength(2);
+      expect(rulesAfter.some((r) => r.name === 'Failed Attempt Rule')).toBe(false);
+
+      // Zero new revisions written
+      const revisionsAfter = db.prepare('SELECT count(*) as c FROM classification_revisions').get() as { c: number };
+      expect(revisionsAfter.c).toBe(initialRevisions.c);
+
+      // Pre-flight backup file remains intact
+      expect(existsSync(backupPath)).toBe(true);
+
+      db.close();
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('TC-12: Phase A test suite isolates completely from live database with zero mutations', async () => {
+    const liveDbPath = 'data/work-times.sqlite';
+    if (!existsSync(liveDbPath)) {
+      return;
+    }
+
+    const shaBefore = createHash('sha256').update(readFileSync(liveDbPath)).digest('hex');
+
+    // Run test operations using memory and ephemeral DBs
+    const db = openTestDatabase();
+    await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+    const service = new SqliteClassificationService(db);
+
+    service.unsafeSeedRule({
+      name: 'Ephemeral Rule',
+      classification: 'work',
+      selectorType: 'project',
+      selectorValue: 'ephemeral',
+      matchMode: 'glob'
+    });
+
+    const suggestions = service.getUnclassifiedSuggestions();
+    expect(suggestions.length).toBeGreaterThan(0);
+
+    const shaAfter = createHash('sha256').update(readFileSync(liveDbPath)).digest('hex');
+
+    // Assert live DB is strictly identical
+    expect(shaAfter).toBe(shaBefore);
+  });
+});
+

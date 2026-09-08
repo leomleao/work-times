@@ -189,6 +189,7 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
           classification: 'work',
           selectorType: 'project',
           selectorValue: 'work-times',
+          matchMode: 'exact',
           priority: 15,
           enabled: true,
           timesheetCode: 'WT-001'

@@ -7,6 +7,7 @@ import {
   folderMatches,
   SELECTOR_TYPES,
   type SelectorType,
+  type MatchMode,
   type ClassifiableSlice,
   type ClassificationRuleLike
 } from '../classification/model.js';
@@ -34,6 +35,7 @@ export interface ActivityFilterQuery {
   q?: string | null;
   selectorType?: string | null;
   selectorValue?: string | null;
+  matchMode?: string | null;
   project?: string | null;
   editor?: string | null;
   machine?: string | null;
@@ -87,6 +89,7 @@ export interface ActivityData {
     q: string;
     selectorType: SelectorType | null;
     selectorValue: string | null;
+    matchMode?: MatchMode;
     project: string | null;
     editor: string | null;
     machine: string | null;
@@ -129,6 +132,7 @@ export interface ValidatedActivityFilters {
   q: string;
   selectorType: SelectorType | null;
   selectorValue: string | null;
+  matchMode: MatchMode;
   project: string | null;
   editor: string | null;
   machine: string | null;
@@ -349,6 +353,18 @@ export function validateActivityFilterQuery(
     };
   }
 
+  let matchMode: MatchMode = 'exact';
+  if (rawFilters.matchMode !== undefined && rawFilters.matchMode !== null && rawFilters.matchMode !== '') {
+    const mm = String(rawFilters.matchMode).trim();
+    if (mm !== 'exact' && mm !== 'glob') {
+      return {
+        ok: false,
+        error: `Invalid matchMode '${echoValue(rawFilters.matchMode)}': must be 'exact' or 'glob'.`
+      };
+    }
+    matchMode = mm;
+  }
+
   if (rangeDays !== null && rangeDays > 366 && selectorType === null) {
     return {
       ok: false,
@@ -411,6 +427,7 @@ export function validateActivityFilterQuery(
       q,
       selectorType,
       selectorValue,
+      matchMode,
       project,
       editor,
       machine,
@@ -606,6 +623,7 @@ export function getActivityData(
       const syntheticRule: ClassificationRuleLike = {
         selectorType: validated.selectorType,
         selectorValue: validated.selectorValue,
+        matchMode: validated.matchMode,
         priority: 0,
         createdAt: ''
       };
@@ -815,6 +833,7 @@ export function getActivityData(
       q,
       selectorType: validated.selectorType,
       selectorValue: validated.selectorValue,
+      matchMode: validated.matchMode,
       project: validated.project,
       editor: validated.editor,
       machine: validated.machine,

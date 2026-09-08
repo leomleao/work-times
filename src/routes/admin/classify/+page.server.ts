@@ -5,7 +5,8 @@ import { verifyCsrfToken } from '$lib/server/security/http';
 import {
   SELECTOR_TYPES,
   type RuleClassification,
-  type SelectorType
+  type SelectorType,
+  type MatchMode
 } from '$lib/server/classification/model';
 import {
   type EvaluatedSlice,
@@ -97,6 +98,15 @@ function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
         ? r.timesheetCode.trim()
         : null;
 
+    let matchMode: MatchMode = 'exact';
+    if (r.matchMode !== undefined && r.matchMode !== null && r.matchMode !== '') {
+      const mm = String(r.matchMode).trim();
+      if (mm !== 'exact' && mm !== 'glob') {
+        throw new Error("Invalid matchMode, must be 'exact' or 'glob'");
+      }
+      matchMode = mm;
+    }
+
     return {
       type: 'create',
       rule: {
@@ -104,6 +114,7 @@ function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
         classification,
         selectorType,
         selectorValue,
+        matchMode,
         priority,
         enabled,
         timesheetCode
@@ -180,6 +191,15 @@ function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
       }
     }
 
+    let matchMode: MatchMode | undefined = undefined;
+    if (r.matchMode !== undefined && r.matchMode !== null && r.matchMode !== '') {
+      const mm = String(r.matchMode).trim();
+      if (mm !== 'exact' && mm !== 'glob') {
+        throw new Error("Invalid matchMode, must be 'exact' or 'glob'");
+      }
+      matchMode = mm;
+    }
+
     return {
       type: 'update',
       id,
@@ -188,6 +208,7 @@ function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
         classification,
         selectorType,
         selectorValue,
+        matchMode,
         priority,
         enabled,
         timesheetCode
@@ -266,6 +287,16 @@ function parseProposal(formData: FormData): RuleChangeInput {
     const timesheetCodeRaw = formData.get('timesheetCode');
     const timesheetCode = timesheetCodeRaw ? String(timesheetCodeRaw).trim() || null : null;
 
+    const matchModeRaw = formData.get('matchMode');
+    let matchMode: MatchMode = 'exact';
+    if (matchModeRaw !== null && matchModeRaw !== '') {
+      const mm = String(matchModeRaw).trim();
+      if (mm !== 'exact' && mm !== 'glob') {
+        throw new Error("Invalid matchMode, must be 'exact' or 'glob'");
+      }
+      matchMode = mm;
+    }
+
     return {
       type: 'create',
       rule: {
@@ -273,6 +304,7 @@ function parseProposal(formData: FormData): RuleChangeInput {
         classification,
         selectorType,
         selectorValue,
+        matchMode,
         priority,
         enabled,
         timesheetCode
@@ -341,6 +373,16 @@ function parseProposal(formData: FormData): RuleChangeInput {
       timesheetCode = String(timesheetCodeRaw).trim() || null;
     }
 
+    const matchModeRaw = formData.get('matchMode');
+    let matchMode: MatchMode | undefined = undefined;
+    if (matchModeRaw !== null && matchModeRaw !== '') {
+      const mm = String(matchModeRaw).trim();
+      if (mm !== 'exact' && mm !== 'glob') {
+        throw new Error("Invalid matchMode, must be 'exact' or 'glob'");
+      }
+      matchMode = mm;
+    }
+
     return {
       type: 'update',
       id,
@@ -349,6 +391,7 @@ function parseProposal(formData: FormData): RuleChangeInput {
         classification,
         selectorType,
         selectorValue,
+        matchMode,
         priority,
         enabled,
         timesheetCode

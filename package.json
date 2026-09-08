@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite dev --host 127.0.0.1 --port 3002",
-    "build": "vite build",
+    "build": "DATABASE_PATH=:memory: vite build",
     "start": "node server/index.mjs",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
@@ -17,7 +17,8 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "import:dumps": "tsx scripts/import-dumps.ts",
     "admin:hash-password": "tsx scripts/hash-password.ts",
-    "wakatime:discover": "tsx scripts/wakatime-discover.ts"
+    "wakatime:discover": "tsx scripts/wakatime-discover.ts",
+    "rules:consolidate": "tsx scripts/consolidate-rules.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.0.0",
