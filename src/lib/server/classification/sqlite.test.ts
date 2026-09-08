@@ -1,10 +1,10 @@
 import type Database from 'better-sqlite3';
-import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { getRuntimeConfig } from '../config.js';
 import { openDatabase, openTestDatabase } from '../db/connection.js';
 import { importDumps } from '../import/importer.js';
 import {
@@ -1080,12 +1080,9 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
   });
 
   it('TC-12: Phase A test suite isolates completely from live database with zero mutations', async () => {
-    const liveDbPath = 'data/work-times.sqlite';
-    if (!existsSync(liveDbPath)) {
-      return;
-    }
-
-    const shaBefore = createHash('sha256').update(readFileSync(liveDbPath)).digest('hex');
+    // Assert Vitest environment isolation
+    expect(process.env.DATABASE_PATH).toBe(':memory:');
+    expect(getRuntimeConfig().databasePath).toBe(':memory:');
 
     // Run test operations using memory and ephemeral DBs
     const db = openTestDatabase();
@@ -1103,10 +1100,6 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
     const suggestions = service.getUnclassifiedSuggestions();
     expect(suggestions.length).toBeGreaterThan(0);
 
-    const shaAfter = createHash('sha256').update(readFileSync(liveDbPath)).digest('hex');
-
-    // Assert live DB is strictly identical
-    expect(shaAfter).toBe(shaBefore);
+    db.close();
   });
 });
-
