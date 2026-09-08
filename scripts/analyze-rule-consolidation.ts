@@ -38,19 +38,53 @@ export interface AnalysisCliArgs {
   json: boolean;
 }
 
+export interface PolarityFlip {
+  sliceId: number;
+  date: string;
+  entity: string;
+  from: Classification;
+  to: Classification;
+}
+
+export interface UnclassifiedRegression {
+  sliceId: number;
+  date: string;
+  entity: string;
+  from: Classification;
+  to: 'unclassified';
+}
+
+export interface AmbiguityTransition {
+  sliceId: number;
+  date: string;
+  entity: string;
+  fromSource: 'override' | 'rule' | 'ambiguous' | 'default';
+  toSource: 'override' | 'rule' | 'ambiguous' | 'default';
+  baseClassification: Classification;
+  proposedClassification: Classification;
+}
+
+export interface TransitionAggregate {
+  count: number;
+  seconds: number;
+  minDate: string;
+  maxDate: string;
+}
+
 export interface RuleConsolidationAnalysisResult {
   totalSlices: number;
   totalSeconds: number;
-  hardGatePassed: boolean;
-  unintendedFlipsCount: number;
-  unintendedFlips: Array<{
-    sliceId: number;
-    date: string;
-    entity: string;
-    from: Classification;
-    to: Classification;
-  }>;
+  safetyGatePassed: boolean;
+  hardGatePassed: boolean; // backward compatibility alias for safetyGatePassed
+  polarityFlipsCount: number;
+  polarityFlips: PolarityFlip[];
+  unclassifiedRegressionsCount: number;
+  unclassifiedRegressions: UnclassifiedRegression[];
   ambiguityTransitionsCount: number;
+  ambiguityTransitions: AmbiguityTransition[];
+  // backward compatibility aliases
+  unintendedFlipsCount: number;
+  unintendedFlips: PolarityFlip[];
   baseline: {
     ruleCount: number;
     workSlices: number;
@@ -78,7 +112,7 @@ export interface RuleConsolidationAnalysisResult {
     additionalClassifiedSeconds: number;
     coverageDeltaPercent: number;
   };
-  transitions: Record<string, { count: number; seconds: number }>;
+  transitions: Record<string, TransitionAggregate>;
 }
 
 export function parseAnalysisArguments(argv: readonly string[]): AnalysisCliArgs {
@@ -183,6 +217,17 @@ export function runRuleConsolidationAnalysis(
       }
     }
 
+    // Validate that no explicit create rule ID already exists in target database
+    if (manifest.createRules && manifest.createRules.length > 0) {
+      for (const rule of manifest.createRules) {
+        if (rule.id && existingRuleMap.has(rule.id)) {
+          throw new Error(
+            `Rule ID '${rule.id}' specified in createRules already exists in target database`
+          );
+        }
+      }
+    }
+
     const baselineModelRules: ClassificationRule[] = existingRules.map((r) => ({
       id: r.id,
       classification: r.classification,
@@ -196,7 +241,7 @@ export function runRuleConsolidationAnalysis(
 
     const deleteSet = new Set(manifest.deleteRuleIds ?? []);
 
-    // Construct proposed ruleset
+    // Construct proposed ruleset with honored enabled flag and deterministic metadata
     const retainedRules = baselineModelRules.filter((r) => !deleteSet.has(r.id));
     const createdRules: ClassificationRule[] = (manifest.createRules ?? []).map((cr, idx) => ({
       id: cr.id ?? `proposed-created-rule-${idx + 1}`,
@@ -205,8 +250,8 @@ export function runRuleConsolidationAnalysis(
       selectorValue: cr.selectorValue,
       matchMode: cr.matchMode || 'exact',
       priority: cr.priority ?? 0,
-      enabled: true,
-      createdAt: new Date().toISOString()
+      enabled: cr.enabled !== undefined ? cr.enabled : true,
+      createdAt: '1970-01-01T00:00:00.000Z'
     }));
 
     const proposedModelRules: ClassificationRule[] = [...retainedRules, ...createdRules];
@@ -219,17 +264,16 @@ export function runRuleConsolidationAnalysis(
     let baselineWorkCount = 0, baselinePersonalCount = 0, baselineUnclassifiedCount = 0;
     let proposedWorkCount = 0, proposedPersonalCount = 0, proposedUnclassifiedCount = 0;
 
-    let unintendedFlipsCount = 0;
-    const unintendedFlips: Array<{
-      sliceId: number;
-      date: string;
-      entity: string;
-      from: Classification;
-      to: Classification;
-    }> = [];
+    let polarityFlipsCount = 0;
+    const polarityFlips: PolarityFlip[] = [];
+
+    let unclassifiedRegressionsCount = 0;
+    const unclassifiedRegressions: UnclassifiedRegression[] = [];
 
     let ambiguityTransitionsCount = 0;
-    const transitions: Record<string, { count: number; seconds: number }> = {};
+    const ambiguityTransitions: AmbiguityTransition[] = [];
+
+    const transitions: Record<string, TransitionAggregate> = {};
 
     for (const item of rawSlices) {
       const override = item.allocation ? { classification: item.allocation.classification } : null;
@@ -253,6 +297,8 @@ export function runRuleConsolidationAnalysis(
       }
 
       const sec = item.totalSeconds;
+      const sliceDate = item.date;
+
       if (baseDecision.classification === 'work') {
         baselineWorkSec += sec;
         baselineWorkCount++;
@@ -278,17 +324,25 @@ export function runRuleConsolidationAnalysis(
       if (baseDecision.classification !== propDecision.classification) {
         const transKey = `${baseDecision.classification}->${propDecision.classification}`;
         if (!transitions[transKey]) {
-          transitions[transKey] = { count: 0, seconds: 0 };
+          transitions[transKey] = {
+            count: 0,
+            seconds: 0,
+            minDate: sliceDate,
+            maxDate: sliceDate
+          };
         }
         transitions[transKey].count++;
         transitions[transKey].seconds += sec;
+        if (sliceDate < transitions[transKey].minDate) transitions[transKey].minDate = sliceDate;
+        if (sliceDate > transitions[transKey].maxDate) transitions[transKey].maxDate = sliceDate;
 
+        // 1. Work <-> Personal Polarity Flips
         if (
           (baseDecision.classification === 'work' && propDecision.classification === 'personal') ||
           (baseDecision.classification === 'personal' && propDecision.classification === 'work')
         ) {
-          unintendedFlipsCount++;
-          unintendedFlips.push({
+          polarityFlipsCount++;
+          polarityFlips.push({
             sliceId: item.id,
             date: item.date,
             entity: item.entity,
@@ -296,20 +350,52 @@ export function runRuleConsolidationAnalysis(
             to: propDecision.classification
           });
         }
+
+        // 2. Classified -> Unclassified Regressions
+        if (
+          (baseDecision.classification === 'work' || baseDecision.classification === 'personal') &&
+          propDecision.classification === 'unclassified'
+        ) {
+          unclassifiedRegressionsCount++;
+          unclassifiedRegressions.push({
+            sliceId: item.id,
+            date: item.date,
+            entity: item.entity,
+            from: baseDecision.classification,
+            to: 'unclassified'
+          });
+        }
       } else if (baseDecision.source !== propDecision.source || baseDecision.winningRuleId !== propDecision.winningRuleId) {
         const transKey = `same_classification:${baseDecision.source}->${propDecision.source}`;
         if (!transitions[transKey]) {
-          transitions[transKey] = { count: 0, seconds: 0 };
+          transitions[transKey] = {
+            count: 0,
+            seconds: 0,
+            minDate: sliceDate,
+            maxDate: sliceDate
+          };
         }
         transitions[transKey].count++;
         transitions[transKey].seconds += sec;
+        if (sliceDate < transitions[transKey].minDate) transitions[transKey].minDate = sliceDate;
+        if (sliceDate > transitions[transKey].maxDate) transitions[transKey].maxDate = sliceDate;
       }
 
+      // 3. Ambiguity Transitions (transitions into or out of ambiguity)
       if (
         (baseDecision.source === 'ambiguous' && propDecision.source !== 'ambiguous') ||
         (baseDecision.source !== 'ambiguous' && propDecision.source === 'ambiguous')
       ) {
         ambiguityTransitionsCount++;
+        ambiguityTransitions.push({
+          sliceId: item.id,
+          date: item.date,
+          entity: item.entity,
+          fromSource: baseDecision.source,
+          toSource: propDecision.source,
+          baseClassification: baseDecision.classification,
+          proposedClassification: propDecision.classification
+        });
       }
     }
 
@@ -317,13 +403,24 @@ export function runRuleConsolidationAnalysis(
     const baselineCoverage = totalSec > 0 ? ((baselineWorkSec + baselinePersonalSec) / totalSec) * 100 : 0;
     const proposedCoverage = totalSec > 0 ? ((proposedWorkSec + proposedPersonalSec) / totalSec) * 100 : 0;
 
+    const safetyGatePassed =
+      polarityFlipsCount === 0 &&
+      unclassifiedRegressionsCount === 0 &&
+      ambiguityTransitionsCount === 0;
+
     return {
       totalSlices: rawSlices.length,
       totalSeconds: totalSec,
-      hardGatePassed: unintendedFlipsCount === 0,
-      unintendedFlipsCount,
-      unintendedFlips,
+      safetyGatePassed,
+      hardGatePassed: safetyGatePassed,
+      polarityFlipsCount,
+      polarityFlips,
+      unclassifiedRegressionsCount,
+      unclassifiedRegressions,
       ambiguityTransitionsCount,
+      ambiguityTransitions,
+      unintendedFlipsCount: polarityFlipsCount,
+      unintendedFlips: polarityFlips,
       baseline: {
         ruleCount: baselineModelRules.length,
         workSlices: baselineWorkCount,
@@ -390,10 +487,13 @@ export async function executeAnalysisCli(argv: readonly string[]): Promise<numbe
     process.stdout.write(`Total Historical Slices: ${result.totalSlices}\n`);
     process.stdout.write(`Rules: ${result.baseline.ruleCount} -> ${result.proposed.ruleCount} (-${result.proposed.retiredCount} retired, +${result.proposed.createdCount} created)\n\n`);
 
-    process.stdout.write(`Hard Gate Status: ${result.hardGatePassed ? 'PASSED (0 unintended flips)' : `FAILED (${result.unintendedFlipsCount} unintended flips)`}\n`);
-    process.stdout.write(`Ambiguity Transitions: ${result.ambiguityTransitionsCount}\n\n`);
+    process.stdout.write('--- Safety Gate Status ---\n');
+    process.stdout.write(`Safety Gate: ${result.safetyGatePassed ? 'PASSED' : 'FAILED'}\n`);
+    process.stdout.write(`  - Work <-> Personal Polarity Flips: ${result.polarityFlipsCount}\n`);
+    process.stdout.write(`  - Classified -> Unclassified Regressions: ${result.unclassifiedRegressionsCount}\n`);
+    process.stdout.write(`  - Ambiguity Transitions: ${result.ambiguityTransitionsCount}\n\n`);
 
-    process.stdout.write('--- Coverage Comparison ---\n');
+    process.stdout.write('--- Coverage & Classification Summary ---\n');
     process.stdout.write(
       `Baseline: Work ${result.baseline.workSlices} (${(result.baseline.workSeconds / 3600).toFixed(1)}h), ` +
       `Personal ${result.baseline.personalSlices} (${(result.baseline.personalSeconds / 3600).toFixed(1)}h), ` +
@@ -409,11 +509,18 @@ export async function executeAnalysisCli(argv: readonly string[]): Promise<numbe
     process.stdout.write(
       `Net Gains: +${result.netGains.additionalClassifiedSlices} slices, ` +
       `+${(result.netGains.additionalClassifiedSeconds / 3600).toFixed(2)} hrs, ` +
-      `+${result.netGains.coverageDeltaPercent.toFixed(4)}% coverage\n`
+      `+${result.netGains.coverageDeltaPercent.toFixed(4)}% coverage\n\n`
     );
+
+    process.stdout.write('--- Transitions (Intent Review) ---\n');
+    for (const [transKey, trans] of Object.entries(result.transitions)) {
+      process.stdout.write(
+        `  ${transKey}: ${trans.count} slices, ${(trans.seconds / 3600).toFixed(2)}h (${trans.minDate} to ${trans.maxDate})\n`
+      );
+    }
   }
 
-  return result.hardGatePassed ? 0 : 1;
+  return result.safetyGatePassed ? 0 : 1;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {

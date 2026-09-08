@@ -58,7 +58,7 @@ describe('Analyze Rule Consolidation CLI (scripts/analyze-rule-consolidation.ts)
   });
 
   describe('runRuleConsolidationAnalysis', () => {
-    it('analyzes impact accurately and preserves database read-only hash stability', async () => {
+    it('analyzes impact accurately, populates minDate/maxDate, and preserves database read-only hash stability', async () => {
       const dbPath = join(tempDir, 'target.sqlite');
       const db = openDatabase({ path: dbPath, migrate: true, wal: false });
       await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
@@ -100,19 +100,31 @@ describe('Analyze Rule Consolidation CLI (scripts/analyze-rule-consolidation.ts)
       const result = runRuleConsolidationAnalysis(dbPath, manifest);
 
       expect(result.totalSlices).toBeGreaterThan(0);
+      expect(result.safetyGatePassed).toBe(true);
       expect(result.hardGatePassed).toBe(true);
-      expect(result.unintendedFlipsCount).toBe(0);
+      expect(result.polarityFlipsCount).toBe(0);
+      expect(result.unclassifiedRegressionsCount).toBe(0);
+      expect(result.ambiguityTransitionsCount).toBe(0);
       expect(result.baseline.ruleCount).toBe(2);
       expect(result.proposed.ruleCount).toBe(2);
       expect(result.proposed.retiredCount).toBe(1);
       expect(result.proposed.createdCount).toBe(1);
+
+      // Verify minDate and maxDate on every transition aggregate
+      for (const trans of Object.values(result.transitions)) {
+        expect(trans.minDate).toBeDefined();
+        expect(trans.maxDate).toBeDefined();
+        expect(trans.minDate.length).toBe(10);
+        expect(trans.maxDate.length).toBe(10);
+        expect(trans.minDate <= trans.maxDate).toBe(true);
+      }
 
       // Verify zero file mutations
       const shaAfter = computeFileSha256(dbPath);
       expect(shaAfter).toBe(shaBefore);
     });
 
-    it('detects unintended work-to-personal flips and fails the hard gate', async () => {
+    it('detects work-to-personal polarity flips and fails the safety gate', async () => {
       const dbPath = join(tempDir, 'flip-test.sqlite');
       const db = openDatabase({ path: dbPath, migrate: true, wal: false });
       await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
@@ -144,10 +156,147 @@ describe('Analyze Rule Consolidation CLI (scripts/analyze-rule-consolidation.ts)
 
       const result = runRuleConsolidationAnalysis(dbPath, flipManifest);
 
+      expect(result.safetyGatePassed).toBe(false);
       expect(result.hardGatePassed).toBe(false);
-      expect(result.unintendedFlipsCount).toBeGreaterThan(0);
-      expect(result.unintendedFlips[0].from).toBe('work');
-      expect(result.unintendedFlips[0].to).toBe('personal');
+      expect(result.polarityFlipsCount).toBeGreaterThan(0);
+      expect(result.polarityFlips[0].from).toBe('work');
+      expect(result.polarityFlips[0].to).toBe('personal');
+    });
+
+    it('detects classified-to-unclassified regressions and fails the safety gate', async () => {
+      const dbPath = join(tempDir, 'regression-test.sqlite');
+      const db = openDatabase({ path: dbPath, migrate: true, wal: false });
+      await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+      const service = new SqliteClassificationService(db);
+
+      const workRule = service.unsafeSeedRule({
+        name: 'Work Alpha Project',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'alpha',
+        matchMode: 'exact'
+      });
+      db.close();
+
+      // Manifest that retires work rule without replacement, causing work slices to become unclassified
+      const regressionManifest = {
+        deleteRuleIds: [workRule.rule.id]
+      };
+
+      const result = runRuleConsolidationAnalysis(dbPath, regressionManifest);
+
+      expect(result.safetyGatePassed).toBe(false);
+      expect(result.unclassifiedRegressionsCount).toBeGreaterThan(0);
+      expect(result.unclassifiedRegressions[0].from).toBe('work');
+      expect(result.unclassifiedRegressions[0].to).toBe('unclassified');
+    });
+
+    it('detects transitions into ambiguity and fails the safety gate', async () => {
+      const dbPath = join(tempDir, 'ambiguity-test.sqlite');
+      const db = openDatabase({ path: dbPath, migrate: true, wal: false });
+      await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+      const service = new SqliteClassificationService(db);
+
+      service.unsafeSeedRule({
+        name: 'Work Alpha Project',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'alpha',
+        matchMode: 'exact',
+        priority: 0
+      });
+      db.close();
+
+      // Manifest that adds a conflicting personal rule on same project with same priority
+      const ambiguityManifest = {
+        createRules: [
+          {
+            name: 'Conflicting Personal Alpha Rule',
+            classification: 'personal' as const,
+            selectorType: 'project' as const,
+            selectorValue: 'alpha',
+            matchMode: 'exact' as const,
+            priority: 0
+          }
+        ]
+      };
+
+      const result = runRuleConsolidationAnalysis(dbPath, ambiguityManifest);
+
+      expect(result.safetyGatePassed).toBe(false);
+      expect(result.ambiguityTransitionsCount).toBeGreaterThan(0);
+      expect(result.ambiguityTransitions[0].toSource).toBe('ambiguous');
+    });
+
+    it('proves an enabled: false created rule does not affect classifications', async () => {
+      const dbPath = join(tempDir, 'disabled-rule-test.sqlite');
+      const db = openDatabase({ path: dbPath, migrate: true, wal: false });
+      await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+      const service = new SqliteClassificationService(db);
+
+      const workRule = service.unsafeSeedRule({
+        name: 'Work Alpha Project',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'alpha',
+        matchMode: 'exact'
+      });
+      db.close();
+
+      // Create a proposed personal rule targeting 'alpha' with higher priority, but enabled: false
+      const disabledRuleManifest = {
+        createRules: [
+          {
+            name: 'Disabled Personal Override Rule',
+            classification: 'personal' as const,
+            selectorType: 'project' as const,
+            selectorValue: 'alpha',
+            matchMode: 'exact' as const,
+            priority: 100,
+            enabled: false
+          }
+        ]
+      };
+
+      const result = runRuleConsolidationAnalysis(dbPath, disabledRuleManifest);
+
+      // Since the rule is enabled: false, it must NOT match or flip work slices to personal
+      expect(result.safetyGatePassed).toBe(true);
+      expect(result.polarityFlipsCount).toBe(0);
+      expect(result.proposed.workSlices).toBe(result.baseline.workSlices);
+      expect(result.proposed.personalSlices).toBe(result.baseline.personalSlices);
+    });
+
+    it('rejects explicit create rule IDs that already exist in the target database', async () => {
+      const dbPath = join(tempDir, 'dup-create-id.sqlite');
+      const db = openDatabase({ path: dbPath, migrate: true, wal: false });
+      const service = new SqliteClassificationService(db);
+
+      const existing = service.unsafeSeedRule({
+        name: 'Existing Rule',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'existing-proj',
+        matchMode: 'exact'
+      });
+      db.close();
+
+      const manifest = {
+        createRules: [
+          {
+            id: existing.rule.id,
+            name: 'Duplicate ID Create Rule',
+            classification: 'work' as const,
+            selectorType: 'project' as const,
+            selectorValue: 'some-other-proj',
+            matchMode: 'exact' as const
+          }
+        ]
+      };
+
+      expect(() => runRuleConsolidationAnalysis(dbPath, manifest)).toThrow(
+        `Rule ID '${existing.rule.id}' specified in createRules already exists in target database`
+      );
     });
 
     it('rejects manifests specifying non-existent deleteRuleIds', async () => {
@@ -213,8 +362,53 @@ describe('Analyze Rule Consolidation CLI (scripts/analyze-rule-consolidation.ts)
       expect(existsSync(outPath)).toBe(true);
 
       const parsedOut = JSON.parse(readFileSync(outPath, 'utf8'));
+      expect(parsedOut.safetyGatePassed).toBe(true);
       expect(parsedOut.hardGatePassed).toBe(true);
       expect(parsedOut.totalSlices).toBeGreaterThan(0);
+    });
+
+    it('returns exit code 1 when safety gate fails due to regression', async () => {
+      const dbPath = join(tempDir, 'cli-fail.sqlite');
+      const db = openDatabase({ path: dbPath, migrate: true, wal: false });
+      await importDumps(db, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+      const service = new SqliteClassificationService(db);
+
+      const r = service.unsafeSeedRule({
+        name: 'Work Rule',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'alpha',
+        matchMode: 'exact'
+      });
+      db.close();
+
+      const manifestPath = join(tempDir, 'manifest-flip.json');
+
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({
+          deleteRuleIds: [r.rule.id],
+          createRules: [
+            {
+              name: 'Conflicting Personal Rule',
+              classification: 'personal',
+              selectorType: 'project',
+              selectorValue: 'alpha',
+              matchMode: 'exact',
+              priority: 0
+            }
+          ]
+        }),
+        'utf8'
+      );
+
+      const exitCode = await executeAnalysisCli([
+        '--db', dbPath,
+        '--manifest', manifestPath,
+        '--json'
+      ]);
+
+      expect(exitCode).toBe(1);
     });
   });
 });
