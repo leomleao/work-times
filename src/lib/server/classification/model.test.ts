@@ -3,6 +3,8 @@ import {
   CLASSIFICATIONS,
   classifySlice,
   compareRulePrecedence,
+  compilePattern,
+  MAX_PATTERN_LENGTH,
   normalizeSelectorValue,
   ruleMatchesSlice,
   type ClassifiableSlice,
@@ -525,5 +527,103 @@ describe('classification model', () => {
       createdAt: '2026-01-01T00:00:00Z'
     };
     expect(ruleMatchesSlice(rCanonMachine, s)).toBe(true);
+  });
+
+  it('enforces MAX_PATTERN_LENGTH = 500 in compilePattern', () => {
+    expect(MAX_PATTERN_LENGTH).toBe(500);
+    const valid500 = 'a'.repeat(500);
+    expect(() => compilePattern('project', valid500, 'glob')).not.toThrow();
+
+    const invalid501 = 'a'.repeat(501);
+    expect(() => compilePattern('project', invalid501, 'glob')).toThrow(
+      /exceeds limit of 500/
+    );
+  });
+
+  it('tie-breaks rules of equal effective precedence by createdAt ASC, then id ASC', () => {
+    const ruleA: ClassificationRule = {
+      id: 'rule-alpha',
+      selectorType: 'application',
+      selectorValue: 'slack',
+      classification: 'work',
+      priority: 0,
+      createdAt: '2026-01-01T00:00:00.000Z'
+    };
+
+    const ruleB: ClassificationRule = {
+      id: 'rule-beta',
+      selectorType: 'application',
+      selectorValue: 'slack',
+      classification: 'work',
+      priority: 0,
+      createdAt: '2026-01-01T00:00:00.000Z'
+    };
+
+    // Both same precedence and same createdAt -> id ASC breaks tie ('rule-alpha' < 'rule-beta')
+    expect(compareRulePrecedence(ruleA, ruleB)).toBeLessThan(0);
+    expect(compareRulePrecedence(ruleB, ruleA)).toBeGreaterThan(0);
+
+    // Rule with earlier createdAt strictly wins regardless of id
+    const ruleEarlier: ClassificationRule = {
+      id: 'rule-zebra',
+      selectorType: 'application',
+      selectorValue: 'slack',
+      classification: 'work',
+      priority: 0,
+      createdAt: '2025-12-31T23:59:59.000Z'
+    };
+    expect(compareRulePrecedence(ruleEarlier, ruleA)).toBeLessThan(0);
+  });
+
+  it('matches Windows drive path candidates case-insensitively in glob mode with leading wildcards', () => {
+    const globRule: ClassificationRule = {
+      id: 'r-win-glob',
+      selectorType: 'folder_prefix',
+      selectorValue: '*USERS*',
+      matchMode: 'glob',
+      classification: 'work',
+      priority: 0,
+      createdAt: '2026-01-01T00:00:00Z'
+    };
+
+    // Windows candidate with backslashes
+    const winSlice: ClassifiableSlice = {
+      id: 's-win',
+      project: 'proj',
+      entityType: 'file',
+      entity: 'C:\\Users\\John\\repo\\main.ts',
+      machineIds: [],
+      editors: []
+    };
+    expect(ruleMatchesSlice(globRule, winSlice)).toBe(true);
+
+    // Windows candidate with forward slashes
+    const winSliceForward: ClassifiableSlice = {
+      id: 's-win-fwd',
+      project: 'proj',
+      entityType: 'file',
+      entity: 'C:/Users/John/repo/main.ts',
+      machineIds: [],
+      editors: []
+    };
+    expect(ruleMatchesSlice(globRule, winSliceForward)).toBe(true);
+
+    // Unix path candidate preserves case and does not match uppercase *USERS*
+    const unixSlice: ClassifiableSlice = {
+      id: 's-unix',
+      project: 'proj',
+      entityType: 'file',
+      entity: '/users/john/repo/main.ts',
+      machineIds: [],
+      editors: []
+    };
+    expect(ruleMatchesSlice(globRule, unixSlice)).toBe(false);
+
+    // Matching case on Unix matches
+    const unixCaseMatchRule: ClassificationRule = {
+      ...globRule,
+      selectorValue: '*users*'
+    };
+    expect(ruleMatchesSlice(unixCaseMatchRule, unixSlice)).toBe(true);
   });
 });

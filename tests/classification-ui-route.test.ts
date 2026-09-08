@@ -185,6 +185,7 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       expect(previewRes.proposal).toEqual({
         type: 'create',
         rule: {
+          id: previewRes.preview.proposedRuleId,
           name: 'Work Repo Rule',
           classification: 'work',
           selectorType: 'project',
@@ -261,6 +262,7 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       });
       const { rule: createdRule } = runtime.classification.createRule(
         {
+          id: seedPreview.proposedRuleId,
           name: 'To Be Modified',
           classification: 'personal',
           selectorType: 'domain',
@@ -388,6 +390,7 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       });
       runtime.classification.createRule(
         {
+          id: interveningPreview.proposedRuleId,
           name: 'Intervening',
           classification: 'work',
           selectorType: 'machine',
@@ -404,6 +407,7 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
         JSON.stringify({
           type: 'create',
           rule: {
+            id: previewRes.proposedRuleId,
             name: 'Stale Check Rule',
             classification: 'work',
             selectorType: 'project',
@@ -450,6 +454,7 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       });
       runtime.classification.createRule(
         {
+          id: p1.proposedRuleId,
           name: 'Project Work Rule',
           classification: 'work',
           selectorType: 'project',
@@ -505,6 +510,7 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       });
       runtime.classification.createRule(
         {
+          id: p1.proposedRuleId,
           name: 'Blog Personal',
           classification: 'personal',
           selectorType: 'project',
@@ -1022,6 +1028,7 @@ describe('Classification Admin UI & Route Contracts (tests/classification-ui-rou
       });
       const { rule: createdRule } = runtime.classification.createRule(
         {
+          id: seedPrev.proposedRuleId,
           name: 'Update Target Rule',
           classification: 'work',
           selectorType: 'project',

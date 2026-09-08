@@ -155,6 +155,7 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
     expect(() => {
       service.createRule(
         {
+          id: preview.proposedRuleId,
           name: 'Altered Name',
           classification: 'work',
           selectorType: 'project',
@@ -169,6 +170,7 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
     expect(() => {
       service.createRule(
         {
+          id: preview.proposedRuleId,
           name: 'Work proj-one',
           classification: 'work',
           selectorType: 'project',
@@ -183,6 +185,7 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
     expect(() => {
       service.createRule(
         {
+          id: preview.proposedRuleId,
           name: 'Work proj-one',
           classification: 'personal',
           selectorType: 'project',
@@ -208,6 +211,7 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
     expect(() => {
       service.createRule(
         {
+          id: previewAlpha.proposedRuleId,
           name: 'Beta Rule',
           classification: 'work',
           selectorType: 'project',
@@ -241,6 +245,7 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
     expect(() => {
       service.createRule(
         {
+          id: preview.proposedRuleId,
           name: 'Work proj-one',
           classification: 'work',
           selectorType: 'project',
@@ -278,6 +283,7 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
     expect(() => {
       service.createRule(
         {
+          id: preview1.proposedRuleId,
           name: 'alpha',
           classification: 'work',
           selectorType: 'project',
@@ -328,6 +334,7 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
 
     const { rule } = service.createRule(
       {
+        id: preview.proposedRuleId,
         name: '  Trimmed Name  ',
         classification: 'work',
         selectorType: 'machine',
@@ -363,6 +370,7 @@ describe('SqliteClassificationService - Rule Confirmation, Preview Binding & Nor
 
     const { rule, revision: rev1 } = service.createRule(
       {
+        id: createPrev.proposedRuleId,
         name: 'Proj One Rule',
         classification: 'work',
         selectorType: 'project',
@@ -725,6 +733,59 @@ describe('SqliteClassificationService - Coverage & Unclassified Suggestions', ()
       }
     }
   });
+
+  it('suggests wildcard glob for valid IPv4 and bracketed IPv6 hostnames, and exact for invalid suffixes with deduplicated slices', () => {
+    const proj = db.prepare('SELECT id FROM projects WHERE is_unattributed = 0 LIMIT 1').get() as { id: number };
+    // Insert 2 test slices with machine identities
+    db.prepare(
+      `INSERT OR REPLACE INTO day_project_entity_slices
+       (id, date, project_id, entity, entity_type, total_seconds, is_unattributed, source_import_id)
+       VALUES
+       (8001, '2026-07-01', ?, 'src/test1.ts', 'file', 120, 0, 1),
+       (8002, '2026-07-02', ?, 'src/test2.ts', 'file', 180, 0, 1)`
+    ).run(proj.id, proj.id);
+
+    // Machine with IPv4
+    db.prepare(
+      `INSERT OR REPLACE INTO slice_identities (slice_id, selector_type, value)
+       VALUES (8001, 'machine', 'desktop-office from 192.168.1.100'),
+              (8002, 'machine', 'desktop-office from 192.168.1.100')`
+    ).run();
+
+    // Machine with bracketed IPv6 on 8001
+    db.prepare(
+      `INSERT OR REPLACE INTO slice_identities (slice_id, selector_type, value)
+       VALUES (8001, 'machine', 'remote-box from [2001:db8::1]')`
+    ).run();
+
+    // Machine with invalid IP suffix on 8002
+    db.prepare(
+      `INSERT OR REPLACE INTO slice_identities (slice_id, selector_type, value)
+       VALUES (8002, 'machine', 'corp-laptop from some-corp-gateway')`
+    ).run();
+
+    service.invalidateIdentityCaches();
+    const suggestions = service.getUnclassifiedSuggestions({ selectorType: 'machine' });
+
+    // 1. IPv4 match produces glob suggestion with deduplicated slice aggregation
+    const ipv4Sug = suggestions.find((s) => s.selectorValue === 'desktop-office*');
+    expect(ipv4Sug).toBeDefined();
+    expect(ipv4Sug?.matchMode).toBe('glob');
+    expect(ipv4Sug?.sliceCount).toBe(2);
+    expect(ipv4Sug?.unclassifiedSeconds).toBe(300); // 120 + 180
+
+    // 2. Bracketed IPv6 produces glob suggestion
+    const ipv6Sug = suggestions.find((s) => s.selectorValue === 'remote-box*');
+    expect(ipv6Sug).toBeDefined();
+    expect(ipv6Sug?.matchMode).toBe('glob');
+    expect(ipv6Sug?.sliceCount).toBe(1);
+    expect(ipv6Sug?.unclassifiedSeconds).toBe(120);
+
+    // 3. Invalid IP suffix does not produce glob suggestion, remains exact
+    const invalidSug = suggestions.find((s) => s.selectorValue === 'corp-laptop from some-corp-gateway');
+    expect(invalidSug).toBeDefined();
+    expect(invalidSug?.matchMode).toBe('exact');
+  });
 });
 
 describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)', () => {
@@ -751,6 +812,7 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
     expect(() => {
       service.createRule(
         {
+          id: previewDuration.proposedRuleId,
           name: 'Work Rule 1',
           classification: 'work',
           selectorType: 'project',
@@ -779,6 +841,7 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
     expect(() => {
       service.createRule(
         {
+          id: previewRename.proposedRuleId,
           name: 'Work Rule 2',
           classification: 'work',
           selectorType: 'project',
@@ -807,6 +870,7 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
     expect(() => {
       service.createRule(
         {
+          id: previewIdentity.proposedRuleId,
           name: 'Work Rule 3',
           classification: 'work',
           selectorType: 'project',
@@ -835,6 +899,7 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
     expect(() => {
       service.createRule(
         {
+          id: previewDelete.proposedRuleId,
           name: 'Work Rule 4',
           classification: 'work',
           selectorType: 'project',
@@ -842,6 +907,40 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
           matchMode: 'exact'
         },
         { expectedDigest: previewDelete.previewDigest }
+      );
+    }).toThrow(StalePreviewError);
+
+    // 5. Deleting a slice and reinserting causes StalePreviewError
+    const previewReinsert = service.previewRuleChange({
+      type: 'create',
+      rule: {
+        name: 'Work Rule 5',
+        classification: 'work',
+        selectorType: 'project',
+        selectorValue: 'work-project',
+        matchMode: 'exact'
+      }
+    });
+
+    const deletedSliceRow = db.prepare('SELECT * FROM day_project_entity_slices LIMIT 1').get() as any;
+    db.prepare('DELETE FROM day_project_entity_slices WHERE id = ?').run(deletedSliceRow.id);
+    const keys = Object.keys(deletedSliceRow);
+    const placeholders = keys.map(() => '?').join(', ');
+    const vals = keys.map((k) => (k === 'total_seconds' ? deletedSliceRow[k] + 10 : deletedSliceRow[k]));
+    db.prepare(`INSERT INTO day_project_entity_slices (${keys.join(', ')}) VALUES (${placeholders})`).run(...vals);
+    service.invalidateIdentityCaches();
+
+    expect(() => {
+      service.createRule(
+        {
+          id: previewReinsert.proposedRuleId,
+          name: 'Work Rule 5',
+          classification: 'work',
+          selectorType: 'project',
+          selectorValue: 'work-project',
+          matchMode: 'exact'
+        },
+        { expectedDigest: previewReinsert.previewDigest }
       );
     }).toThrow(StalePreviewError);
   });

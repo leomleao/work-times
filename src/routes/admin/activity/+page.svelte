@@ -47,6 +47,9 @@
     if (activity.filters.q) current.set('q', activity.filters.q);
     if (activity.filters.selectorType) current.set('selectorType', activity.filters.selectorType);
     if (activity.filters.selectorValue) current.set('selectorValue', activity.filters.selectorValue);
+    if (activity.filters.matchMode && activity.filters.matchMode !== 'exact') {
+      current.set('matchMode', activity.filters.matchMode);
+    }
     if (activity.filters.project) current.set('project', activity.filters.project);
     if (activity.filters.editor) current.set('editor', activity.filters.editor);
     if (activity.filters.machine) current.set('machine', activity.filters.machine);
@@ -321,6 +324,9 @@
           {#if activity.filters.selectorValue}
             <input type="hidden" name="selectorValue" value={activity.filters.selectorValue} />
           {/if}
+          {#if activity.filters.matchMode && activity.filters.matchMode !== 'exact'}
+            <input type="hidden" name="matchMode" value={activity.filters.matchMode} />
+          {/if}
           {#if activity.filters.machine}
             <input type="hidden" name="machine" value={activity.filters.machine} />
           {/if}
@@ -388,9 +394,12 @@
               <span>
                 <strong style="text-transform: capitalize;">{activity.filters.selectorType.replace('_', ' ')}:</strong>
                 {activity.filters.selectorValue}
+                {#if activity.filters.matchMode === 'glob'}
+                  <span class="badge warning" style="font-size: 9px; padding: 1px 4px; margin-left: 4px;">GLOB</span>
+                {/if}
               </span>
               <a
-                href={buildFilterUrl({ selectorType: null, selectorValue: null, page: 1 })}
+                href={buildFilterUrl({ selectorType: null, selectorValue: null, matchMode: null, page: 1 })}
                 style="display: inline-flex; align-items: center; color: inherit; opacity: 0.7; margin-left: 2px;"
                 title="Clear selector filter"
                 aria-label="Clear selector filter"

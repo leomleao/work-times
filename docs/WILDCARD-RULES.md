@@ -79,9 +79,9 @@ When comparing two rules $A$ and $B$, the rule with the greater lexicographic tu
 
 ### Conservative Ambiguity Invariant
 If two active rules with equal effective precedence key (ignoring `createdAt` and `id`) match the same slice:
-- If both rules assign the **same classification** (e.g. both `work`), the tie is broken deterministically by `createdAt DESC, id DESC`.
+- If both rules assign the **same classification** (e.g. both `work`), the tie is broken deterministically by `createdAt ASC, id ASC`.
 - If the rules assign **conflicting classifications** (one `work`, one `personal`), the slice is classified as **`unclassified` (ambiguous)**.
-- User slice allocations (`classification_allocations`) always take absolute precedence over all automated rules.
+- User slice allocations (`daily_time_allocations`) always take absolute precedence over all automated rules.
 
 ---
 
@@ -111,9 +111,14 @@ pnpm rules:consolidate --db <path> --manifest <manifest-path> --apply --backup <
 
 ### Safety Requirements
 - `--db <path>` is **strictly required**. The CLI never defaults to the live database.
+- Manifest schema is strictly validated (`MAX_PATTERN_LENGTH = 500`, valid selectors, non-empty create/delete operations, no duplicate delete IDs).
+- In dry-run mode:
+  1. Opens target database read-only with `migrate: false`.
+  2. Verifies that all rules in `deleteRuleIds` exist in the target database.
+  3. Previews operations and guarantees zero mutations.
 - In `--apply` mode:
-  1. The target backup file `--backup <backup-path>` must not already exist.
-  2. Creates a full SQLite backup via `await db.backup(backupPath)`.
+  1. The target backup file `--backup <backup-path>` must not already exist (refuses overwrite).
+  2. Opens source database read-only with `migrate: false` to create a pre-migration backup via `await sourceDb.backup(backupPath)`.
   3. Verifies backup file integrity via `PRAGMA integrity_check;`.
-  4. Executes rule creations and retirements inside a single atomic SQLite transaction.
+  4. Opens target database with `migrate: true` to run pending migrations and execute consolidation inside a single atomic SQLite transaction.
   5. Records explicit `classification_revisions` audit records for every mutation.

@@ -3,6 +3,7 @@ import type { Actions, PageServerLoad } from './$types';
 import { runtime } from '$lib/server/runtime';
 import { verifyCsrfToken } from '$lib/server/security/http';
 import {
+  MAX_PATTERN_LENGTH,
   SELECTOR_TYPES,
   type RuleClassification,
   type SelectorType,
@@ -60,6 +61,7 @@ function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
       throw new Error("Create proposal requires a 'rule' object");
     }
     const r = obj.rule as Record<string, unknown>;
+    const id = typeof r.id === 'string' && r.id.trim().length > 0 ? r.id.trim() : undefined;
     const name = typeof r.name === 'string' ? r.name.trim() : '';
     if (!name) {
       throw new Error('Rule name cannot be empty');
@@ -75,6 +77,9 @@ function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
     const selectorValue = typeof r.selectorValue === 'string' ? r.selectorValue.trim() : '';
     if (!selectorValue) {
       throw new Error('Selector value cannot be empty');
+    }
+    if (selectorValue.length > MAX_PATTERN_LENGTH) {
+      throw new Error(`Pattern length ${selectorValue.length} exceeds limit of ${MAX_PATTERN_LENGTH}`);
     }
 
     let priority = 0;
@@ -110,6 +115,7 @@ function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
     return {
       type: 'create',
       rule: {
+        id,
         name,
         classification,
         selectorType,
@@ -164,6 +170,9 @@ function validateProposalObject(obj: Record<string, unknown>): RuleChangeInput {
         throw new Error('Selector value cannot be empty');
       }
       selectorValue = r.selectorValue.trim();
+      if (selectorValue.length > MAX_PATTERN_LENGTH) {
+        throw new Error(`Pattern length ${selectorValue.length} exceeds limit of ${MAX_PATTERN_LENGTH}`);
+      }
     }
 
     let priority: number | undefined = undefined;
@@ -259,6 +268,7 @@ function parseProposal(formData: FormData): RuleChangeInput {
   const type = String(formData.get('type') || formData.get('proposalType') || 'create').trim();
 
   if (type === 'create') {
+    const id = String(formData.get('ruleId') ?? formData.get('id') ?? '').trim() || undefined;
     const name = String(formData.get('name') ?? '').trim();
     if (!name) {
       throw new Error('Rule name cannot be empty');
@@ -274,6 +284,9 @@ function parseProposal(formData: FormData): RuleChangeInput {
     const selectorValue = String(formData.get('selectorValue') ?? '').trim();
     if (!selectorValue) {
       throw new Error('Selector value cannot be empty');
+    }
+    if (selectorValue.length > MAX_PATTERN_LENGTH) {
+      throw new Error(`Pattern length ${selectorValue.length} exceeds limit of ${MAX_PATTERN_LENGTH}`);
     }
 
     const priorityRaw = formData.get('priority');
@@ -300,6 +313,7 @@ function parseProposal(formData: FormData): RuleChangeInput {
     return {
       type: 'create',
       rule: {
+        id,
         name,
         classification,
         selectorType,
@@ -354,6 +368,9 @@ function parseProposal(formData: FormData): RuleChangeInput {
       const trimmed = String(selectorValueRaw).trim();
       if (trimmed.length === 0) {
         throw new Error('Selector value cannot be empty');
+      }
+      if (trimmed.length > MAX_PATTERN_LENGTH) {
+        throw new Error(`Pattern length ${trimmed.length} exceeds limit of ${MAX_PATTERN_LENGTH}`);
       }
       selectorValue = trimmed;
     }
@@ -510,6 +527,9 @@ export const actions: Actions = {
 
     try {
       const preview = runtime.classification.previewRuleChange(proposal);
+      if (proposal.type === 'create') {
+        proposal.rule.id = proposal.rule.id ?? preview.proposedRuleId;
+      }
       return {
         success: true,
         preview,

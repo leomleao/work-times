@@ -12,6 +12,7 @@ import {
   type RuleClassification,
   type SelectorType,
   normalizeSelectorValue,
+  MAX_PATTERN_LENGTH,
   SELECTOR_SPECIFICITY,
   SELECTOR_TYPES
 } from './model.js';
@@ -585,6 +586,11 @@ export class SqliteClassificationService {
       if (typeof input.selectorValue !== 'string' || input.selectorValue.trim().length === 0) {
         throw new Error('Rule selector_value cannot be empty');
       }
+      if (input.selectorValue.length > MAX_PATTERN_LENGTH) {
+        throw new Error(
+          `Pattern length ${input.selectorValue.length} exceeds limit of ${MAX_PATTERN_LENGTH}`
+        );
+      }
 
       const normalizedValue = normalizeSelectorValue(input.selectorType, input.selectorValue);
       if (normalizedValue.length === 0) {
@@ -652,6 +658,11 @@ export class SqliteClassificationService {
         if (typeof input.selectorValue !== 'string' || input.selectorValue.trim().length === 0) {
           throw new Error('Rule selector_value cannot be empty');
         }
+        if (input.selectorValue.length > MAX_PATTERN_LENGTH) {
+          throw new Error(
+            `Pattern length ${input.selectorValue.length} exceeds limit of ${MAX_PATTERN_LENGTH}`
+          );
+        }
         selectorValue = normalizeSelectorValue(selectorType, input.selectorValue);
         if (selectorValue.length === 0) {
           throw new Error('Rule selector_value normalized to empty string');
@@ -701,18 +712,27 @@ export class SqliteClassificationService {
 
   previewRuleChange(change: RuleChangeInput): RulePreviewResult {
     const op = this.normalizeRuleOperation(change);
+    let proposedRuleId: string | undefined;
+
+    if (op.type === 'create') {
+      proposedRuleId = op.rule.id ?? `rule-${randomUUID()}`;
+      op.rule.id = proposedRuleId;
+    } else if (op.type === 'update') {
+      proposedRuleId = op.id;
+    } else if (op.type === 'delete') {
+      proposedRuleId = op.id;
+    }
+
     const dbState = this.getRevisionState();
     const previewDigest = this.computePreviewDigest(dbState, op);
     const currentRules = this.getRules();
 
-    let proposedRuleId: string | undefined;
     const proposedModelRules: ClassificationRule[] = [];
 
     if (op.type === 'create') {
-      proposedRuleId = op.rule.id ?? `rule-${randomUUID()}`;
       const now = new Date().toISOString();
       const newRule: ClassificationRule = {
-        id: proposedRuleId,
+        id: proposedRuleId!,
         classification: op.rule.classification,
         selectorType: op.rule.selectorType,
         selectorValue: op.rule.selectorValue,
@@ -1036,7 +1056,8 @@ export class SqliteClassificationService {
     if (op.type !== 'create') throw new Error('Expected create operation');
 
     const ruleId = op.rule.id ?? `rule-${randomUUID()}`;
-    const preview = this.previewRuleChange({ type: 'create', rule: { ...input, id: op.rule.id } });
+    op.rule.id = ruleId;
+    const preview = this.previewRuleChange({ type: 'create', rule: { ...input, id: ruleId } });
 
     return this.db.transaction(() => {
       const dbState = this.getRevisionState();
@@ -1837,6 +1858,7 @@ export class SqliteClassificationService {
       identSql += ` AND s.date <= ?`;
       identParams.push(filter.endDate);
     }
+    identSql += ` ORDER BY i.slice_id ASC, i.selector_type ASC, i.value ASC`;
 
     const identRows = this.db.prepare(identSql).all(...identParams) as Array<{
       slice_id: number;
@@ -1890,8 +1912,8 @@ export class SqliteClassificationService {
 
     return sliceRows.map((s) => {
       const idents = identitiesBySlice.get(s.id);
-      const machineIds = idents?.machineIds ?? [];
-      const editors = idents?.editors ?? [];
+      const machineIds = (idents?.machineIds ?? []).slice().sort();
+      const editors = (idents?.editors ?? []).slice().sort();
 
       const isUnattributed = Boolean(s.is_unattributed || s.project_is_unattributed);
       const entityType: 'file' | 'app' | 'domain' | 'unattributed' =

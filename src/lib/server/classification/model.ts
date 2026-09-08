@@ -32,6 +32,7 @@ export const SELECTOR_SPECIFICITY: Readonly<Record<SelectorType, number>> = {
 };
 
 export interface ClassificationRuleLike {
+  id?: string;
   selectorType: SelectorType;
   selectorValue: string;
   matchMode?: MatchMode;
@@ -238,6 +239,10 @@ export function compilePattern(
   }
   flushLiteral();
 
+  const lowerTokens: GlobToken[] = tokens.map((t) =>
+    t.type === 'LITERAL' ? { type: 'LITERAL', value: t.value.toLocaleLowerCase('en-US') } : t
+  );
+
   return {
     selectorType,
     matchMode: 'glob',
@@ -246,6 +251,12 @@ export function compilePattern(
     literalCharCount,
     test: (candidate: string) => {
       const normCand = normalizeSelectorValue(selectorType, candidate);
+      if (
+        (selectorType === 'folder_prefix' || selectorType === 'entity') &&
+        /^[a-z]:\//i.test(normCand)
+      ) {
+        return matchGlobTokens(lowerTokens, normCand);
+      }
       return matchGlobTokens(tokens, normCand);
     }
   };
@@ -381,5 +392,7 @@ export function compareRulePrecedence(
 
   const created = left.createdAt.localeCompare(right.createdAt);
   if (created !== 0) return created;
+  const idCompare = (left.id ?? '').localeCompare(right.id ?? '');
+  if (idCompare !== 0) return idCompare;
   return left.selectorValue.localeCompare(right.selectorValue);
 }

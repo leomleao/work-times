@@ -11,6 +11,7 @@ export const load: PageServerLoad = async ({ url }) => {
   const q = url.searchParams.get('q');
   const selectorType = url.searchParams.get('selectorType');
   const selectorValue = url.searchParams.get('selectorValue');
+  const matchMode = url.searchParams.get('matchMode');
   const project = url.searchParams.get('project');
   const editor = url.searchParams.get('editor');
   const machine = url.searchParams.get('machine');
@@ -31,6 +32,7 @@ export const load: PageServerLoad = async ({ url }) => {
       q,
       selectorType,
       selectorValue,
+      matchMode,
       project,
       editor,
       machine,

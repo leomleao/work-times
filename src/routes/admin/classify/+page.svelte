@@ -297,6 +297,7 @@
     const params = new URLSearchParams({
       selectorType: suggestion.selectorType,
       selectorValue: suggestion.selectorValue,
+      matchMode: suggestion.matchMode ?? 'exact',
       classification: 'unclassified'
     });
     if (suggestion.earliestDate && suggestion.latestDate) {
@@ -381,7 +382,7 @@
   );
 
   let activeSuggestion = $derived<UnclassifiedSuggestion | null>(
-    suggestions.find((s: UnclassifiedSuggestion) => `${s.selectorType}:${s.selectorValue}` === selectedSuggestionKey) ??
+    suggestions.find((s: UnclassifiedSuggestion) => `${s.selectorType}:${s.matchMode ?? 'exact'}:${s.selectorValue}` === selectedSuggestionKey) ??
       filteredSuggestions[0] ??
       null
   );
@@ -643,13 +644,13 @@
           <div class="candidate-list">
             {#each filteredSuggestions as suggestion}
               {@const IconComponent = getSelectorIcon(suggestion.selectorType)}
-              {@const isSelected = activeSuggestion && activeSuggestion.selectorType === suggestion.selectorType && activeSuggestion.selectorValue === suggestion.selectorValue}
+              {@const isSelected = activeSuggestion && activeSuggestion.selectorType === suggestion.selectorType && (activeSuggestion.matchMode ?? 'exact') === (suggestion.matchMode ?? 'exact') && activeSuggestion.selectorValue === suggestion.selectorValue}
               <div
                 class="candidate"
                 class:selected={isSelected}
-                onclick={() => (selectedSuggestionKey = `${suggestion.selectorType}:${suggestion.selectorValue}`)}
+                onclick={() => (selectedSuggestionKey = `${suggestion.selectorType}:${suggestion.matchMode ?? 'exact'}:${suggestion.selectorValue}`)}
                 onkeydown={(e) => {
-                  if (e.key === 'Enter') selectedSuggestionKey = `${suggestion.selectorType}:${suggestion.selectorValue}`;
+                  if (e.key === 'Enter') selectedSuggestionKey = `${suggestion.selectorType}:${suggestion.matchMode ?? 'exact'}:${suggestion.selectorValue}`;
                 }}
                 tabindex="0"
                 role="button"
@@ -686,7 +687,7 @@
                     class:chosen-work={isSelected && proposalChoice === 'work'}
                     onclick={(e) => {
                       e.stopPropagation();
-                      selectedSuggestionKey = `${suggestion.selectorType}:${suggestion.selectorValue}`;
+                      selectedSuggestionKey = `${suggestion.selectorType}:${suggestion.matchMode ?? 'exact'}:${suggestion.selectorValue}`;
                       proposalChoice = 'work';
                     }}
                     aria-pressed={isSelected && proposalChoice === 'work'}
@@ -698,7 +699,7 @@
                     class:chosen-personal={isSelected && proposalChoice === 'personal'}
                     onclick={(e) => {
                       e.stopPropagation();
-                      selectedSuggestionKey = `${suggestion.selectorType}:${suggestion.selectorValue}`;
+                      selectedSuggestionKey = `${suggestion.selectorType}:${suggestion.matchMode ?? 'exact'}:${suggestion.selectorValue}`;
                       proposalChoice = 'personal';
                     }}
                     aria-pressed={isSelected && proposalChoice === 'personal'}
@@ -1304,9 +1305,9 @@
                   <span title={sample.entity} style="color: var(--text); font-family: monospace;">{sample.entity}</span>
                 </div>
                 <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
-                  <span class="badge {sample.beforeClassification}" style="font-size: 10px; padding: 2px 4px;">{sample.beforeClassification}</span>
+                  <span class="badge {sample.before.classification}" style="font-size: 10px; padding: 2px 4px;">{sample.before.classification}</span>
                   <span style="color: var(--faint); font-size: 10px;">→</span>
-                  <span class="badge {sample.afterClassification}" style="font-size: 10px; padding: 2px 4px;">{sample.afterClassification}</span>
+                  <span class="badge {sample.after.classification}" style="font-size: 10px; padding: 2px 4px;">{sample.after.classification}</span>
                 </div>
               </div>
             {/each}
