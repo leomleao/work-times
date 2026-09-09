@@ -8,8 +8,8 @@ Updated: 2026-09-09. Integration worktree: `next-milestone-integration` at basel
 | --- | --- | --- | --- | --- | --- | --- |
 | P0 | `task_f6b628cd3920` | accepted | agy `ctx_0f2653834e31`, corrections `ctx_f33979ba3af7` / `ctx_94e380835b16`, orchestrator review | none | frozen contracts and fixtures; targeted 76/76; full 646/646; check/build clean; host and Docker Node 24 `fs-ext` proof passed | — |
 | G0 | `task_20644ffca4b1` | passed | orchestrator | P0 | contract matrix, exact migration sequence, lifecycle/lock choice, truthful aggregate/freshness/catch-up failure cases reviewed | — |
-| P1 | `task_7d721f095348` | not_started | unassigned | G0 | pending | — |
-| P2 | `task_e82c1a05fdde` | not_started | unassigned | G0 | pending | — |
+| P1 | `task_7d721f095348` | running | agy `ctx_adf276bcf049` | G0 | supervised child `task_4dc215842acd`; worktree `p1-schema` | review and integration pending |
+| P2 | `task_e82c1a05fdde` | running | agy `ctx_186b85a6dc5c` | G0 | supervised child `task_cef3f1b3e028`; worktree `p2-http-oauth` | review and integration pending |
 | P3 | `task_f36f1547ac48` | not_started | unassigned | P1 | pending | — |
 | G1 | `task_62f0c41edff7` | pending | orchestrator | P1, P2, P3 | pending | Gate review |
 | P4 | `task_0fc56bbe5b41` | not_started | unassigned | G1 | pending | — |
@@ -18,7 +18,7 @@ Updated: 2026-09-09. Integration worktree: `next-milestone-integration` at basel
 | G2 | `task_b07a775ae59f` | pending | orchestrator | P4, P6 | pending | Gate review |
 | P7 | `task_62ede9b2f4ce` | not_started | unassigned | G2 | pending | — |
 | P8 | `task_ea65af005d18` | not_started | unassigned | G2 | pending | — |
-| P9 | `task_db905eeaa75e` | not_started | unassigned | G0 | pending | — |
+| P9 | `task_db905eeaa75e` | running | agy `ctx_93af6b374108` | G0 | supervised child `task_ca59cad56ee3`; worktree `p9-mcp-setup` | review, browser, and integration pending |
 | G3 | `task_9ce29b4e96a0` | pending | orchestrator | P7, P8, P9 | pending | Gate review |
 | P10 | `task_1a44fbdba0ee` | not_started | unassigned | G3 | pending | — |
 | G4 | `task_25831a75f534` | pending | orchestrator | P10 | pending | Live checks may remain explicitly unavailable |
@@ -29,6 +29,7 @@ Updated: 2026-09-09. Integration worktree: `next-milestone-integration` at basel
 - No repository `AGENTS.md` files were present.
 - Shared-file order: P1 owns migrations/repositories; `classification/sqlite.ts` passes P3 → P4 → P8; P7 owns runtime/hooks/server; P9 owns `AppShell.svelte`; dependency and lockfile changes route through the orchestrator.
 - Maximum three concurrent coding workers. No production writes, deployment, scheduling enablement, live database migration, push, or publication.
+- Agy launch contract: use `agy --mode accept-edits` explicitly for every worker; retain the configured Gemini model and permission controls.
 
 ## Gate evidence
 
