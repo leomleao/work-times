@@ -1,8 +1,14 @@
 # Work Times — Architecture and Implementation Plan
 
-Status: core release implemented (verification and documentation complete)
+Status: core release implemented; next milestone planned (see [NEXT-MILESTONE.md](./NEXT-MILESTONE.md))
 
-Last updated: 2026-09-06
+Last updated: 2026-09-09
+
+Next-milestone execution authority: [NEXT-MILESTONE.md](./NEXT-MILESTONE.md).
+Its reviewed reconciliation contracts, dependency DAG, work ownership, and gates
+supersede the prospective sync design below where they differ. See also the
+[original-plan assessment](./NEXT-MILESTONE-REVIEW.md). Implementation gates
+remain pending; this planning update does not enable background sync.
 
 Implementation alignment decisions:
 
@@ -886,7 +892,10 @@ the learned shape; real values are never committed.
 
 **Status: Deferred — design only.** No scheduler, catch-up worker, or recurring
 reconciliation is mounted in this release; the service runs as a dump-backed archive.
-The policy below records the intended design for the deferred milestone.
+The policy below records the original intended design. The reviewed
+[next-milestone plan](./NEXT-MILESTONE.md) defines accepted versus observed
+snapshots, fidelity-aware reconciliation, preservation of manual decisions,
+and the implementation gates that supersede this preliminary policy.
 
 - On startup: identify and catch up missing dates.
 - Hourly: refresh today and yesterday.
@@ -1717,7 +1726,8 @@ pass.
 - Future visualization path: rich interactive visualization dashboards
   (scrubbable interactive timelines, multi-week heatmaps, chord/sankey project
   distribution) extending the Svelte Bits visualization foundation.
-- Live recurring background API synchronization and scheduler.
+- ~~Live recurring background API synchronization and scheduler.~~
+  **Promoted to implementation planning** — see [NEXT-MILESTONE.md](./NEXT-MILESTONE.md).
 - Git repository and commit correlation.
 - GitHub/GitLab pull-request correlation.
 - Calendar and ticket-system context.
@@ -1740,7 +1750,22 @@ The core release milestone is implemented, verified, and operational:
 5. **Safe Read-Only Discovery**: `pnpm wakatime:discover` is available for host runs, and `docker compose run --rm --build work-times-tools wakatime:discover` targets the local Docker database.
 6. **Docker Deployment**: Hardened multi-stage container with native compilation and in-process migrations.
 
+### Next milestone (active planning):
+
+The following features have been promoted from deferred status to active
+development planning. Full design, dependency DAG, and phased implementation
+details are in [NEXT-MILESTONE.md](./NEXT-MILESTONE.md):
+
+1. **MCP Config Page** — admin UI page (`/admin/mcp-config`) with terminal-style
+   copyable agent connection snippets for Claude Desktop, Claude Code, Codex,
+   and generic MCP clients. New addition.
+2. **Live API Sync** — recurring background WakaTime API synchronization using
+   the existing token provider, source-neutral normalization, fidelity-aware
+   reconciliation, preserved classification decisions, durable run coordination,
+   an in-process scheduler, authoritative editor labels, and operational admin
+   controls. Promotes §7.3 and §14 bullet 2. The handoff contains eleven work
+   packages, five verification gates, and explicit shared-file ownership.
+
 ### Deferred for future milestones:
-- Live recurring background API synchronization scheduler and catch-up worker.
 - Interactive scrubbable timeline visualizations and chord/sankey project distribution charts.
 - External git/ticket system enrichment correlation.

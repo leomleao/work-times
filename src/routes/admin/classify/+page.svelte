@@ -192,6 +192,7 @@
   let proposalMatchMode = $state<MatchMode>('exact');
   let proposalPriority = $state(0);
   let proposalTimesheetCode = $state('');
+  let proposalSelectorValue = $state('');
 
   // Whole-slice override state
   let overrideModalOpen = $state(false);
@@ -246,6 +247,7 @@
       proposalMatchMode = 'exact';
       proposalTimesheetCode = '';
       proposalPriority = 0;
+      proposalSelectorValue = '';
     }
     if (form?.success && !form?.preview) {
       overrideModalOpen = false;
@@ -392,6 +394,7 @@
     if (activeSuggestion) {
       proposalName = `${proposalChoice === 'work' ? 'Work' : 'Personal'} ${activeSuggestion.selectorType}: ${activeSuggestion.displayValue}`;
       proposalMatchMode = activeSuggestion.matchMode ?? 'exact';
+      proposalSelectorValue = activeSuggestion.selectorValue;
     }
   });
 
@@ -797,7 +800,7 @@
               <input type="hidden" name="returnSelector" value={selectedSelectorFilter} />
               <input type="hidden" name="type" value="create" />
               <input type="hidden" name="selectorType" value={activeSuggestion.selectorType} />
-              <input type="hidden" name="selectorValue" value={activeSuggestion.selectorValue} />
+              <input type="hidden" name="selectorValue" value={proposalSelectorValue} />
               <input type="hidden" name="classification" value={proposalChoice} />
               <input type="hidden" name="matchMode" value={proposalMatchMode} />
 
@@ -830,6 +833,21 @@
                 </span>
               </div>
 
+              {#if proposalMatchMode === 'glob'}
+                <div class="form-group">
+                  <label for="rule-pattern" class="form-label">
+                    <span>Pattern</span>
+                  </label>
+                  <input
+                    id="rule-pattern"
+                    type="text"
+                    bind:value={proposalSelectorValue}
+                    class="form-input"
+                    required
+                  />
+                </div>
+              {/if}
+
               <div class="form-group">
                 <label for="rule-name" class="form-label">
                   <span>Rule Name</span>
@@ -844,8 +862,8 @@
                 />
               </div>
 
-              <div style="display: flex; gap: 10px;">
-                <div class="form-group" style="flex: 1;">
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: start;">
+                <div class="form-group">
                   <label for="rule-priority" class="form-label">
                     <span>Operator Priority</span>
                   </label>
@@ -859,7 +877,7 @@
                   />
                   <span class="form-hint">Evaluated before specificity rank.</span>
                 </div>
-                <div class="form-group" style="flex: 1;">
+                <div class="form-group">
                   <label for="rule-timesheet" class="form-label">
                     <span>Timesheet Code (Optional)</span>
                   </label>
