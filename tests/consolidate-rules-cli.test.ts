@@ -574,7 +574,7 @@ describe('Consolidate Rules CLI (scripts/consolidate-rules.ts)', () => {
       backupDb.close();
 
       // 6. Verify TARGET database:
-      // - Target database advanced to migration 004
+      // - Target database advanced through the current migration set
       const targetDb = openDatabase({ path: dbPath, readonly: true, migrate: false });
       const targetMigrations = targetDb
         .prepare('SELECT filename FROM schema_migrations ORDER BY filename ASC')
@@ -583,7 +583,11 @@ describe('Consolidate Rules CLI (scripts/consolidate-rules.ts)', () => {
         '001-import-schema.sql',
         '002-application-state.sql',
         '003-wakatime-oauth.sql',
-        '004-classification-rules-match-mode.sql'
+        '004-classification-rules-match-mode.sql',
+        '005-sync-lifecycle.sql',
+        '006-reconciliation-overlay.sql',
+        '007-user-agent-registry.sql',
+        '008-connection-lifecycle.sql'
       ]);
 
       // - Target has match_mode column

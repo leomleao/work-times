@@ -8,7 +8,7 @@ Updated: 2026-09-09. Integration worktree: `next-milestone-integration` at basel
 | --- | --- | --- | --- | --- | --- | --- |
 | P0 | `task_f6b628cd3920` | accepted | agy `ctx_0f2653834e31`, corrections `ctx_f33979ba3af7` / `ctx_94e380835b16`, orchestrator review | none | frozen contracts and fixtures; targeted 76/76; full 646/646; check/build clean; host and Docker Node 24 `fs-ext` proof passed | — |
 | G0 | `task_20644ffca4b1` | passed | orchestrator | P0 | contract matrix, exact migration sequence, lifecycle/lock choice, truthful aggregate/freshness/catch-up failure cases reviewed | — |
-| P1 | `task_7d721f095348` | running | agy `ctx_adf276bcf049` | G0 | supervised child `task_4dc215842acd`; worktree `p1-schema` | review and integration pending |
+| P1 | `task_7d721f095348` | accepted | agy `ctx_adf276bcf049`, corrections `ctx_78601ac8d4fe`; orchestrator review | G0 | schema/repositories integrated at `9105de7`; independent targeted 62/62; worker check/build clean; recovery, freshness, membership, and CAS corrections verified | G1 integration with P2/P3 pending |
 | P2 | `task_e82c1a05fdde` | running | agy `ctx_186b85a6dc5c` | G0 | supervised child `task_cef3f1b3e028`; worktree `p2-http-oauth` | review and integration pending |
 | P3 | `task_f36f1547ac48` | not_started | unassigned | P1 | pending | — |
 | G1 | `task_62f0c41edff7` | pending | orchestrator | P1, P2, P3 | pending | Gate review |
@@ -48,3 +48,4 @@ P0 first-pass review kept G0 pending: direct review found migration filename dri
 
 - 2026-09-09 baseline at `9c00d70`: `pnpm test` passed 570 tests in 34 files; `pnpm check` reported 0 errors and 0 warnings; `pnpm build` completed successfully with the in-memory database build contract.
 - 2026-09-10 P9: accepted after a bounded correction pass. Independent recipe/page tests passed 43/43; exact Codex and Claude recipes, fail-closed expiry handling, safe key metadata, accessible selection, and cleanup paths were reviewed. Integrated at `3a152d8`.
+- 2026-09-10 P1: accepted after boundary corrections. Independent repository/migration tests passed 62/62; populated migration, scoped restart recovery, unchanged-content freshness, exact heartbeat retirement, allocation survival, and atomic connection-generation CAS were reviewed. Integrated at `9105de7`; the historical consolidation test now expects migrations 005-008 and passes 24/24.
