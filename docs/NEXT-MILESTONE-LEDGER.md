@@ -18,7 +18,7 @@ Updated: 2026-09-09. Integration worktree: `next-milestone-integration` at basel
 | G2 | `task_b07a775ae59f` | pending | orchestrator | P4, P6 | pending | Gate review |
 | P7 | `task_62ede9b2f4ce` | not_started | unassigned | G2 | pending | — |
 | P8 | `task_ea65af005d18` | not_started | unassigned | G2 | pending | — |
-| P9 | `task_db905eeaa75e` | running | agy `ctx_93af6b374108` | G0 | supervised child `task_ca59cad56ee3`; worktree `p9-mcp-setup` | review, browser, and integration pending |
+| P9 | `task_db905eeaa75e` | accepted | agy `ctx_93af6b374108`, corrections `ctx_7527bef826b0`; orchestrator review | G0 | client-specific recipes and safe metadata integrated at `3a152d8`; independent targeted 43/43; worker full 689/689, check/build clean | G3/G4 browser evidence remains with the synthetic harness |
 | G3 | `task_9ce29b4e96a0` | pending | orchestrator | P7, P8, P9 | pending | Gate review |
 | P10 | `task_1a44fbdba0ee` | not_started | unassigned | G3 | pending | — |
 | G4 | `task_25831a75f534` | pending | orchestrator | P10 | pending | Live checks may remain explicitly unavailable |
@@ -47,3 +47,4 @@ P0 first-pass review kept G0 pending: direct review found migration filename dri
 ## Verification log
 
 - 2026-09-09 baseline at `9c00d70`: `pnpm test` passed 570 tests in 34 files; `pnpm check` reported 0 errors and 0 warnings; `pnpm build` completed successfully with the in-memory database build contract.
+- 2026-09-10 P9: accepted after a bounded correction pass. Independent recipe/page tests passed 43/43; exact Codex and Claude recipes, fail-closed expiry handling, safe key metadata, accessible selection, and cleanup paths were reviewed. Integrated at `3a152d8`.
