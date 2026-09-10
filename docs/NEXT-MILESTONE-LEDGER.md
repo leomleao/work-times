@@ -10,7 +10,7 @@ Updated: 2026-09-09. Integration worktree: `next-milestone-integration` at basel
 | G0 | `task_20644ffca4b1` | passed | orchestrator | P0 | contract matrix, exact migration sequence, lifecycle/lock choice, truthful aggregate/freshness/catch-up failure cases reviewed | — |
 | P1 | `task_7d721f095348` | accepted | agy `ctx_adf276bcf049`, corrections `ctx_78601ac8d4fe`; orchestrator review | G0 | schema/repositories integrated at `9105de7`; independent targeted 62/62; worker check/build clean; recovery, freshness, membership, and CAS corrections verified | G1 integration with P2/P3 pending |
 | P2 | `task_e82c1a05fdde` | running | agy `ctx_186b85a6dc5c` | G0 | supervised child `task_cef3f1b3e028`; worktree `p2-http-oauth` | review and integration pending |
-| P3 | `task_f36f1547ac48` | not_started | unassigned | P1 | pending | — |
+| P3 | `task_f36f1547ac48` | running | agy stage A `ctx_32c1687d895a` | P1 | normalization child `task_5fb50cfcab5b`; worktree `p3-normalization` from `ec1ae5a`; source baseline checksums verified; terminal launched with `agy --mode accept-edits` | stage A review, then transactional writer stage B |
 | G1 | `task_62f0c41edff7` | pending | orchestrator | P1, P2, P3 | pending | Gate review |
 | P4 | `task_0fc56bbe5b41` | not_started | unassigned | G1 | pending | — |
 | P5 | `task_c0a4eaa891b2` | not_started | unassigned | G1 | pending | — |
@@ -49,3 +49,4 @@ P0 first-pass review kept G0 pending: direct review found migration filename dri
 - 2026-09-09 baseline at `9c00d70`: `pnpm test` passed 570 tests in 34 files; `pnpm check` reported 0 errors and 0 warnings; `pnpm build` completed successfully with the in-memory database build contract.
 - 2026-09-10 P9: accepted after a bounded correction pass. Independent recipe/page tests passed 43/43; exact Codex and Claude recipes, fail-closed expiry handling, safe key metadata, accessible selection, and cleanup paths were reviewed. Integrated at `3a152d8`.
 - 2026-09-10 P1: accepted after boundary corrections. Independent repository/migration tests passed 62/62; populated migration, scoped restart recovery, unchanged-content freshness, exact heartbeat retirement, allocation survival, and atomic connection-generation CAS were reviewed. Integrated at `9105de7`; the historical consolidation test now expects migrations 005-008 and passes 24/24.
+- 2026-09-10 P3A dispatch: Orca readiness detection rejected two attachment attempts after the one-time folder trust screen; manual Orca dispatch `ctx_32c1687d895a` injected the same bounded task into the verified `agy --mode accept-edits` terminal. No implementation ran under the failed attachments.
