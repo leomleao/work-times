@@ -5,7 +5,8 @@ import {
   SqliteAdminSessionRepository,
   SqliteApiKeyRepository,
   SqliteOAuthClientRepository,
-  SqliteOAuthAuthorizationRepository
+  SqliteOAuthAuthorizationRepository,
+  SqliteWakaTimeOAuthConnectionRepository
 } from './index.js';
 import type { AdminSessionRecord } from '$lib/server/auth/admin-auth';
 import type { ApiKeyRecord } from '$lib/server/auth/api-keys';
@@ -751,6 +752,129 @@ describe('SQLite Repositories and Application State Schema', () => {
           'https://work-times.home/mcp'
         )
       ).resolves.toBeNull();
+    });
+  });
+
+  describe('WakaTimeOAuthConnectionRepository and Connection Lifecycle', () => {
+    it('initializes connection with generation 1 and supports archive binding', () => {
+      const repo = new SqliteWakaTimeOAuthConnectionRepository(db);
+      expect(repo.get()).toBeNull();
+
+      repo.upsert({
+        accessTokenSealed: 'sealed_tok_1',
+        refreshTokenSealed: 'sealed_ref_1',
+        tokenType: 'Bearer',
+        scopes: ['read_summaries'],
+        expiresAt: '2026-01-01T01:00:00.000Z',
+        connectedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      });
+
+      const conn = repo.get();
+      expect(conn).not.toBeNull();
+      expect(conn?.generation).toBe(1);
+      expect(conn?.boundArchiveIdentity).toBeNull();
+      expect(conn?.reboundAt).toBeNull();
+
+      // Rebind to archive identity
+      const nextGen = repo.rebind('user_waka_123', 1, '2026-01-01T00:10:00.000Z');
+      expect(nextGen).toBe(2);
+
+      const rebound = repo.get();
+      expect(rebound?.generation).toBe(2);
+      expect(rebound?.boundArchiveIdentity).toBe('user_waka_123');
+      expect(rebound?.reboundAt).toBe('2026-01-01T00:10:00.000Z');
+    });
+
+    it('enforces compare-and-set guards on token refresh and rejects stale generation CAS', () => {
+      const repo = new SqliteWakaTimeOAuthConnectionRepository(db);
+
+      repo.upsert({
+        accessTokenSealed: 'sealed_tok_1',
+        refreshTokenSealed: 'sealed_ref_1',
+        tokenType: 'Bearer',
+        scopes: ['read_summaries'],
+        expiresAt: '2026-01-01T01:00:00.000Z',
+        connectedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      });
+
+      // CAS update with matching generation succeeds
+      const updated = repo.updateTokensCAS(
+        {
+          accessTokenSealed: 'sealed_tok_2',
+          refreshTokenSealed: 'sealed_ref_2',
+          expiresAt: '2026-01-01T02:00:00.000Z'
+        },
+        1
+      );
+      expect(updated).toBe(true);
+      expect(repo.get()?.accessTokenSealed).toBe('sealed_tok_2');
+
+      // Rebind advances generation to 2
+      repo.rebind('user_waka_123', 1);
+      expect(repo.get()?.generation).toBe(2);
+
+      // CAS update from worker running under stale generation 1 throws or aborts via trigger
+      expect(() =>
+        repo.updateTokensCAS(
+          {
+            accessTokenSealed: 'sealed_tok_stale',
+            refreshTokenSealed: 'sealed_ref_stale',
+            expiresAt: '2026-01-01T03:00:00.000Z'
+          },
+          1
+        )
+      ).toThrow(/STALE_CONNECTION_GENERATION/);
+
+      // Direct SQL update attempting to write generation < active generation aborts via trigger
+      expect(() =>
+        db
+          .prepare('UPDATE wakatime_oauth_connection SET generation = 1 WHERE id = 1')
+          .run()
+      ).toThrow(/STALE_CONNECTION_GENERATION/);
+
+      // Rebind with wrong expectedGeneration throws STALE_CONNECTION_GENERATION
+      expect(() => repo.rebind('user_waka_456', 1)).toThrow(/STALE_CONNECTION_GENERATION/);
+
+      // Monotonic rebind without expectedGeneration succeeds and advances generation
+      const gen3 = repo.rebind('user_waka_789');
+      expect(gen3).toBe(3);
+      expect(repo.get()?.generation).toBe(3);
+      expect(repo.get()?.boundArchiveIdentity).toBe('user_waka_789');
+
+      // Monotonic rebind with matching expectedGeneration succeeds and advances generation
+      const gen4 = repo.rebind('user_waka_101112', 3);
+      expect(gen4).toBe(4);
+      expect(repo.get()?.generation).toBe(4);
+
+      // CAS refresh with stale generation throws STALE_CONNECTION_GENERATION without downgrade
+      expect(() =>
+        repo.updateTokensCAS(
+          {
+            accessTokenSealed: 'sealed_tok_stale_3',
+            refreshTokenSealed: 'sealed_ref_stale_3',
+            expiresAt: '2026-01-01T04:00:00.000Z'
+          },
+          3
+        )
+      ).toThrow(/STALE_CONNECTION_GENERATION/);
+      expect(repo.get()?.generation).toBe(4); // Database generation unmodified
+
+      // Deleting connection makes CAS return false and rebind throw
+      repo.delete();
+      expect(repo.get()).toBeNull();
+      expect(
+        repo.updateTokensCAS(
+          {
+            accessTokenSealed: 'sealed_tok_none',
+            refreshTokenSealed: 'sealed_ref_none',
+            expiresAt: null
+          },
+          4
+        )
+      ).toBe(false);
+      expect(() => repo.rebind('user_none', 4)).toThrow(/Cannot rebind: no active WakaTime connection/);
     });
   });
 });
