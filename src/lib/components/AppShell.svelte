@@ -10,6 +10,7 @@
     LogOut,
     Settings2,
     SlidersHorizontal,
+    Terminal,
     Menu,
     X
   } from '@lucide/svelte';
@@ -40,6 +41,12 @@
       href: '/admin/oauth-clients',
       match: (p: string) => p.startsWith('/admin/oauth-clients'),
       icon: Braces
+    },
+    {
+      label: 'MCP config',
+      href: '/admin/mcp-config',
+      match: (p: string) => p.startsWith('/admin/mcp-config'),
+      icon: Terminal
     },
     { label: 'Settings', href: '/admin/settings', match: (p: string) => p.startsWith('/admin/settings'), icon: Settings2 }
   ];
