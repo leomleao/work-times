@@ -54,10 +54,22 @@ export interface CapabilityRecord {
 }
 
 /**
+ * Per-date restriction record tracking historical retention limits.
+ */
+export interface DateRestrictionRecord {
+  date: string;
+  capability: SyncCapability;
+  statusCode: 402 | 403;
+  restrictedAt: string;
+  nextReprobeAt: string;
+}
+
+/**
  * Serialized state representation of the capability policy.
  */
 export interface CapabilityPolicyState {
   capabilities: Record<SyncCapability, CapabilityRecord>;
+  dateRestrictions?: Record<string, Record<SyncCapability, DateRestrictionRecord>>;
   updatedAt: string;
 }
 
@@ -139,13 +151,15 @@ export function getYesterdayDate(now: Date = new Date()): string {
  *
  * Governs:
  * - Treating summaries as required baseline.
- * - Plan-aware capability degradation: heartbeats and durations can degrade gracefully
- *   to a 'partial' sync outcome while summaries remain useful.
+ * - Date-aware capability evaluation: an old-date 402/403 records only that date/layer
+ *   and does not globally disable recent summaries or heartbeats.
+ * - Endpoint-wide restriction needs a recent probe (within the free-tier window).
  * - Infrequent reprobing: avoids hammering plan-restricted endpoints on every sync run.
  * - 7-day free tier window scheduling heuristics.
  */
 export class CapabilityPolicy {
   private records: Map<SyncCapability, CapabilityRecord>;
+  private dateRestrictions: Map<string, Map<SyncCapability, DateRestrictionRecord>>;
   private readonly reprobeIntervalMs: number;
   private readonly errorRetryIntervalMs: number;
 
@@ -157,6 +171,7 @@ export class CapabilityPolicy {
     this.reprobeIntervalMs = options?.reprobeIntervalMs ?? DEFAULT_REPROBE_INTERVAL_MS;
     this.errorRetryIntervalMs = options?.errorRetryIntervalMs ?? DEFAULT_ERROR_RETRY_INTERVAL_MS;
     this.records = new Map();
+    this.dateRestrictions = new Map();
 
     const capabilities: SyncCapability[] = ['summaries', 'durations', 'heartbeats'];
     for (const cap of capabilities) {
@@ -186,14 +201,21 @@ export class CapabilityPolicy {
   }
 
   /**
-   * Check if a capability is currently known to be available.
+   * Retrieve date restriction record for a specific date and capability, if present.
+   */
+  getDateRestriction(date: string, capability: SyncCapability): DateRestrictionRecord | null {
+    return this.dateRestrictions.get(date)?.get(capability) ?? null;
+  }
+
+  /**
+   * Check if a capability is currently known to be available globally.
    */
   isAvailable(capability: SyncCapability): boolean {
     return this.records.get(capability)?.status === 'available';
   }
 
   /**
-   * Check if a capability is restricted by account plan (HTTP 402/403).
+   * Check if a capability is restricted by account plan globally (HTTP 402/403).
    */
   isRestricted(capability: SyncCapability): boolean {
     return this.records.get(capability)?.status === 'restricted';
@@ -211,8 +233,29 @@ export class CapabilityPolicy {
 
   /**
    * Determine whether a capability should be probed or reprobed.
+   * Date-aware: checks date-specific restriction if date string is provided.
    */
-  shouldReprobe(capability: SyncCapability, now: Date = new Date()): boolean {
+  shouldReprobe(capability: SyncCapability, dateOrNow?: string | Date, maybeNow?: Date): boolean {
+    let date: string | undefined;
+    let now: Date;
+
+    if (typeof dateOrNow === 'string') {
+      date = dateOrNow;
+      now = maybeNow ?? new Date();
+    } else {
+      date = undefined;
+      now = dateOrNow ?? new Date();
+    }
+
+    // 1. If checking a specific date with a date restriction:
+    if (date) {
+      const dateRestr = this.dateRestrictions.get(date)?.get(capability);
+      if (dateRestr) {
+        return now.getTime() >= new Date(dateRestr.nextReprobeAt).getTime();
+      }
+    }
+
+    // 2. Fall back to endpoint-wide record
     const record = this.records.get(capability);
     if (!record) return true;
 
@@ -224,12 +267,7 @@ export class CapabilityPolicy {
       return false;
     }
 
-    if (record.status === 'restricted') {
-      if (!record.nextReprobeAt) return true;
-      return now.getTime() >= new Date(record.nextReprobeAt).getTime();
-    }
-
-    if (record.status === 'error') {
+    if (record.status === 'restricted' || record.status === 'error') {
       if (!record.nextReprobeAt) return true;
       return now.getTime() >= new Date(record.nextReprobeAt).getTime();
     }
@@ -239,9 +277,31 @@ export class CapabilityPolicy {
 
   /**
    * Determine whether an endpoint request should be attempted during sync.
-   * Skips restricted endpoints unless reprobe time has arrived.
+   * Date-aware:
+   * - If an old date received 402/403, only that date is skipped.
+   * - A recent date is attempted unless endpoint-wide restriction was established by a recent probe.
    */
-  shouldAttempt(capability: SyncCapability, now: Date = new Date()): boolean {
+  shouldAttempt(capability: SyncCapability, dateOrNow?: string | Date, maybeNow?: Date): boolean {
+    let date: string | undefined;
+    let now: Date;
+
+    if (typeof dateOrNow === 'string') {
+      date = dateOrNow;
+      now = maybeNow ?? new Date();
+    } else {
+      date = undefined;
+      now = dateOrNow ?? new Date();
+    }
+
+    // 1. If checking a specific date
+    if (date) {
+      const dateRestr = this.dateRestrictions.get(date)?.get(capability);
+      if (dateRestr) {
+        return this.shouldReprobe(capability, date, now);
+      }
+    }
+
+    // 2. Check global record
     const record = this.records.get(capability);
     if (!record) return false;
 
@@ -259,7 +319,22 @@ export class CapabilityPolicy {
   /**
    * Record a successful capability call or probe.
    */
-  recordSuccess(capability: SyncCapability, now: Date = new Date()): void {
+  recordSuccess(capability: SyncCapability, dateOrNow?: string | Date, maybeNow?: Date): void {
+    let date: string | undefined;
+    let now: Date;
+
+    if (typeof dateOrNow === 'string') {
+      date = dateOrNow;
+      now = maybeNow ?? new Date();
+    } else {
+      date = undefined;
+      now = dateOrNow ?? new Date();
+    }
+
+    if (date) {
+      this.dateRestrictions.get(date)?.delete(capability);
+    }
+
     const record = this.records.get(capability);
     if (!record) return;
 
@@ -272,19 +347,60 @@ export class CapabilityPolicy {
   }
 
   /**
-   * Record a plan-level restriction (HTTP 402 or 403). Schedules an infrequent reprobe.
+   * Record a plan-level restriction (HTTP 402 or 403).
+   *
+   * DATE-AWARE POLICY INVARIANT:
+   * - An old date's 402/403 records only that date/layer and does NOT globally restrict recent work.
+   * - An endpoint-wide restriction is only recorded when the restriction is observed
+   *   from a recent probe (within WAKATIME_FREE_TIER_WINDOW_DAYS) or an un-dated probe.
    */
   recordRestriction(
     capability: SyncCapability,
     statusCode: 402 | 403,
-    now: Date = new Date(),
+    dateOrNow?: string | Date,
+    maybeNow?: Date,
     customReprobeIntervalMs?: number
   ): void {
-    const record = this.records.get(capability);
-    if (!record) return;
+    let date: string | undefined;
+    let now: Date;
+
+    if (typeof dateOrNow === 'string') {
+      date = dateOrNow;
+      now = maybeNow ?? new Date();
+    } else {
+      date = undefined;
+      now = dateOrNow ?? new Date();
+    }
 
     const interval = customReprobeIntervalMs ?? this.reprobeIntervalMs;
     const nextReprobe = new Date(now.getTime() + interval);
+
+    // 1. If date is provided, always record date-specific restriction
+    if (date) {
+      let dateMap = this.dateRestrictions.get(date);
+      if (!dateMap) {
+        dateMap = new Map();
+        this.dateRestrictions.set(date, dateMap);
+      }
+      dateMap.set(capability, {
+        date,
+        capability,
+        statusCode,
+        restrictedAt: now.toISOString(),
+        nextReprobeAt: nextReprobe.toISOString()
+      });
+
+      // Check if probe was on a recent date within free window
+      const isRecent = isDateWithinFreeWindow(date, now);
+      if (!isRecent) {
+        // Old date: do NOT mark the endpoint globally restricted!
+        return;
+      }
+    }
+
+    // 2. Global / recent probe restriction
+    const record = this.records.get(capability);
+    if (!record) return;
 
     record.status = 'restricted';
     record.lastProbedAt = now.toISOString();
@@ -316,12 +432,6 @@ export class CapabilityPolicy {
 
   /**
    * Evaluate the overall sync run outcome based on the step results.
-   *
-   * Rules:
-   * 1. Summaries is the required baseline: if summaries fails or is restricted, the run outcome is 'failed'.
-   * 2. If summaries succeeds, but durations or heartbeats are restricted/degraded, the run outcome
-   *    is 'partial' with advisory codes rather than 'failed'.
-   * 3. If all attempted capabilities succeed, the run outcome is 'succeeded'.
    */
   evaluateSyncRun(stepResults: SyncStepResult[]): SyncRunOutcome {
     const summariesResult = stepResults.find((r) => r.capability === 'summaries');
@@ -388,8 +498,18 @@ export class CapabilityPolicy {
     for (const [k, v] of this.records.entries()) {
       caps[k] = { ...v };
     }
+
+    const dateRestrs: Record<string, Record<SyncCapability, DateRestrictionRecord>> = {};
+    for (const [date, capMap] of this.dateRestrictions.entries()) {
+      dateRestrs[date] = {} as Record<SyncCapability, DateRestrictionRecord>;
+      for (const [cap, rec] of capMap.entries()) {
+        dateRestrs[date][cap] = { ...rec };
+      }
+    }
+
     return {
       capabilities: caps as Record<SyncCapability, CapabilityRecord>,
+      dateRestrictions: dateRestrs,
       updatedAt: new Date().toISOString()
     };
   }
@@ -398,10 +518,22 @@ export class CapabilityPolicy {
    * Load policy state from a serialized representation.
    */
   loadState(state: CapabilityPolicyState): void {
-    if (!state?.capabilities) return;
-    for (const [k, v] of Object.entries(state.capabilities)) {
-      if (this.records.has(k as SyncCapability)) {
-        this.records.set(k as SyncCapability, { ...v });
+    if (state?.capabilities) {
+      for (const [k, v] of Object.entries(state.capabilities)) {
+        if (this.records.has(k as SyncCapability)) {
+          this.records.set(k as SyncCapability, { ...v });
+        }
+      }
+    }
+
+    if (state?.dateRestrictions) {
+      this.dateRestrictions.clear();
+      for (const [date, capMap] of Object.entries(state.dateRestrictions)) {
+        const m = new Map<SyncCapability, DateRestrictionRecord>();
+        for (const [cap, rec] of Object.entries(capMap)) {
+          m.set(cap as SyncCapability, { ...rec });
+        }
+        this.dateRestrictions.set(date, m);
       }
     }
   }
@@ -435,14 +567,13 @@ export async function probeCapabilities(
 ): Promise<CapabilityPolicy> {
   const policy = options?.policy ?? new CapabilityPolicy();
   const now = options?.now ?? new Date();
-  const probeDate = options?.probeDate ?? getYesterdayDate(now); // Yesterday
+  const probeDate = options?.probeDate ?? getYesterdayDate(now);
 
-  // 1. Probe Summaries (baseline). Avoid /users/current because that endpoint's
-  // documented OAuth scope is `email`, which Work Times does not request.
-  if (options?.force || policy.shouldReprobe('summaries', now)) {
+  // 1. Probe Summaries (baseline)
+  if (options?.force || policy.shouldReprobe('summaries', probeDate, now)) {
     try {
       await client.getSummaries(probeDate, probeDate);
-      policy.recordSuccess('summaries', now);
+      policy.recordSuccess('summaries', probeDate, now);
     } catch (err) {
       if (err instanceof WakaTimeAuthError) {
         policy.recordError('summaries', err, now);
@@ -451,7 +582,7 @@ export async function probeCapabilities(
         throw err;
       }
       if (err instanceof CapabilityRestrictedError) {
-        policy.recordRestriction('summaries', err.statusCode, now);
+        policy.recordRestriction('summaries', err.statusCode, probeDate, now);
       } else {
         policy.recordError('summaries', err as Error, now);
       }
@@ -459,13 +590,13 @@ export async function probeCapabilities(
   }
 
   // 2. Probe Durations
-  if (options?.force || policy.shouldReprobe('durations', now)) {
+  if (options?.force || policy.shouldReprobe('durations', probeDate, now)) {
     try {
       await client.getDurations(probeDate);
-      policy.recordSuccess('durations', now);
+      policy.recordSuccess('durations', probeDate, now);
     } catch (err) {
       if (err instanceof CapabilityRestrictedError) {
-        policy.recordRestriction('durations', err.statusCode, now);
+        policy.recordRestriction('durations', err.statusCode, probeDate, now);
       } else {
         policy.recordError('durations', err as Error, now);
       }
@@ -473,13 +604,13 @@ export async function probeCapabilities(
   }
 
   // 3. Probe Heartbeats
-  if (options?.force || policy.shouldReprobe('heartbeats', now)) {
+  if (options?.force || policy.shouldReprobe('heartbeats', probeDate, now)) {
     try {
       await client.getHeartbeats(probeDate);
-      policy.recordSuccess('heartbeats', now);
+      policy.recordSuccess('heartbeats', probeDate, now);
     } catch (err) {
       if (err instanceof CapabilityRestrictedError) {
-        policy.recordRestriction('heartbeats', err.statusCode, now);
+        policy.recordRestriction('heartbeats', err.statusCode, probeDate, now);
       } else {
         policy.recordError('heartbeats', err as Error, now);
       }

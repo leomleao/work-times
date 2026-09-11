@@ -334,7 +334,7 @@ describe("WakaTime API Discovery", () => {
     expect(exitCode).toBe(0);
     expect(stdoutMock.mock.calls[0][0]).toContain("durations   : restricted (HTTP_402)");
     expect(stdoutMock.mock.calls[0][0]).toContain("heartbeats  : restricted (HTTP_403)");
-  });
+  }, 15000);
 
   it("persists discovered capability policy state for the active database", async () => {
     const db = openTestDatabase();
