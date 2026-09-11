@@ -11,6 +11,7 @@ import {
   type SyncDayStatus,
   type LayerFreshnessRecord
 } from '$lib/server/sync/contracts.js';
+import type { SliceEntityType, SliceKind } from '../schema.js';
 
 export class IdempotencyConflictError extends Error {
   constructor(message = 'A different sync run request already exists for this idempotency key') {
@@ -90,6 +91,8 @@ export interface DailyTimeAllocationRecord {
   date: string;
   projectId: number;
   entity: string;
+  entityType: SliceEntityType;
+  kind: SliceKind;
   classification: 'work' | 'personal';
   allocatedSeconds: number;
   timesheetCode: string | null;
@@ -725,6 +728,8 @@ export class SqliteSyncRepository {
       date: String(r.date),
       projectId: Number(r.project_id),
       entity: String(r.entity),
+      entityType: r.entity_type as SliceEntityType,
+      kind: r.kind as SliceKind,
       classification: r.classification as 'work' | 'personal',
       allocatedSeconds: Number(r.allocated_seconds),
       timesheetCode: (r.timesheet_code as string) ?? null,

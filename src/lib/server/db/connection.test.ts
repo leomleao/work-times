@@ -11,6 +11,7 @@ import {
   openTestDatabase,
   runMigrations
 } from './connection.js';
+import { SqliteSyncRepository } from './repositories/sync.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -290,13 +291,14 @@ describe('the shipped schema', () => {
         VALUES (1, 'sealed_access', 'sealed_refresh', '["read_summaries"]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
     `);
 
-    // Run forward migrations 005-008
+    // Run forward migrations 005-009
     const applied = runMigrations(db, MIGRATIONS_DIR);
     expect(applied).toEqual([
       '005-sync-lifecycle.sql',
       '006-reconciliation-overlay.sql',
       '007-user-agent-registry.sql',
-      '008-connection-lifecycle.sql'
+      '008-connection-lifecycle.sql',
+      '009-slice-semantic-identity.sql'
     ]);
 
     // Verify foreign key integrity with 0 violations
@@ -319,6 +321,8 @@ describe('the shipped schema', () => {
 
     const alloc = db.prepare('SELECT * FROM daily_time_allocations WHERE id = ?').get('alloc_1') as Record<string, unknown>;
     expect(alloc.state).toBe('active');
+    expect(alloc.entity_type).toBe('file');
+    expect(alloc.kind).toBe('entity');
     expect(alloc.note).toBe('Initial allocation');
 
     // Heartbeat membership seeded
@@ -352,5 +356,385 @@ describe('the shipped schema', () => {
     expect(
       db.prepare("SELECT filename FROM schema_migrations WHERE filename = '002-fail.sql'").get()
     ).toBeUndefined();
+  });
+});
+
+describe('Milestone P1: Slice semantic identity (migration 009)', () => {
+  function createPopulated008Database(): Database.Database {
+    const db = new Database(':memory:');
+    configurePragmas(db, {});
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        filename    TEXT PRIMARY KEY,
+        applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `);
+
+    const pre009Files = [
+      '001-import-schema.sql',
+      '002-application-state.sql',
+      '003-wakatime-oauth.sql',
+      '004-classification-rules-match-mode.sql',
+      '005-sync-lifecycle.sql',
+      '006-reconciliation-overlay.sql',
+      '007-user-agent-registry.sql',
+      '008-connection-lifecycle.sql'
+    ];
+
+    for (const f of pre009Files) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, f), 'utf8');
+      db.transaction(() => {
+        db.exec(sql);
+        db.prepare('INSERT INTO schema_migrations (filename) VALUES (?)').run(f);
+      })();
+    }
+
+    db.exec(`
+      INSERT INTO source_imports (id, source_type, source_hash, byte_size) VALUES (1, 'daily_dump', 'hash1', 100);
+      INSERT INTO projects (id, name) VALUES (10, 'project-p1');
+      INSERT INTO daily_totals (date, total_seconds, grand_total_json, source_import_id, source_hash)
+        VALUES ('2026-01-01', 3600.0, '{}', 1, 'hash1');
+      INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, is_unattributed, source_import_id)
+        VALUES (100, '2026-01-01', 10, 'src/index.ts', 'file', 'entity', 1800.0, 0, 1);
+      INSERT INTO slice_identities (id, slice_id, selector_type, value, source, observed_heartbeats)
+        VALUES (200, 100, 'entity', 'src/index.ts', 'slice', 5);
+      INSERT INTO daily_time_allocations (id, date, project_id, entity, classification, allocated_seconds, state, note)
+        VALUES ('alloc_legacy', '2026-01-01', 10, 'src/index.ts', 'work', 1800.0, 'active', 'Legacy alloc');
+      INSERT INTO classification_revisions (id, mutation_type, target_type, target_id, before_json, after_json, actor)
+        VALUES (1, 'allocation_created', 'allocation', 'alloc_legacy', NULL, '{"classification":"work"}', 'admin');
+    `);
+
+    return db;
+  }
+
+  it('proves populated upgrade and idempotent migration replay', () => {
+    const db = createPopulated008Database();
+
+    const applied = runMigrations(db, MIGRATIONS_DIR);
+    expect(applied).toEqual(['009-slice-semantic-identity.sql']);
+
+    // Foreign key check passes with 0 errors
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+
+    // Slices preserved
+    const slice = db.prepare('SELECT * FROM day_project_entity_slices WHERE id = 100').get() as Record<string, unknown>;
+    expect(slice.id).toBe(100);
+    expect(slice.date).toBe('2026-01-01');
+    expect(slice.project_id).toBe(10);
+    expect(slice.entity).toBe('src/index.ts');
+    expect(slice.entity_type).toBe('file');
+    expect(slice.kind).toBe('entity');
+    expect(slice.total_seconds).toBe(1800.0);
+
+    // Slice identities preserved with FK
+    const ident = db.prepare('SELECT * FROM slice_identities WHERE id = 200').get() as Record<string, unknown>;
+    expect(ident.id).toBe(200);
+    expect(ident.slice_id).toBe(100);
+    expect(ident.selector_type).toBe('entity');
+    expect(ident.value).toBe('src/index.ts');
+
+    // Allocations rebuilt with entity_type and kind
+    const alloc = db.prepare('SELECT * FROM daily_time_allocations WHERE id = ?').get('alloc_legacy') as Record<string, unknown>;
+    expect(alloc.id).toBe('alloc_legacy');
+    expect(alloc.date).toBe('2026-01-01');
+    expect(alloc.project_id).toBe(10);
+    expect(alloc.entity).toBe('src/index.ts');
+    expect(alloc.entity_type).toBe('file');
+    expect(alloc.kind).toBe('entity');
+    expect(alloc.classification).toBe('work');
+    expect(alloc.allocated_seconds).toBe(1800.0);
+    expect(alloc.state).toBe('active');
+    expect(alloc.note).toBe('Legacy alloc');
+
+    // Classification revision history preserved
+    const rev = db.prepare('SELECT * FROM classification_revisions WHERE id = 1').get() as Record<string, unknown>;
+    expect(rev.id).toBe(1);
+    expect(rev.target_id).toBe('alloc_legacy');
+
+    // Replay migration is idempotent
+    expect(runMigrations(db, MIGRATIONS_DIR)).toEqual([]);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('proves both file and app entities with the same text can coexist without collision', () => {
+    const db = openTestDatabase();
+    db.prepare(`INSERT INTO source_imports (id, source_type, source_hash, byte_size) VALUES (1, 'daily_dump', 'h', 1)`).run();
+    db.prepare(`INSERT INTO projects (id, name) VALUES (10, 'project-multi')`).run();
+
+    const insertSlice = db.prepare(`
+      INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, source_import_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `);
+
+    // Slices for file and app with identical entity text 'Terminal'
+    insertSlice.run(1, '2026-01-01', 10, 'Terminal', 'app', 'entity', 500.0);
+    insertSlice.run(2, '2026-01-01', 10, 'Terminal', 'file', 'entity', 700.0);
+
+    const slices = db.prepare('SELECT id, entity, entity_type, total_seconds FROM day_project_entity_slices WHERE entity = ? ORDER BY id').all('Terminal');
+    expect(slices).toHaveLength(2);
+
+    const insertAlloc = db.prepare(`
+      INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    // Both allocations coexist simultaneously
+    insertAlloc.run('alloc_app', '2026-01-01', 10, 'Terminal', 'app', 'entity', 'work', 500.0, 'active');
+    insertAlloc.run('alloc_file', '2026-01-01', 10, 'Terminal', 'file', 'entity', 'personal', 700.0, 'active');
+
+    const allocs = db.prepare('SELECT id, entity_type, classification, allocated_seconds FROM daily_time_allocations WHERE entity = ? ORDER BY id').all('Terminal') as Array<Record<string, unknown>>;
+    expect(allocs).toHaveLength(2);
+    expect(allocs[0]).toEqual({ id: 'alloc_app', entity_type: 'app', classification: 'work', allocated_seconds: 500.0 });
+    expect(allocs[1]).toEqual({ id: 'alloc_file', entity_type: 'file', classification: 'personal', allocated_seconds: 700.0 });
+
+    // Duplicate on exact 5-tuple is rejected by UNIQUE constraint
+    expect(() =>
+      insertAlloc.run('alloc_dup', '2026-01-01', 10, 'Terminal', 'app', 'entity', 'personal', 500.0, 'active')
+    ).toThrow(/UNIQUE constraint failed/);
+  });
+
+  it('proves coarse and entity kinds cannot steal each others allocation', () => {
+    const db = openTestDatabase();
+    db.prepare(`INSERT INTO source_imports (id, source_type, source_hash, byte_size) VALUES (1, 'daily_dump', 'h', 1)`).run();
+    db.prepare(`INSERT INTO projects (id, name) VALUES (10, 'project-kinds')`).run();
+
+    const insertSlice = db.prepare(`
+      INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, source_import_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `);
+
+    // Slice 1: entity kind (500s)
+    insertSlice.run(1, '2026-01-01', 10, 'src/shared.ts', 'file', 'entity', 500.0);
+    // Slice 2: project_summary coarse kind (500s)
+    insertSlice.run(2, '2026-01-01', 10, 'src/shared.ts', 'file', 'project_summary', 500.0);
+
+    const insertAlloc = db.prepare(`
+      INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    // Create allocation specifically targeting 'entity' kind
+    insertAlloc.run('alloc_fine', '2026-01-01', 10, 'src/shared.ts', 'file', 'entity', 'work', 500.0, 'active');
+
+    // Create allocation specifically targeting 'project_summary' kind
+    insertAlloc.run('alloc_coarse', '2026-01-01', 10, 'src/shared.ts', 'file', 'project_summary', 'personal', 500.0, 'active');
+
+    // Delete coarse slice
+    db.prepare('DELETE FROM day_project_entity_slices WHERE id = 2').run();
+
+    // Re-inserting or updating active allocation for 'project_summary' fails duration trigger,
+    // proving the 'entity' slice (with identical date, project, entity, entity_type, duration) cannot be stolen!
+    expect(() =>
+      insertAlloc.run('alloc_coarse_steal', '2026-01-01', 10, 'src/shared.ts', 'file', 'project_summary', 'work', 500.0, 'active')
+    ).toThrow(/allocated_seconds does not match authoritative slice total_seconds/);
+  });
+
+  it('proves exact detach and reattach identity behavior', () => {
+    const db = openTestDatabase();
+    const repo = new SqliteSyncRepository(db);
+
+    db.prepare(`INSERT INTO source_imports (id, source_type, source_hash, byte_size) VALUES (1, 'daily_dump', 'h', 1)`).run();
+    db.prepare(`INSERT INTO projects (id, name) VALUES (10, 'project-lifecycle')`).run();
+
+    db.prepare(`
+      INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, source_import_id)
+      VALUES (1, '2026-01-01', 10, 'Slack', 'app', 'entity', 800.0, 1)
+    `).run();
+
+    db.prepare(`
+      INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+      VALUES ('alloc_slack', '2026-01-01', 10, 'Slack', 'app', 'entity', 'work', 800.0, 'active')
+    `).run();
+
+    // Detach allocation
+    repo.detachAllocation('alloc_slack', '2026-01-01T10:00:00.000Z');
+    let alloc = repo.getAllocationsForDate('2026-01-01')[0];
+    expect(alloc.state).toBe('detached');
+    expect(alloc.entityType).toBe('app');
+    expect(alloc.kind).toBe('entity');
+
+    // Delete the original slice ('Slack', 'app', 'entity')
+    db.prepare('DELETE FROM day_project_entity_slices WHERE id = 1').run();
+
+    // Insert a DIFFERENT slice with same entity text 'Slack' but entity_type = 'domain'
+    db.prepare(`
+      INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, source_import_id)
+      VALUES (2, '2026-01-01', 10, 'Slack', 'domain', 'entity', 800.0, 1)
+    `).run();
+
+    // Reattach MUST FAIL because identity (date, project_id, entity, entity_type, kind) does NOT match the domain slice
+    expect(() => repo.reattachAllocation('alloc_slack', 800.0, '2026-01-01T11:00:00.000Z')).toThrow(
+      /allocated_seconds does not match authoritative slice total_seconds/
+    );
+
+    // Recreate the matching slice ('Slack', 'app', 'entity')
+    db.prepare(`
+      INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, source_import_id)
+      VALUES (3, '2026-01-01', 10, 'Slack', 'app', 'entity', 800.0, 1)
+    `).run();
+
+    // Now reattach succeeds with exact identity
+    repo.reattachAllocation('alloc_slack', 800.0, '2026-01-01T11:30:00.000Z');
+    alloc = repo.getAllocationsForDate('2026-01-01').find((a) => a.id === 'alloc_slack')!;
+    expect(alloc.state).toBe('active');
+    expect(alloc.reattachedAt).toBe('2026-01-01T11:30:00.000Z');
+  });
+
+  it('proves duration trigger behavior for active vs detached allocations', () => {
+    const db = openTestDatabase();
+    db.prepare(`INSERT INTO source_imports (id, source_type, source_hash, byte_size) VALUES (1, 'daily_dump', 'h', 1)`).run();
+    db.prepare(`INSERT INTO projects (id, name) VALUES (10, 'project-trigger')`).run();
+
+    db.prepare(`
+      INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, source_import_id)
+      VALUES (1, '2026-01-01', 10, 'src/calc.ts', 'file', 'entity', 1234.0, 1)
+    `).run();
+
+    const insertAlloc = db.prepare(`
+      INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    // Active with mismatched seconds rejected
+    expect(() =>
+      insertAlloc.run('alloc_bad_time', '2026-01-01', 10, 'src/calc.ts', 'file', 'entity', 'work', 1230.0, 'active')
+    ).toThrow(/allocated_seconds does not match authoritative slice total_seconds/);
+
+    // Active with nonexistent slice rejected
+    expect(() =>
+      insertAlloc.run('alloc_bad_key', '2026-01-01', 10, 'missing.ts', 'file', 'entity', 'work', 500.0, 'active')
+    ).toThrow(/allocated_seconds does not match authoritative slice total_seconds/);
+
+    // Detached allocation without matching slice or duration is accepted
+    expect(() =>
+      insertAlloc.run('alloc_detached', '2026-01-01', 10, 'detached.ts', 'file', 'entity', 'work', 999.0, 'detached')
+    ).not.toThrow();
+
+    // Updating detached allocation while remaining detached is allowed
+    expect(() =>
+      db.prepare('UPDATE daily_time_allocations SET allocated_seconds = 888.0 WHERE id = ?').run('alloc_detached')
+    ).not.toThrow();
+
+    // Transitioning detached allocation to active without matching slice fails
+    expect(() =>
+      db.prepare("UPDATE daily_time_allocations SET state = 'active' WHERE id = ?").run('alloc_detached')
+    ).toThrow(/allocated_seconds does not match authoritative slice total_seconds/);
+  });
+
+  it('proves preserved FKs, cascade deletes, and revision history', () => {
+    const db = openTestDatabase();
+    db.prepare(`INSERT INTO source_imports (id, source_type, source_hash, byte_size) VALUES (1, 'daily_dump', 'h', 1)`).run();
+    db.prepare(`INSERT INTO projects (id, name) VALUES (10, 'project-fks')`).run();
+
+    db.prepare(`
+      INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, source_import_id)
+      VALUES (55, '2026-01-01', 10, 'src/mod.ts', 'file', 'entity', 200.0, 1)
+    `).run();
+
+    db.prepare(`
+      INSERT INTO slice_identities (id, slice_id, selector_type, value)
+      VALUES (101, 55, 'folder_prefix', 'src/')
+    `).run();
+
+    db.prepare(`
+      INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+      VALUES ('alloc_55', '2026-01-01', 10, 'src/mod.ts', 'file', 'entity', 'work', 200.0, 'active')
+    `).run();
+
+    db.prepare(`
+      INSERT INTO classification_revisions (id, mutation_type, target_type, target_id, actor)
+      VALUES (1, 'allocation_created', 'allocation', 'alloc_55', 'admin')
+    `).run();
+
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+
+    // Cascade delete on slice_identities when slice is deleted
+    db.prepare('DELETE FROM day_project_entity_slices WHERE id = 55').run();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM slice_identities WHERE slice_id = 55').get()).toEqual({ n: 0 });
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+
+    // Allocation and revision history preserved
+    expect(db.prepare('SELECT id FROM daily_time_allocations WHERE id = ?').get('alloc_55')).toBeDefined();
+    expect(db.prepare('SELECT id FROM classification_revisions WHERE id = 1').get()).toBeDefined();
+
+    // Invalid project FK rejected on slice insert
+    expect(() =>
+      db.prepare(`
+        INSERT INTO day_project_entity_slices (id, date, project_id, entity, entity_type, kind, total_seconds, source_import_id)
+        VALUES (99, '2026-01-01', 9999, 'bad.ts', 'file', 'entity', 10.0, 1)
+      `).run()
+    ).toThrow(/FOREIGN KEY constraint failed/);
+
+    // Invalid project FK rejected on allocation insert
+    expect(() =>
+      db.prepare(`
+        INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+        VALUES ('bad_fk', '2026-01-01', 9999, 'bad.ts', 'file', 'entity', 'work', 10.0, 'detached')
+      `).run()
+    ).toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  it('proves rollback on unresolvable legacy allocation identity without guessing', () => {
+    const db = new Database(':memory:');
+    configurePragmas(db, {});
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        filename    TEXT PRIMARY KEY,
+        applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+    `);
+
+    const pre009Files = [
+      '001-import-schema.sql',
+      '002-application-state.sql',
+      '003-wakatime-oauth.sql',
+      '004-classification-rules-match-mode.sql',
+      '005-sync-lifecycle.sql',
+      '006-reconciliation-overlay.sql',
+      '007-user-agent-registry.sql',
+      '008-connection-lifecycle.sql'
+    ];
+
+    for (const f of pre009Files) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, f), 'utf8');
+      db.transaction(() => {
+        db.exec(sql);
+        db.prepare('INSERT INTO schema_migrations (filename) VALUES (?)').run(f);
+      })();
+    }
+
+    db.exec(`
+      INSERT INTO source_imports (id, source_type, source_hash, byte_size) VALUES (1, 'daily_dump', 'hash1', 100);
+      INSERT INTO projects (id, name) VALUES (10, 'project-orphan');
+      INSERT INTO daily_totals (date, total_seconds, grand_total_json, source_import_id, source_hash)
+        VALUES ('2026-01-01', 3600.0, '{}', 1, 'hash1');
+      -- An orphan legacy allocation with NO matching slice in day_project_entity_slices
+      INSERT INTO daily_time_allocations (id, date, project_id, entity, classification, allocated_seconds, state, note)
+        VALUES ('orphan_alloc', '2026-01-01', 10, 'orphan.ts', 'work', 500.0, 'detached', 'Orphan legacy');
+    `);
+
+    // Migration 009 must fail and rollback rather than guess missing identity
+    expect(() => runMigrations(db, MIGRATIONS_DIR)).toThrow(
+      /Migration '009-slice-semantic-identity.sql' failed: UNRESOLVABLE_LEGACY_ALLOCATION_IDENTITY/
+    );
+
+    // Migration 009 unrecorded
+    expect(
+      db.prepare("SELECT filename FROM schema_migrations WHERE filename = '009-slice-semantic-identity.sql'").get()
+    ).toBeUndefined();
+
+    // Table daily_time_allocations retains legacy 008 structure (no entity_type column)
+    const columns = (db.prepare("PRAGMA table_info('daily_time_allocations')").all() as Array<{ name: string }>).map(
+      (c) => c.name
+    );
+    expect(columns).not.toContain('entity_type');
+    expect(columns).not.toContain('kind');
+
+    // Data remains intact
+    const orphan = db.prepare('SELECT * FROM daily_time_allocations WHERE id = ?').get('orphan_alloc') as Record<string, unknown>;
+    expect(orphan.id).toBe('orphan_alloc');
+    expect(orphan.note).toBe('Orphan legacy');
   });
 });
