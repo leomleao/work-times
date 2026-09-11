@@ -36,8 +36,8 @@ describe('Sync Contracts and Lifecycle Engine', () => {
       expect(LIFECYCLE_SYMBOL).toBe(Symbol.for('work-times.lifecycle'));
     });
 
-    it('defines orchestrator-frozen migration sequence with exact filenames 005 to 008', () => {
-      expect(RECOMMENDED_MIGRATION_SEQUENCE).toHaveLength(4);
+    it('defines orchestrator-frozen migration sequence with exact filenames 005 to 009', () => {
+      expect(RECOMMENDED_MIGRATION_SEQUENCE).toHaveLength(5);
 
       expect(RECOMMENDED_MIGRATION_SEQUENCE[0].number).toBe('005');
       expect(RECOMMENDED_MIGRATION_SEQUENCE[0].filename).toBe('005-sync-lifecycle.sql');
@@ -58,6 +58,16 @@ describe('Sync Contracts and Lifecycle Engine', () => {
       expect(RECOMMENDED_MIGRATION_SEQUENCE[3].filename).toBe('008-connection-lifecycle.sql');
       expect(RECOMMENDED_MIGRATION_SEQUENCE[3].name).toBe('connection-lifecycle');
       expect(RECOMMENDED_MIGRATION_SEQUENCE[3].rebuildRules.length).toBeGreaterThan(0);
+
+      expect(RECOMMENDED_MIGRATION_SEQUENCE[4].number).toBe('009');
+      expect(RECOMMENDED_MIGRATION_SEQUENCE[4].filename).toBe('009-slice-semantic-identity.sql');
+      expect(RECOMMENDED_MIGRATION_SEQUENCE[4].name).toBe('slice-semantic-identity');
+      expect(RECOMMENDED_MIGRATION_SEQUENCE[4].purpose).toContain(
+        '(date, project_id, entity, entity_type, kind)'
+      );
+      expect(RECOMMENDED_MIGRATION_SEQUENCE[4].rebuildRules).toContain(
+        'Populate each legacy allocation only from exactly one matching current slice; fail and roll back missing or ambiguous mappings.'
+      );
     });
 
     it('defines all required RECONCILE_CODES including bounds and limits', () => {
