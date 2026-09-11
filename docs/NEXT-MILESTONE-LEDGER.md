@@ -12,8 +12,8 @@ Updated: 2026-09-11. Integration worktree: `next-milestone-integration` through 
 | P2 | `task_e82c1a05fdde` | accepted | agy `ctx_186b85a6dc5c`, corrections `ctx_8d90f9c5c7bd` / `ctx_33633646a73b` / `ctx_fb285094c601`; orchestrator review | G0 | transport/OAuth integrated at `53ee159`; independent targeted 125/125; worker full 771/771, check/build clean; shared pacing, truthful Retry-After, generation CAS/ABA, caller cancellation, and whole-operation deadline verified | none |
 | P3 | `task_f36f1547ac48` | accepted | agy Stage A/B and bounded corrections; orchestrator review/final residual integration | P1, P2 | source-faithful adapters and transactional reconciliation merged at `d83a5c7`; 236/236 targeted and 867/867 full tests; check/build clean; exact raw lineage, fail-closed fidelity, membership, allocation preservation, and post-commit cache paths reviewed | none |
 | G1 | `task_62f0c41edff7` | passed | orchestrator | P1, P2, P3 | 400/400 targeted integration tests; 867/867 full tests; check/build clean; migrations, replay, dump compatibility, transport bounds, allocations, evidence and coarse classification reviewed | none |
-| P4 | `task_0fc56bbe5b41` | not_started | unassigned | G1 | pending | — |
-| P5 | `task_c0a4eaa891b2` | not_started | unassigned | G1 | pending | — |
+| P4 | `task_0fc56bbe5b41` | in_progress | agy `term_8d2c36b7-5124-49d7-bc97-933f00caaeea`; child `task_60dc17062ecc` | G1 | Dispatch `ctx_c076a3d8ae9b`; worktree `.worktrees/work-times/p4-registry` at accepted `e7321cd` | Implementation and validation pending |
+| P5 | `task_c0a4eaa891b2` | in_progress | agy `term_21efbee0-88c8-4713-9686-f07d4b819e11`; child `task_822d2c372bb0` | G1 | Dispatch `ctx_3196158ca32f`; worktree `.worktrees/work-times/p5-day-worker` at accepted `e7321cd` | Implementation and validation pending |
 | P6 | `task_13c534fd95f1` | not_started | unassigned | P5 | pending | — |
 | G2 | `task_b07a775ae59f` | pending | orchestrator | P4, P6 | pending | Gate review |
 | P7 | `task_62ede9b2f4ce` | not_started | unassigned | G2 | pending | — |
