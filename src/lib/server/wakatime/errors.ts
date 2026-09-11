@@ -6,7 +6,7 @@
  * - API keys, tokens, or authorization headers
  * - Response PII (emails, usernames, full names)
  * - File/entity paths
- * - Raw response bodies
+ * - Raw response bodies or SQL snippets
  */
 
 /**
@@ -16,12 +16,10 @@
 export function sanitizeEndpoint(endpoint: string): string {
   if (!endpoint) return '';
   try {
-    // If it's a full URL
     if (endpoint.startsWith('http://') || endpoint.startsWith('https://')) {
       const url = new URL(endpoint);
       return url.pathname;
     }
-    // If it's a relative path with query
     const questionIdx = endpoint.indexOf('?');
     if (questionIdx !== -1) {
       return endpoint.substring(0, questionIdx);
@@ -32,9 +30,28 @@ export function sanitizeEndpoint(endpoint: string): string {
     }
     return endpoint;
   } catch {
-    // Fallback: strip after ? or #
     return endpoint.split('?')[0].split('#')[0];
   }
+}
+
+/**
+ * Sanitizes arbitrary text messages to ensure credentials, tokens, PII,
+ * file paths, and raw payloads are completely redacted.
+ */
+export function sanitizeErrorMessage(message: string): string {
+  if (!message) return '';
+  return message
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+/gi, 'Bearer [REDACTED]')
+    .replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [REDACTED]')
+    .replace(/sec_[a-zA-Z0-9_-]+/g, '[REDACTED_SECRET]')
+    .replace(/waka_[a-zA-Z0-9_-]+/g, '[REDACTED_TOKEN]')
+    .replace(/(client_secret|client_id|secret|token|password)=[^&\s,;]+/gi, '$1=[REDACTED]')
+    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[REDACTED_EMAIL]')
+    .replace(/(?:\/[a-zA-Z0-9._-]+){2,}/g, '[REDACTED_PATH]')
+    .replace(/(?:[a-zA-Z]:\\[a-zA-Z0-9._-]+(?:\\[a-zA-Z0-9._-]+)*)/g, '[REDACTED_PATH]')
+    .replace(/\b(?:SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER)\b[\s\S]*?\b(?:FROM|INTO|TABLE|SET)\b[\s\S]*?(?:;|\n|$)/gi, '[REDACTED_SQL]')
+    .replace(/['"]\s*OR\s*['"]?1['"]?\s*=\s*['"]?1/gi, '[REDACTED_SQL]')
+    .replace(/\{[\s\S]*?\}/g, '[REDACTED_JSON]');
 }
 
 /**
@@ -45,7 +62,7 @@ export class WakaTimeError extends Error {
   readonly status?: number;
 
   constructor(message: string, options?: { endpoint?: string; status?: number; cause?: unknown }) {
-    super(message);
+    super(sanitizeErrorMessage(message));
     this.name = 'WakaTimeError';
     this.endpoint = options?.endpoint ? sanitizeEndpoint(options.endpoint) : undefined;
     this.status = options?.status;
@@ -58,7 +75,7 @@ export class WakaTimeError extends Error {
 
 /**
  * Thrown on HTTP 401 Unauthorized.
- * Indicates invalid API key or revoked access. Non-retriable.
+ * Indicates invalid API key or revoked access. Non-retriable without refresh.
  */
 export class WakaTimeAuthError extends WakaTimeError {
   constructor(endpoint?: string) {
@@ -67,6 +84,26 @@ export class WakaTimeAuthError extends WakaTimeError {
       status: 401
     });
     this.name = 'WakaTimeAuthError';
+  }
+}
+
+/**
+ * Thrown when authorization is permanently revoked (e.g. refresh token revoked/invalid).
+ */
+export class WakaTimeOAuthRevokedError extends WakaTimeAuthError {
+  constructor(endpoint?: string) {
+    super(endpoint);
+    this.name = 'WakaTimeOAuthRevokedError';
+  }
+}
+
+/**
+ * Thrown on transient failures during token refresh (e.g. upstream 5xx or network outage).
+ */
+export class WakaTimeOAuthTransientError extends WakaTimeError {
+  constructor(message: string, endpoint?: string, status?: number) {
+    super(`Transient OAuth failure: ${message}`, { endpoint, status });
+    this.name = 'WakaTimeOAuthTransientError';
   }
 }
 
@@ -94,12 +131,24 @@ export class CapabilityRestrictedError extends WakaTimeError {
  * Thrown when data-endpoint 302 or 429 throttling exceeds maximum retry attempts.
  */
 export class WakaTimeThrottleError extends WakaTimeError {
-  readonly statusCode: 302 | 429;
+  readonly statusCode: number;
   readonly retryAfterMs?: number;
+  readonly retryAt?: string;
   readonly attempts: number;
 
-  constructor(statusCode: 302 | 429, attempts: number, retryAfterMs?: number, endpoint?: string) {
-    const reason = statusCode === 302 ? 'redirect throttle' : 'rate limit';
+  constructor(
+    statusCode: number,
+    attempts: number,
+    retryAfterMs?: number,
+    endpoint?: string,
+    retryAt?: string
+  ) {
+    const reason =
+      statusCode === 302
+        ? 'redirect throttle'
+        : statusCode === 429
+          ? 'rate limit'
+          : `upstream error ${statusCode}`;
     super(
       `WakaTime API ${reason} exceeded (HTTP ${statusCode}) after ${attempts} attempts`,
       { endpoint, status: statusCode }
@@ -108,6 +157,82 @@ export class WakaTimeThrottleError extends WakaTimeError {
     this.statusCode = statusCode;
     this.attempts = attempts;
     this.retryAfterMs = retryAfterMs;
+    this.retryAt = retryAt;
+  }
+}
+
+/**
+ * Thrown when upstream Retry-After exceeds the current request or day budget.
+ * Contains the complete, untruncated wait duration and target retry timestamp.
+ */
+export class WakaTimeDeferredRetryError extends WakaTimeThrottleError {
+  readonly code = 'UPSTREAM_RETRY_AFTER_EXCEEDED';
+  readonly isDeferred = true;
+  override readonly retryAfterMs: number;
+  override readonly retryAt: string;
+
+  constructor(
+    statusCode: number,
+    retryAfterMs: number,
+    retryAt: string,
+    attempts: number,
+    endpoint?: string
+  ) {
+    super(statusCode, attempts, retryAfterMs, endpoint, retryAt);
+    this.name = 'WakaTimeDeferredRetryError';
+    this.retryAfterMs = retryAfterMs;
+    this.retryAt = retryAt;
+  }
+}
+
+/**
+ * Thrown when whole-request deadline (30s default) is exceeded.
+ */
+export class WakaTimeRequestTimeoutError extends WakaTimeError {
+  readonly code = 'REQUEST_TIMEOUT';
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number, endpoint?: string) {
+    super(`WakaTime API request exceeded ${timeoutMs}ms deadline`, {
+      endpoint,
+      status: 408
+    });
+    this.name = 'WakaTimeRequestTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * Thrown when the total client operation exceeds its budget deadline (5 minutes / 300,000ms default).
+ */
+export class WakaTimeBudgetTimeoutError extends WakaTimeError {
+  readonly code = 'DAY_EXECUTION_TIMEOUT';
+  readonly budgetMs: number;
+
+  constructor(budgetMs: number, endpoint?: string) {
+    super(`WakaTime API operation exceeded ${budgetMs}ms execution budget`, {
+      endpoint,
+      status: 408
+    });
+    this.name = 'WakaTimeBudgetTimeoutError';
+    this.budgetMs = budgetMs;
+  }
+}
+
+/**
+ * Thrown when response body exceeds maximum response size (16 MiB).
+ */
+export class WakaTimeResponseSizeExceededError extends WakaTimeError {
+  readonly code = 'RESPONSE_SIZE_EXCEEDED';
+  readonly maxBytes: number;
+
+  constructor(maxBytes: number, endpoint?: string) {
+    super(`WakaTime API response exceeded maximum payload limit of ${maxBytes} bytes`, {
+      endpoint,
+      status: 413
+    });
+    this.name = 'WakaTimeResponseSizeExceededError';
+    this.maxBytes = maxBytes;
   }
 }
 
@@ -132,11 +257,7 @@ export class WakaTimeServerError extends WakaTimeError {
  */
 export class WakaTimeNetworkError extends WakaTimeError {
   constructor(message: string, endpoint?: string, cause?: unknown) {
-    // Sanitize network message to avoid leaking any sensitive tokens or full urls with query params
-    const sanitizedMsg = message
-      .replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [REDACTED]')
-      .replace(/Bearer\s+[A-Za-z0-9._~+/-]+/gi, 'Bearer [REDACTED]');
-    super(`WakaTime network error: ${sanitizedMsg}`, { endpoint, cause });
+    super(`WakaTime network error: ${sanitizeErrorMessage(message)}`, { endpoint, cause });
     this.name = 'WakaTimeNetworkError';
   }
 }
@@ -147,7 +268,7 @@ export class WakaTimeNetworkError extends WakaTimeError {
  */
 export class WakaTimeParseError extends WakaTimeError {
   constructor(message: string, endpoint?: string) {
-    super(`WakaTime response validation error: ${message}`, { endpoint });
+    super(`WakaTime response validation error: ${sanitizeErrorMessage(message)}`, { endpoint });
     this.name = 'WakaTimeParseError';
   }
 }
@@ -157,7 +278,7 @@ export class WakaTimeParseError extends WakaTimeError {
  */
 export class WakaTimeApiError extends WakaTimeError {
   constructor(status: number, statusText: string, endpoint?: string) {
-    super(`WakaTime API error (HTTP ${status} ${statusText})`, {
+    super(`WakaTime API error (HTTP ${status} ${sanitizeErrorMessage(statusText)})`, {
       endpoint,
       status
     });
