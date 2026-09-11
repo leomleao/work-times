@@ -4,7 +4,8 @@ import { openTestDatabase } from '../connection.js';
 import {
   IdempotencyConflictError,
   QueueFullError,
-  SqliteSyncRepository
+  SqliteSyncRepository,
+  StaleConnectionGenerationError
 } from './sync.js';
 import type { RunRequest } from '$lib/server/sync/contracts.js';
 
@@ -488,6 +489,38 @@ describe('SqliteSyncRepository', () => {
 
       const activeList = repo.listRegistryEntries({ includeHistorical: false });
       expect(activeList.map((e) => e.id)).toEqual(['uuid-new-2', 'uuid-surviving']);
+    });
+
+    it('rejects publication atomically when the OAuth connection generation changed', () => {
+      repo.stageRegistryEntries([
+        { id: 'uuid-old', editor: 'VS Code', userAgentValue: 'vscode/1', os: 'mac' }
+      ]);
+      repo.publishRegistryStaging(1);
+
+      repo.stageRegistryEntries([
+        { id: 'uuid-new', editor: 'Cursor', userAgentValue: 'cursor/1', os: 'mac' }
+      ]);
+      db.prepare(
+        'INSERT INTO wakatime_oauth_connection (' +
+          'id, access_token_sealed, refresh_token_sealed, scopes, ' +
+          'connected_at, updated_at, generation' +
+        ') VALUES (1, ?, ?, ?, ?, ?, 2)'
+      ).run(
+        'sealed-access',
+        'sealed-refresh',
+        '[]',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:00.000Z'
+      );
+
+      expect(() => repo.publishRegistryStaging(1)).toThrowError(
+        StaleConnectionGenerationError
+      );
+      expect(repo.listRegistryEntries().map((entry) => entry.id)).toEqual(['uuid-old']);
+      const staged = db
+        .prepare('SELECT id FROM user_agent_registry_staging ORDER BY id')
+        .all() as Array<{ id: string }>;
+      expect(staged.map((entry) => entry.id)).toEqual(['uuid-new']);
     });
   });
 

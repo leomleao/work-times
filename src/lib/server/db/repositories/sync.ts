@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import {
   computeRunRequestPayloadHash,
+  RECONCILE_CODES,
   type LayerStatus,
   type ReconcileDisposition,
   type RunRequest,
@@ -24,6 +25,23 @@ export class QueueFullError extends Error {
   constructor(message = 'Sync run queue is full (max 10 queued or running runs)') {
     super(message);
     this.name = 'QueueFullError';
+  }
+}
+
+export class StaleConnectionGenerationError extends Error {
+  readonly code = RECONCILE_CODES.STALE_CONNECTION_GENERATION;
+
+  constructor(
+    public readonly expectedGeneration: number,
+    public readonly actualGeneration: number
+  ) {
+    super(
+      'Connection generation changed before registry publication: expected ' +
+        expectedGeneration +
+        ', actual ' +
+        actualGeneration
+    );
+    this.name = 'StaleConnectionGenerationError';
   }
 }
 
@@ -980,8 +998,21 @@ export class SqliteSyncRepository {
    * - Inserts/updates staged entries with is_historical = 0.
    * - Clears staging table.
    */
-  publishRegistryStaging(): { publishedCount: number; historicalCount: number } {
+  publishRegistryStaging(
+    expectedConnectionGeneration?: number
+  ): { publishedCount: number; historicalCount: number } {
+    const expectedGeneration =
+      expectedConnectionGeneration ?? this.getSyncSettings().connectionGeneration;
+
     return this.db.transaction(() => {
+      const connectionRow = this.db
+        .prepare('SELECT generation FROM wakatime_oauth_connection WHERE id = 1')
+        .get() as { generation: number } | undefined;
+      const actualGeneration = connectionRow?.generation ?? 1;
+      if (actualGeneration !== expectedGeneration) {
+        throw new StaleConnectionGenerationError(expectedGeneration, actualGeneration);
+      }
+
       const now = new Date().toISOString();
 
       // 1. Mark existing entries not present in staging as historical

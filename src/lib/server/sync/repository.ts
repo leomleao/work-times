@@ -19,6 +19,7 @@ import {
   SqliteSyncRepository,
   IdempotencyConflictError,
   QueueFullError,
+  StaleConnectionGenerationError,
   type DailyTimeAllocationRecord,
   type SyncDayRecord,
   type SyncLayer,
@@ -109,7 +110,7 @@ export interface SyncRepository {
 
   clearRegistryStaging(): void;
   stageRegistryEntries(entries: UserAgentRegistryEntry[]): void;
-  publishRegistryStaging(): { publishedCount: number; historicalCount: number };
+  publishRegistryStaging(expectedConnectionGeneration?: number): { publishedCount: number; historicalCount: number };
   getRegistryEntry(id: string): UserAgentRegistryEntry | null;
   listRegistryEntries(options?: { includeHistorical?: boolean }): UserAgentRegistryEntry[];
 
@@ -125,6 +126,7 @@ export {
   SqliteSyncRepository,
   IdempotencyConflictError,
   QueueFullError,
+  StaleConnectionGenerationError,
   type DailyTimeAllocationRecord,
   type SyncDayRecord,
   type SyncLayer,
