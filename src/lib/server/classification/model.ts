@@ -55,6 +55,7 @@ export interface ClassifiableSlice {
   entity: string;
   machineIds: readonly string[];
   editors: readonly string[];
+  kind?: 'entity' | 'project_summary' | 'unattributed_residual';
 }
 
 export interface SliceOverride {
@@ -263,6 +264,11 @@ export function compilePattern(
 }
 
 export function ruleMatchesSlice(rule: ClassificationRuleLike, slice: ClassifiableSlice): boolean {
+  // Coarse project summaries and unattributed residuals never match automatic classification rules
+  if (slice.kind === 'project_summary' || slice.kind === 'unattributed_residual') {
+    return false;
+  }
+
   const matchMode = rule.matchMode ?? 'exact';
   const compiled = compilePattern(rule.selectorType, rule.selectorValue, matchMode);
 
@@ -337,6 +343,17 @@ export function classifySlice(
     return {
       classification: override.classification,
       source: 'override',
+      winningRuleId: null,
+      competingRuleIds: []
+    };
+  }
+
+  // Coarse project summaries and unattributed residuals remain unclassified by default
+  // Automatic classification of coarse data is deferred.
+  if (slice.kind === 'project_summary' || slice.kind === 'unattributed_residual') {
+    return {
+      classification: 'unclassified',
+      source: 'default',
       winningRuleId: null,
       competingRuleIds: []
     };
