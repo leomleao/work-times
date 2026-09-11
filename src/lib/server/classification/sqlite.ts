@@ -339,13 +339,13 @@ export function computeCanonicalTelemetryDigest(
 
 export class SqliteClassificationService {
   private machineNameMap: Map<string, string> | null = null;
-  private readonly editorNameMap = new Map<string, string>();
+  private editorNameMap: Map<string, string> | null = null;
 
   constructor(private readonly db: Database.Database) {}
 
   clearCaches(): void {
     this.machineNameMap = null;
-    this.editorNameMap.clear();
+    this.editorNameMap = null;
   }
 
   invalidateIdentityCaches(): void {
@@ -384,11 +384,33 @@ export class SqliteClassificationService {
   }
 
   getEditorNameMap(): Map<string, string> {
-    // A heartbeat's user_agent_id can only be resolved authoritatively through
-    // WakaTime's /users/current/user_agents registry. Daily editor totals are
-    // aggregate views and cannot be joined to an individual heartbeat by date.
-    // Keep IDs unresolved until that registry is persisted by the sync phase.
-    return this.editorNameMap;
+    if (this.editorNameMap) return this.editorNameMap;
+
+    const map = new Map<string, string>();
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT id, editor, is_historical
+           FROM user_agent_registry
+           ORDER BY editor ASC, id ASC`
+        )
+        .all() as Array<{ id: string; editor: string; is_historical: number }>;
+
+      for (const r of rows) {
+        const shortUuid = r.id.length > 8 ? r.id.slice(0, 8) : r.id;
+        const display = `${r.editor} (${shortUuid})`;
+        map.set(r.id, display);
+        const lower = r.id.toLowerCase();
+        if (lower !== r.id && !map.has(lower)) {
+          map.set(lower, display);
+        }
+      }
+    } catch {
+      // Fall back gracefully in test or minimal databases where user_agent_registry does not exist
+    }
+
+    this.editorNameMap = map;
+    return map;
   }
 
   resolveMachineName(value: string): string {
@@ -396,7 +418,18 @@ export class SqliteClassificationService {
   }
 
   resolveEditorName(value: string): string {
-    return this.getEditorNameMap().get(value) ?? value;
+    if (!value) return value;
+    const map = this.getEditorNameMap();
+    const known = map.get(value) ?? map.get(value.toLowerCase());
+    if (known) return known;
+
+    // Unknown UUIDs display "Unresolved editor" plus UUID; non-UUID legacy identifiers preserve value
+    const isUuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ||
+      /^[0-9a-f]{32}$/i.test(value) ||
+      /uuid/i.test(value);
+
+    return isUuid ? `Unresolved editor (${value})` : value;
   }
 
   getRules(filter?: { enabledOnly?: boolean }): ClassificationRuleRecord[] {

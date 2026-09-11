@@ -754,8 +754,29 @@ describe('SqliteClassificationService - Coverage & Unclassified Suggestions', ()
     service.clearCaches();
 
     expect(service.resolveMachineName('mach-uuid-1')).toBe('MacBook-Pro.local');
-    expect(service.resolveEditorName('editor-agent-uuid-1')).toBe('editor-agent-uuid-1');
+    expect(service.resolveEditorName('editor-agent-uuid-1')).toBe('Unresolved editor (editor-agent-uuid-1)');
     expect(service.getEditorNameMap()).toEqual(new Map());
+
+    // When an entry is registered in user_agent_registry
+    db.prepare(`
+      INSERT INTO user_agent_registry (id, editor, user_agent_value, os, is_historical)
+      VALUES ('editor-agent-uuid-1', 'VS Code', 'vscode/1.90.0', 'Mac', 0)
+    `).run();
+
+    // Before cache clear, cache still holds the old empty map
+    expect(service.resolveEditorName('editor-agent-uuid-1')).toBe('Unresolved editor (editor-agent-uuid-1)');
+
+    // Invalidate caches
+    service.invalidateIdentityCaches();
+    expect(service.resolveEditorName('editor-agent-uuid-1')).toBe('VS Code (editor-a)');
+    expect(service.getEditorNameMap().get('editor-agent-uuid-1')).toBe('VS Code (editor-a)');
+
+    // Historical mappings also resolve
+    db.prepare(`
+      UPDATE user_agent_registry SET is_historical = 1 WHERE id = 'editor-agent-uuid-1'
+    `).run();
+    service.clearCaches();
+    expect(service.resolveEditorName('editor-agent-uuid-1')).toBe('VS Code (editor-a)');
   });
 
   it('provides unclassified suggestions with fair per-type representation and separate display values', () => {
