@@ -1,6 +1,6 @@
 # Next milestone execution ledger
 
-Updated: 2026-09-11. Integration worktree: `next-milestone-integration` at orchestration record `2de9dcc`, preserving accepted P0-P3/P9 work and the transferred source working-tree changes. Orca run: `run_4e43ac50f8e8`.
+Updated: 2026-09-11. Integration worktree: `next-milestone-integration` through accepted P4/CAS `8f6ee4f`, preserving accepted earlier work and the transferred source working-tree changes. Orca run: `run_4e43ac50f8e8`.
 
 ## Package state
 
@@ -12,7 +12,7 @@ Updated: 2026-09-11. Integration worktree: `next-milestone-integration` at orche
 | P2 | `task_e82c1a05fdde` | accepted | agy `ctx_186b85a6dc5c`, corrections `ctx_8d90f9c5c7bd` / `ctx_33633646a73b` / `ctx_fb285094c601`; orchestrator review | G0 | transport/OAuth integrated at `53ee159`; independent targeted 125/125; worker full 771/771, check/build clean; shared pacing, truthful Retry-After, generation CAS/ABA, caller cancellation, and whole-operation deadline verified | none |
 | P3 | `task_f36f1547ac48` | accepted | agy Stage A/B and bounded corrections; orchestrator review/final residual integration | P1, P2 | source-faithful adapters and transactional reconciliation merged at `d83a5c7`; 236/236 targeted and 867/867 full tests; check/build clean; exact raw lineage, fail-closed fidelity, membership, allocation preservation, and post-commit cache paths reviewed | none |
 | G1 | `task_62f0c41edff7` | passed | orchestrator | P1, P2, P3 | 400/400 targeted integration tests; 867/867 full tests; check/build clean; migrations, replay, dump compatibility, transport bounds, allocations, evidence and coarse classification reviewed | none |
-| P4 | `task_0fc56bbe5b41` | in_progress | agy `term_8d2c36b7-5124-49d7-bc97-933f00caaeea`; child `task_60dc17062ecc` | G1 | Dispatch `ctx_c076a3d8ae9b`; worktree `.worktrees/work-times/p4-registry` at accepted `e7321cd` | Implementation and validation pending |
+| P4 | `task_0fc56bbe5b41` | accepted | agy child `task_60dc17062ecc` / `ctx_c076a3d8ae9b`; orchestrator review/CAS | G1 | worker `c3f961a`, merge `def3839`, transactional generation CAS `8f6ee4f`; independent 75/75 targeted, integrated 902/902 full; check/build clean | none |
 | P5 | `task_c0a4eaa891b2` | in_progress | agy `term_21efbee0-88c8-4713-9686-f07d4b819e11`; child `task_822d2c372bb0` | G1 | Dispatch `ctx_3196158ca32f`; worktree `.worktrees/work-times/p5-day-worker` at accepted `e7321cd` | Implementation and validation pending |
 | P6 | `task_13c534fd95f1` | prepared | child `task_03fe209b2544`; unassigned | P5 | Bounded coordinator brief frozen with dependency on P5 child `task_822d2c372bb0` | Await accepted P5 integration state before worktree and dispatch |
 | G2 | `task_b07a775ae59f` | pending | orchestrator | P4, P6 | pending | Gate review |
@@ -59,3 +59,4 @@ P0 first-pass review kept G0 pending: direct review found migration filename dri
 - 2026-09-11 P3/G1: P3 merged at `d83a5c7` after supervised agy implementation and orchestrator residual corrections. Targeted P3 tests passed 236/236; G1 migration/repository/import/reconciliation/classification/transport tests passed 400/400; full suite passed 867/867; check and in-memory build were clean. Raw transport lineage is distinct from normalized content, unchanged checks advance freshness without snapshot inflation, degraded evidence remains partial, detached allocations survive but legacy lookup fails closed, and missing detailed projects preserve the accepted snapshot.
 - 2026-09-11 P7/P8 preparation: froze P7 child `task_1056c9aa6c84` and split P8 into sequential backend/API/quality child `task_cdd4fe996bcc` and UI/browser child `task_3c1be5088f4b`; all remain dependency-blocked until G2.
 - 2026-09-11 P10 preparation: froze local evidence child `task_15fbcd5edf05` and sequential operations/documentation child `task_8490d317c298`; both remain dependency-blocked until G3.
+- 2026-09-11 P4: accepted after a bounded correction and integration-owned repository CAS. Full allowlisted-attribute conflicts, strict flags, safe integer pagination, atomic generation rejection, historical retention, registry-only labels, unknown fallback, both identity caches, and classification stability were reviewed. Independent targeted tests passed 75/75; integrated full suite 902/902; check and in-memory build clean.
