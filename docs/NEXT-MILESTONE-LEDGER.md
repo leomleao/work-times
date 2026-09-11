@@ -1,6 +1,6 @@
 # Next milestone execution ledger
 
-Updated: 2026-09-11. Integration worktree: `next-milestone-integration` at baseline `0376033` plus the transferred source working-tree changes. Orca run: `run_4e43ac50f8e8`.
+Updated: 2026-09-11. Integration worktree: `next-milestone-integration` at accepted integration `4a30d81`, preserving the transferred source working-tree changes. Orca run: `run_4e43ac50f8e8`.
 
 ## Package state
 
@@ -8,9 +8,9 @@ Updated: 2026-09-11. Integration worktree: `next-milestone-integration` at basel
 | --- | --- | --- | --- | --- | --- | --- |
 | P0 | `task_f6b628cd3920` | accepted | agy `ctx_0f2653834e31`, corrections `ctx_f33979ba3af7` / `ctx_94e380835b16`, orchestrator review | none | frozen contracts and fixtures; targeted 76/76; full 646/646; check/build clean; host and Docker Node 24 `fs-ext` proof passed | — |
 | G0 | `task_20644ffca4b1` | passed | orchestrator | P0 | contract matrix, exact migration sequence, lifecycle/lock choice, truthful aggregate/freshness/catch-up failure cases reviewed | — |
-| P1 | `task_7d721f095348` | accepted | agy `ctx_adf276bcf049`, corrections `ctx_78601ac8d4fe`; orchestrator review | G0 | schema/repositories integrated at `9105de7`; independent targeted 62/62; worker check/build clean; recovery, freshness, membership, and CAS corrections verified | G1 integration with P2/P3 pending |
+| P1 | `task_7d721f095348` | accepted | agy plus semantic-identity correction `ctx_4b9d0434c236`; orchestrator review | G0 | schema/repositories integrated through `4a30d81`; migration 009 completes the five-part slice/allocation key; independent DB/repository tests 69/69; migration rollback, IDs, FKs, detached state and audit history reviewed | G1 integration with P3 pending |
 | P2 | `task_e82c1a05fdde` | accepted | agy `ctx_186b85a6dc5c`, corrections `ctx_8d90f9c5c7bd` / `ctx_33633646a73b` / `ctx_fb285094c601`; orchestrator review | G0 | transport/OAuth integrated at `53ee159`; independent targeted 125/125; worker full 771/771, check/build clean; shared pacing, truthful Retry-After, generation CAS/ABA, caller cancellation, and whole-operation deadline verified | G1 integration with P3 pending |
-| P3 | `task_f36f1547ac48` | running | agy stage A `ctx_32c1687d895a` | P1 | normalization child `task_5fb50cfcab5b`; worktree `p3-normalization` from `ec1ae5a`; source baseline checksums verified; terminal launched with `agy --mode accept-edits` | stage A review, then transactional writer stage B |
+| P3 | `task_f36f1547ac48` | in_review | agy Stage A/B `ctx_32c1687d895a` / `ctx_8c84163b2182`; correction `ctx_901d24760a2c`; orchestrator review | P1, P2 | Stage A accepted at `4146a7d` with 99/99 independent targeted tests; Stage B first handoff rejected after direct transaction/classification/import review | correction task `task_b04fbf5381a6` paused by Google quota until the reported reset; G1 remains blocked |
 | G1 | `task_62f0c41edff7` | pending | orchestrator | P1, P2, P3 | pending | Gate review |
 | P4 | `task_0fc56bbe5b41` | not_started | unassigned | G1 | pending | — |
 | P5 | `task_c0a4eaa891b2` | not_started | unassigned | G1 | pending | — |
@@ -35,7 +35,7 @@ Updated: 2026-09-11. Integration worktree: `next-milestone-integration` at basel
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| G0 | passed | P0 integrated at `12b4443`; 76 targeted and 646 full tests passed; typecheck and in-memory build clean; unsupported shapes retain/reject without fabricated duration, identity, completeness, or success. |
+| G0 | passed | P0 integrated at `ab9297f`, gate record `7f35134`; 76 targeted and 646 full tests passed; typecheck and in-memory build clean; unsupported shapes retain/reject without fabricated duration, identity, completeness, or success. |
 | G1 | pending | — |
 | G2 | pending | — |
 | G3 | pending | — |
@@ -51,3 +51,5 @@ P0 first-pass review kept G0 pending: direct review found migration filename dri
 - 2026-09-10 P1: accepted after boundary corrections. Independent repository/migration tests passed 62/62; populated migration, scoped restart recovery, unchanged-content freshness, exact heartbeat retirement, allocation survival, and atomic connection-generation CAS were reviewed. Integrated at `9105de7`; the historical consolidation test now expects migrations 005-008 and passes 24/24.
 - 2026-09-10 P3A dispatch: Orca readiness detection rejected two attachment attempts after the one-time folder trust screen; manual Orca dispatch `ctx_32c1687d895a` injected the same bounded task into the verified `agy --mode accept-edits` terminal. No implementation ran under the failed attachments.
 - 2026-09-11 P2: accepted after three bounded correction passes. Independent transport/OAuth/schema/capability/discovery tests passed 125/125; one shared paced request gate, full Retry-After, 5-minute whole-operation budget, 30-second per-request/body bound, cancellation, sanitization, and P1 generation CAS/ABA behavior were directly reviewed. Integrated at `53ee159`; worker full 771/771, check and in-memory build clean.
+- 2026-09-11 P1 semantic identity: migration 009 and repository support accepted at worker commit `90470ba`, frozen contract correction `97cab21`, and integration merge `4a30d81`; independent DB/repository tests passed 69/69.
+- 2026-09-11 P3: Stage A accepted at `4146a7d` after 99/99 independent targeted tests. Stage B first handoff reported focused suites/check/build passing, but direct review rejected false success on degraded heartbeat layers, UTC provisional logic, partial allocation-key fallbacks, inactive evidence reuse, incomplete scope fidelity, and weak provenance/import overlap handling. Correction `task_b04fbf5381a6` / `ctx_901d24760a2c` is in progress; the same accept-edits Gemini terminal is retained through a temporary quota reset.
