@@ -269,25 +269,25 @@ describe('SqliteSyncRepository', () => {
 
     it('enforces duration match trigger on active allocations and rejects mismatches', () => {
       const insertAllocation = db.prepare(`
-        INSERT INTO daily_time_allocations (id, date, project_id, entity, classification, allocated_seconds, state)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       // Valid allocation matching slice total_seconds (1200.0)
       expect(() =>
-        insertAllocation.run('alloc_ok', '2026-01-01', 10, 'src/main.ts', 'work', 1200.0, 'active')
+        insertAllocation.run('alloc_ok', '2026-01-01', 10, 'src/main.ts', 'file', 'entity', 'work', 1200.0, 'active')
       ).not.toThrow();
 
       // Mismatched duration triggers abort
       expect(() =>
-        insertAllocation.run('alloc_bad', '2026-01-01', 10, 'src/main.ts', 'work', 1199.0, 'active')
+        insertAllocation.run('alloc_bad', '2026-01-01', 10, 'src/main.ts', 'file', 'entity', 'work', 1199.0, 'active')
       ).toThrow(/allocated_seconds does not match authoritative slice total_seconds/);
     });
 
     it('preserves allocations when underlying slices are deleted and records append-only revision on detachment', () => {
       db.prepare(`
-        INSERT INTO daily_time_allocations (id, date, project_id, entity, classification, allocated_seconds, state)
-        VALUES ('alloc_1', '2026-01-01', 10, 'src/main.ts', 'work', 1200.0, 'active')
+        INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+        VALUES ('alloc_1', '2026-01-01', 10, 'src/main.ts', 'file', 'entity', 'work', 1200.0, 'active')
       `).run();
 
       // Detach allocation when slice vanishes
@@ -296,6 +296,8 @@ describe('SqliteSyncRepository', () => {
       const allocs = repo.getAllocationsForDate('2026-01-01');
       expect(allocs).toHaveLength(1);
       expect(allocs[0].state).toBe('detached');
+      expect(allocs[0].entityType).toBe('file');
+      expect(allocs[0].kind).toBe('entity');
       expect(allocs[0].detachedAt).toBe('2026-01-01T12:00:00.000Z');
       expect(allocs[0].allocatedSeconds).toBe(1200.0);
 
@@ -316,8 +318,8 @@ describe('SqliteSyncRepository', () => {
 
     it('adjusts duration and reattaches allocation when slice reappears', () => {
       db.prepare(`
-        INSERT INTO daily_time_allocations (id, date, project_id, entity, classification, allocated_seconds, state)
-        VALUES ('alloc_2', '2026-01-01', 10, 'src/main.ts', 'work', 1200.0, 'active')
+        INSERT INTO daily_time_allocations (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, state)
+        VALUES ('alloc_2', '2026-01-01', 10, 'src/main.ts', 'file', 'entity', 'work', 1200.0, 'active')
       `).run();
 
       // Slice duration changed in reconciliation: update allocation duration

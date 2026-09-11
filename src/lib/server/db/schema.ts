@@ -256,6 +256,8 @@ export interface DailyTimeAllocationRow {
   date: string;
   project_id: number;
   entity: string;
+  entity_type: SliceEntityType;
+  kind: SliceKind;
   classification: 'work' | 'personal';
   allocated_seconds: number;
   timesheet_code: string | null;
