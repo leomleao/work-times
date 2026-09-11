@@ -14,7 +14,7 @@ Updated: 2026-09-11. Integration worktree: `next-milestone-integration` through 
 | G1 | `task_62f0c41edff7` | passed | orchestrator | P1, P2, P3 | 400/400 targeted integration tests; 867/867 full tests; check/build clean; migrations, replay, dump compatibility, transport bounds, allocations, evidence and coarse classification reviewed | none |
 | P4 | `task_0fc56bbe5b41` | in_progress | agy `term_8d2c36b7-5124-49d7-bc97-933f00caaeea`; child `task_60dc17062ecc` | G1 | Dispatch `ctx_c076a3d8ae9b`; worktree `.worktrees/work-times/p4-registry` at accepted `e7321cd` | Implementation and validation pending |
 | P5 | `task_c0a4eaa891b2` | in_progress | agy `term_21efbee0-88c8-4713-9686-f07d4b819e11`; child `task_822d2c372bb0` | G1 | Dispatch `ctx_3196158ca32f`; worktree `.worktrees/work-times/p5-day-worker` at accepted `e7321cd` | Implementation and validation pending |
-| P6 | `task_13c534fd95f1` | not_started | unassigned | P5 | pending | — |
+| P6 | `task_13c534fd95f1` | prepared | child `task_03fe209b2544`; unassigned | P5 | Bounded coordinator brief frozen with dependency on P5 child `task_822d2c372bb0` | Await accepted P5 integration state before worktree and dispatch |
 | G2 | `task_b07a775ae59f` | pending | orchestrator | P4, P6 | pending | Gate review |
 | P7 | `task_62ede9b2f4ce` | not_started | unassigned | G2 | pending | — |
 | P8 | `task_ea65af005d18` | not_started | unassigned | G2 | pending | — |
