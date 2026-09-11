@@ -11,3 +11,4 @@ export * from './types.js';
 export * from './normalize-summary.js';
 export * from './normalize-heartbeats.js';
 export * from './normalize-durations.js';
+export * from './reconcile.js';

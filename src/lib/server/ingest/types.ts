@@ -21,6 +21,9 @@ import type {
   NormalizedSummaryDay,
   ProjectScopeCompleteness,
   ReconcileCode,
+  ReconcileDayStatus,
+  ReconcileDisposition,
+  ReconcileResult,
   SliceKind,
   SummaryCompleteness,
   SummaryFidelity
@@ -39,6 +42,9 @@ export type {
   NormalizedSummaryDay,
   ProjectScopeCompleteness,
   ReconcileCode,
+  ReconcileDayStatus,
+  ReconcileDisposition,
+  ReconcileResult,
   SliceKind,
   SummaryCompleteness,
   SummaryFidelity

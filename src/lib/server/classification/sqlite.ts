@@ -64,10 +64,15 @@ export interface DailyTimeAllocationRecord {
   date: string;
   project_id: number;
   entity: string;
+  entity_type: 'file' | 'app' | 'domain' | 'unattributed';
+  kind: 'entity' | 'project_summary' | 'unattributed_residual';
   classification: RuleClassification;
   allocated_seconds: number;
   timesheet_code: string | null;
   note: string | null;
+  state: 'active' | 'detached';
+  detached_at: string | null;
+  reattached_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -220,6 +225,8 @@ export interface CreateAllocationInput {
   date: string;
   projectId: number;
   entity: string;
+  entityType?: 'file' | 'app' | 'domain' | 'unattributed';
+  kind?: 'entity' | 'project_summary' | 'unattributed_residual';
   classification: RuleClassification;
   timesheetCode?: string | null;
   note?: string | null;
@@ -320,6 +327,7 @@ export function computeCanonicalTelemetryDigest(
       Boolean(s.isUnattributed), // Includes project-level unattributed state
       s.entityType,
       s.entity,
+      s.classifiableSlice.kind,
       s.totalSeconds,
       s.classifiableSlice.machineIds, // Ordered resolved machine candidates
       s.classifiableSlice.editors     // Ordered resolved editor candidates
@@ -337,6 +345,7 @@ export class SqliteClassificationService {
 
   clearCaches(): void {
     this.machineNameMap = null;
+    this.editorNameMap.clear();
   }
 
   invalidateIdentityCaches(): void {
@@ -465,8 +474,8 @@ export class SqliteClassificationService {
 
   getAllocations(filter?: { date?: string; projectId?: number }): DailyTimeAllocationRecord[] {
     let sql = `
-      SELECT id, date, project_id, entity, classification,
-             allocated_seconds, timesheet_code, note, created_at, updated_at
+      SELECT id, date, project_id, entity, entity_type, kind, classification,
+             allocated_seconds, timesheet_code, note, state, detached_at, reattached_at, created_at, updated_at
       FROM daily_time_allocations
       WHERE 1=1
     `;
@@ -487,8 +496,8 @@ export class SqliteClassificationService {
   getAllocation(id: string): DailyTimeAllocationRecord | null {
     const row = this.db
       .prepare(
-        `SELECT id, date, project_id, entity, classification,
-                allocated_seconds, timesheet_code, note, created_at, updated_at
+        `SELECT id, date, project_id, entity, entity_type, kind, classification,
+                allocated_seconds, timesheet_code, note, state, detached_at, reattached_at, created_at, updated_at
          FROM daily_time_allocations WHERE id = ?`
       )
       .get(id) as DailyTimeAllocationRecord | undefined;
@@ -498,16 +507,59 @@ export class SqliteClassificationService {
   getAllocationBySlice(
     date: string,
     projectId: number,
-    entity: string
+    entity: string,
+    entityType?: 'file' | 'app' | 'domain' | 'unattributed',
+    kind?: 'entity' | 'project_summary' | 'unattributed_residual'
   ): DailyTimeAllocationRecord | null {
-    const row = this.db
+    if (entityType && kind) {
+      const sql = `
+        SELECT id, date, project_id, entity, entity_type, kind, classification,
+               allocated_seconds, timesheet_code, note, state, detached_at, reattached_at, created_at, updated_at
+        FROM daily_time_allocations
+        WHERE date = ? AND project_id = ? AND entity = ? AND entity_type = ? AND kind = ?
+      `;
+      const row = this.db.prepare(sql).get(date, projectId, entity, entityType, kind) as
+        | DailyTimeAllocationRecord
+        | undefined;
+      return row ?? null;
+    }
+
+    // Legacy 3-key lookup only when exactly one matching slice:
+    const candidateSlices = this.db
       .prepare(
-        `SELECT id, date, project_id, entity, classification,
-                allocated_seconds, timesheet_code, note, created_at, updated_at
-         FROM daily_time_allocations WHERE date = ? AND project_id = ? AND entity = ?`
+        `SELECT entity_type, kind
+         FROM day_project_entity_slices
+         WHERE date = ? AND project_id = ? AND entity = ?`
       )
-      .get(date, projectId, entity) as DailyTimeAllocationRecord | undefined;
-    return row ?? null;
+      .all(date, projectId, entity) as Array<{
+        entity_type: 'file' | 'app' | 'domain' | 'unattributed';
+        kind: 'entity' | 'project_summary' | 'unattributed_residual';
+      }>;
+
+    if (candidateSlices.length > 1) {
+      throw new Error(
+        `Cannot resolve allocation: ambiguous collision for date='${date}', projectId=${projectId}, entity='${entity}'. Multiple slices exist with different entity_type or kind; exact entityType and kind are required.`
+      );
+    }
+
+    if (candidateSlices.length === 1) {
+      const sql = `
+        SELECT id, date, project_id, entity, entity_type, kind, classification,
+               allocated_seconds, timesheet_code, note, state, detached_at, reattached_at, created_at, updated_at
+        FROM daily_time_allocations
+        WHERE date = ? AND project_id = ? AND entity = ? AND entity_type = ? AND kind = ?
+      `;
+      const row = this.db.prepare(sql).get(
+        date,
+        projectId,
+        entity,
+        candidateSlices[0].entity_type,
+        candidateSlices[0].kind
+      ) as DailyTimeAllocationRecord | undefined;
+      return row ?? null;
+    }
+
+    return null;
   }
 
   getRevisions(limit: number = 100): ClassificationRevisionRecord[] {
@@ -540,7 +592,7 @@ export class SqliteClassificationService {
       .all();
     const allocations = this.db
       .prepare(
-        'SELECT id, date, project_id, entity, classification, allocated_seconds, timesheet_code, updated_at FROM daily_time_allocations ORDER BY id ASC'
+        'SELECT id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, timesheet_code, state, updated_at FROM daily_time_allocations ORDER BY id ASC'
       )
       .all();
 
@@ -1487,38 +1539,80 @@ export class SqliteClassificationService {
     }
 
     return this.db.transaction(() => {
-      const slice = this.db
-        .prepare(
-          `SELECT total_seconds FROM day_project_entity_slices
-           WHERE date = ? AND project_id = ? AND entity = ?`
-        )
-        .get(input.date, input.projectId, input.entity) as { total_seconds: number } | undefined;
+      let resolvedEntityType: 'file' | 'app' | 'domain' | 'unattributed';
+      let resolvedKind: 'entity' | 'project_summary' | 'unattributed_residual';
+      let sliceTotalSeconds: number;
 
-      if (!slice) {
-        throw new Error(
-          `Cannot allocate: slice does not exist for date='${input.date}', projectId=${input.projectId}, entity='${input.entity}'`
-        );
+      if (input.entityType && input.kind) {
+        const slice = this.db
+          .prepare(
+            `SELECT total_seconds, entity_type, kind
+             FROM day_project_entity_slices
+             WHERE date = ? AND project_id = ? AND entity = ? AND entity_type = ? AND kind = ?`
+          )
+          .get(input.date, input.projectId, input.entity, input.entityType, input.kind) as {
+            total_seconds: number;
+            entity_type: 'file' | 'app' | 'domain' | 'unattributed';
+            kind: 'entity' | 'project_summary' | 'unattributed_residual';
+          } | undefined;
+
+        if (!slice) {
+          throw new Error(
+            `Cannot allocate: slice does not exist for date='${input.date}', projectId=${input.projectId}, entity='${input.entity}', entityType='${input.entityType}', kind='${input.kind}'`
+          );
+        }
+        resolvedEntityType = slice.entity_type;
+        resolvedKind = slice.kind;
+        sliceTotalSeconds = slice.total_seconds;
+      } else {
+        const candidateSlices = this.db
+          .prepare(
+            `SELECT total_seconds, entity_type, kind
+             FROM day_project_entity_slices
+             WHERE date = ? AND project_id = ? AND entity = ?`
+          )
+          .all(input.date, input.projectId, input.entity) as Array<{
+            total_seconds: number;
+            entity_type: 'file' | 'app' | 'domain' | 'unattributed';
+            kind: 'entity' | 'project_summary' | 'unattributed_residual';
+          }>;
+
+        if (candidateSlices.length === 0) {
+          throw new Error(
+            `Cannot allocate: slice does not exist for date='${input.date}', projectId=${input.projectId}, entity='${input.entity}'`
+          );
+        }
+        if (candidateSlices.length > 1) {
+          throw new Error(
+            `Cannot allocate: ambiguous collision for date='${input.date}', projectId=${input.projectId}, entity='${input.entity}'. Multiple slices exist with different entity_type or kind; exact entityType and kind are required.`
+          );
+        }
+        resolvedEntityType = candidateSlices[0].entity_type;
+        resolvedKind = candidateSlices[0].kind;
+        sliceTotalSeconds = candidateSlices[0].total_seconds;
       }
 
       const inputRecord = input as unknown as Record<string, unknown>;
       if ('allocatedSeconds' in inputRecord) {
         const callerSecs = inputRecord.allocatedSeconds;
-        if (typeof callerSecs === 'number' && Math.abs(callerSecs - slice.total_seconds) > 0.001) {
+        if (typeof callerSecs === 'number' && Math.abs(callerSecs - sliceTotalSeconds) > 0.001) {
           throw new Error(
-            `Caller-supplied duration (${callerSecs}) does not match slice total_seconds (${slice.total_seconds})`
+            `Caller-supplied duration (${callerSecs}) does not match slice total_seconds (${sliceTotalSeconds})`
           );
         }
       }
 
-      const allocatedSeconds = slice.total_seconds;
-      const existing = this.getAllocationBySlice(input.date, input.projectId, input.entity);
+      const entityType = resolvedEntityType;
+      const kind = resolvedKind;
+      const allocatedSeconds = sliceTotalSeconds;
+      const existing = this.getAllocationBySlice(input.date, input.projectId, input.entity, entityType, kind);
 
       if (existing) {
         if (!options?.replaceExisting) {
           throw new AllocationConflictError(
             existing.classification,
             input.classification,
-            `Allocation conflict: slice (${input.date}, project ${input.projectId}, entity '${input.entity}') already allocated as '${existing.classification}', proposed '${input.classification}'`
+            `Allocation conflict: slice (${input.date}, project ${input.projectId}, entity '${input.entity}', type '${entityType}', kind '${kind}') already allocated as '${existing.classification}', proposed '${input.classification}'`
           );
         }
 
@@ -1533,6 +1627,8 @@ export class SqliteClassificationService {
           date: existing.date,
           projectId: existing.project_id,
           entity: existing.entity,
+          entityType,
+          kind,
           allocatedSeconds: existing.allocated_seconds,
           removedClassification: existing.classification,
           reason: 'replaced'
@@ -1561,15 +1657,17 @@ export class SqliteClassificationService {
         this.db
           .prepare(
             `INSERT INTO daily_time_allocations (
-              id, date, project_id, entity, classification, allocated_seconds,
-              timesheet_code, note, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              id, date, project_id, entity, entity_type, kind, classification, allocated_seconds,
+              timesheet_code, note, state, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
           )
           .run(
             newId,
             input.date,
             input.projectId,
             input.entity,
+            entityType,
+            kind,
             input.classification,
             allocatedSeconds,
             input.timesheetCode ?? null,
@@ -1583,10 +1681,15 @@ export class SqliteClassificationService {
           date: input.date,
           project_id: input.projectId,
           entity: input.entity,
+          entity_type: entityType,
+          kind,
           classification: input.classification,
           allocated_seconds: allocatedSeconds,
           timesheet_code: input.timesheetCode ?? null,
           note: input.note ?? null,
+          state: 'active',
+          detached_at: null,
+          reattached_at: null,
           created_at: now,
           updated_at: now
         };
@@ -1595,6 +1698,8 @@ export class SqliteClassificationService {
           date: input.date,
           projectId: input.projectId,
           entity: input.entity,
+          entityType,
+          kind,
           allocatedSeconds,
           previousClassification: existing.classification,
           newClassification: input.classification
@@ -1641,15 +1746,17 @@ export class SqliteClassificationService {
       this.db
         .prepare(
           `INSERT INTO daily_time_allocations (
-            id, date, project_id, entity, classification, allocated_seconds,
-            timesheet_code, note, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            id, date, project_id, entity, entity_type, kind, classification, allocated_seconds,
+            timesheet_code, note, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
         )
         .run(
           allocationId,
           input.date,
           input.projectId,
           input.entity,
+          entityType,
+          kind,
           input.classification,
           allocatedSeconds,
           input.timesheetCode ?? null,
@@ -1663,10 +1770,15 @@ export class SqliteClassificationService {
         date: input.date,
         project_id: input.projectId,
         entity: input.entity,
+        entity_type: entityType,
+        kind,
         classification: input.classification,
         allocated_seconds: allocatedSeconds,
         timesheet_code: input.timesheetCode ?? null,
         note: input.note ?? null,
+        state: 'active',
+        detached_at: null,
+        reattached_at: null,
         created_at: now,
         updated_at: now
       };
@@ -1801,6 +1913,7 @@ export class SqliteClassificationService {
         s.project_id,
         s.entity,
         s.entity_type,
+        s.kind,
         s.total_seconds,
         s.is_unattributed,
         p.name AS project_name,
@@ -1831,6 +1944,7 @@ export class SqliteClassificationService {
       project_id: number;
       entity: string;
       entity_type: string;
+      kind: 'entity' | 'project_summary' | 'unattributed_residual';
       total_seconds: number;
       is_unattributed: number;
       project_name: string;
@@ -1840,25 +1954,58 @@ export class SqliteClassificationService {
     if (sliceRows.length === 0) return [];
 
     let identSql = `
-      SELECT i.slice_id, i.selector_type, i.value
-      FROM slice_identities i
-      JOIN day_project_entity_slices s ON s.id = i.slice_id
-      WHERE i.selector_type IN ('machine', 'editor')
+      SELECT slice_id, selector_type, value FROM (
+        SELECT i.slice_id, i.selector_type, i.value, s.date
+        FROM slice_identities i
+        JOIN day_project_entity_slices s ON s.id = i.slice_id
+        WHERE i.selector_type IN ('machine', 'editor')
+          AND (
+            i.source != 'heartbeat'
+            OR EXISTS (
+              SELECT 1 FROM heartbeats h
+              JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
+              WHERE hm.active = 1
+                AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
+                AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
+                AND (
+                  (i.selector_type = 'machine' AND LOWER(h.machine_name_id) = LOWER(i.value))
+                  OR (i.selector_type = 'editor' AND LOWER(h.user_agent_id) = LOWER(i.value))
+                )
+            )
+          )
+        UNION
+        SELECT s.id AS slice_id, 'machine' AS selector_type, LOWER(h.machine_name_id) AS value, s.date
+        FROM day_project_entity_slices s
+        JOIN heartbeats h ON h.local_date = s.date
+          AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
+          AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
+        JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
+        WHERE hm.active = 1 AND h.machine_name_id IS NOT NULL AND h.machine_name_id != ''
+        UNION
+        SELECT s.id AS slice_id, 'editor' AS selector_type, LOWER(h.user_agent_id) AS value, s.date
+        FROM day_project_entity_slices s
+        JOIN heartbeats h ON h.local_date = s.date
+          AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
+          AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
+        JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
+        WHERE hm.active = 1 AND h.user_agent_id IS NOT NULL AND h.user_agent_id != ''
+      ) sub
+      WHERE 1=1
     `;
     const identParams: unknown[] = [];
     if (filter?.date) {
-      identSql += ` AND s.date = ?`;
+      identSql += ` AND sub.date = ?`;
       identParams.push(filter.date);
     }
     if (filter?.startDate) {
-      identSql += ` AND s.date >= ?`;
+      identSql += ` AND sub.date >= ?`;
       identParams.push(filter.startDate);
     }
     if (filter?.endDate) {
-      identSql += ` AND s.date <= ?`;
+      identSql += ` AND sub.date <= ?`;
       identParams.push(filter.endDate);
     }
-    identSql += ` ORDER BY i.slice_id ASC, i.selector_type ASC, i.value ASC`;
+    identSql += ` ORDER BY sub.slice_id ASC, sub.selector_type ASC, sub.value ASC`;
 
     const identRows = this.db.prepare(identSql).all(...identParams) as Array<{
       slice_id: number;
@@ -1885,10 +2032,10 @@ export class SqliteClassificationService {
     }
 
     let allocSql = `
-      SELECT id, date, project_id, entity, classification,
-             allocated_seconds, timesheet_code, note, created_at, updated_at
+      SELECT id, date, project_id, entity, entity_type, kind, classification,
+             allocated_seconds, timesheet_code, note, state, detached_at, reattached_at, created_at, updated_at
       FROM daily_time_allocations
-      WHERE 1=1
+      WHERE state = 'active'
     `;
     const allocParams: unknown[] = [];
     if (filter?.date) {
@@ -1907,7 +2054,7 @@ export class SqliteClassificationService {
     const allocRows = this.db.prepare(allocSql).all(...allocParams) as DailyTimeAllocationRecord[];
     const allocationsMap = new Map<string, DailyTimeAllocationRecord>();
     for (const a of allocRows) {
-      allocationsMap.set(`${a.date}:${a.project_id}:${a.entity}`, a);
+      allocationsMap.set(`${a.date}:${a.project_id}:${a.entity}:${a.entity_type}:${a.kind}`, a);
     }
 
     return sliceRows.map((s) => {
@@ -1915,7 +2062,7 @@ export class SqliteClassificationService {
       const machineIds = (idents?.machineIds ?? []).slice().sort();
       const editors = (idents?.editors ?? []).slice().sort();
 
-      const isUnattributed = Boolean(s.is_unattributed || s.project_is_unattributed);
+      const isUnattributed = Boolean(s.is_unattributed || s.project_is_unattributed || s.kind === 'unattributed_residual');
       const entityType: 'file' | 'app' | 'domain' | 'unattributed' =
         s.entity_type === 'app'
           ? 'app'
@@ -1931,10 +2078,13 @@ export class SqliteClassificationService {
         entityType,
         entity: s.entity,
         machineIds,
-        editors
+        editors,
+        kind: s.kind
       };
 
-      const allocation = allocationsMap.get(`${s.date}:${s.project_id}:${s.entity}`) ?? null;
+      const allocation =
+        allocationsMap.get(`${s.date}:${s.project_id}:${s.entity}:${s.entity_type}:${s.kind}`) ??
+        null;
 
       return {
         id: s.id,
@@ -1970,10 +2120,68 @@ export class SqliteClassificationService {
 
     const rawSlices = this.loadSlicesWithContext(filter);
 
+    const hasIdentityRules = modelRules.some(
+      (r) => r.enabled !== false && (r.selectorType === 'machine' || r.selectorType === 'editor')
+    );
+
+    const staleOrMissingHeartbeatDates = new Set<string>();
+    const dates = Array.from(new Set(rawSlices.map((s) => s.date)));
+    if (hasIdentityRules && dates.length > 0) {
+      const placeholders = dates.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT date, evidence_matches_summary, is_stale, has_failure, has_restriction, unresolved_mismatch
+           FROM sync_layer_state
+           WHERE layer = 'heartbeats' AND date IN (${placeholders})`
+        )
+        .all(...dates) as Array<{
+          date: string;
+          evidence_matches_summary: number | null;
+          is_stale: number;
+          has_failure: number;
+          has_restriction: number;
+          unresolved_mismatch: number;
+        }>;
+      const seen = new Set(rows.map((r) => r.date));
+      for (const d of dates) {
+        if (!seen.has(d)) {
+          staleOrMissingHeartbeatDates.add(d);
+        }
+      }
+      for (const r of rows) {
+        if (
+          r.evidence_matches_summary !== 1 ||
+          r.is_stale === 1 ||
+          r.has_failure === 1 ||
+          r.has_restriction === 1 ||
+          r.unresolved_mismatch === 1
+        ) {
+          staleOrMissingHeartbeatDates.add(r.date);
+        }
+      }
+
+      // Check active evidence: date must have active heartbeat memberships (active = 1)
+      const activeMemberRows = this.db
+        .prepare(
+          `SELECT DISTINCT date FROM heartbeat_memberships WHERE active = 1 AND date IN (${placeholders})`
+        )
+        .all(...dates) as Array<{ date: string }>;
+      const datesWithActiveMembers = new Set(activeMemberRows.map((m) => m.date));
+      for (const d of dates) {
+        if (!datesWithActiveMembers.has(d)) {
+          staleOrMissingHeartbeatDates.add(d);
+        }
+      }
+    }
+
     return rawSlices.map((item) => {
       let decision: ClassificationDecision;
 
-      if (item.isUnattributed) {
+      if (
+        item.isUnattributed ||
+        item.classifiableSlice.kind === 'project_summary' ||
+        item.classifiableSlice.kind === 'unattributed_residual'
+      ) {
         if (item.allocation) {
           decision = {
             classification: item.allocation.classification,
@@ -1992,6 +2200,23 @@ export class SqliteClassificationService {
       } else {
         const override = item.allocation ? { classification: item.allocation.classification } : null;
         decision = classifySlice(item.classifiableSlice, modelRules, override);
+
+        if (
+          !override &&
+          staleOrMissingHeartbeatDates.has(item.date) &&
+          decision.classification === 'work' &&
+          decision.source === 'rule'
+        ) {
+          const winningRule = modelRules.find((r) => r.id === decision.winningRuleId);
+          if (winningRule && winningRule.selectorType !== 'machine' && winningRule.selectorType !== 'editor') {
+            decision = {
+              classification: 'unclassified',
+              source: 'default',
+              winningRuleId: null,
+              competingRuleIds: []
+            };
+          }
+        }
       }
 
       return {
