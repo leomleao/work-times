@@ -365,6 +365,85 @@ describe('Sync Capability Policy', () => {
       expect(policy.shouldAttempt('heartbeats', '2026-09-05', fixedNow)).toBe(false);
       expect(policy.shouldAttempt('heartbeats', fixedNow)).toBe(false);
     });
+
+    it('honors untruncated deferred Retry-After as throttle hold without shortening', () => {
+      const policy = new CapabilityPolicy();
+      const retryAt = '2026-09-06T12:00:00.000Z'; // 24 hours in future
+
+      policy.recordDeferredRetry('summaries', retryAt, fixedNow);
+
+      const record = policy.getRecord('summaries');
+      expect(record.status).toBe('throttled');
+      expect(record.restrictionCode).toBe('RETRY_AFTER');
+      expect(record.nextReprobeAt).toBe(retryAt);
+
+      // Before retryAt: should NOT reprobe or attempt
+      const twelveHoursLater = new Date('2026-09-06T00:00:00.000Z');
+      expect(policy.shouldReprobe('summaries', twelveHoursLater)).toBe(false);
+      expect(policy.shouldAttempt('summaries', twelveHoursLater)).toBe(false);
+
+      // At/after retryAt: eligible
+      const twentyFourHoursLater = new Date('2026-09-06T12:00:01.000Z');
+      expect(policy.shouldReprobe('summaries', twentyFourHoursLater)).toBe(true);
+      expect(policy.shouldAttempt('summaries', twentyFourHoursLater)).toBe(true);
+
+      // Verify hold reason
+      const hold = policy.getHoldReason('summaries', undefined, twelveHoursLater);
+      expect(hold).toEqual({
+        type: 'throttle',
+        retryAt
+      });
+    });
+
+    it('does not encode Retry-After or transient errors as fake 403 date restrictions', () => {
+      const policy = new CapabilityPolicy();
+      const targetDate = '2026-08-01';
+      const retryAt = '2026-09-06T12:00:00.000Z';
+
+      policy.recordDeferredRetry('summaries', retryAt, targetDate, fixedNow);
+
+      // DateRestrictionRecord must NOT be created for Retry-After
+      expect(policy.getDateRestriction(targetDate, 'summaries')).toBeNull();
+
+      // Transient error must NOT create a DateRestrictionRecord
+      policy.recordError('heartbeats', new Error('ETIMEDOUT'), targetDate, fixedNow);
+      expect(policy.getDateRestriction(targetDate, 'heartbeats')).toBeNull();
+
+      const hbRecord = policy.getRecord('heartbeats');
+      expect(hbRecord.status).toBe('error');
+      expect(hbRecord.restrictionCode).toBeUndefined();
+    });
+
+    it('distinguishes date restriction, global restriction, throttle hold, and error hold via getHoldReason', () => {
+      const policy = new CapabilityPolicy();
+      const oldDate = '2026-08-01';
+
+      // 1. Old-date 403 restriction
+      policy.recordRestriction('summaries', 403, oldDate, fixedNow);
+      expect(policy.getHoldReason('summaries', oldDate, fixedNow)).toEqual({
+        type: 'date_restriction',
+        statusCode: 403,
+        nextReprobeAt: expect.any(String)
+      });
+      // Recent date is not held
+      expect(policy.getHoldReason('summaries', '2026-09-05', fixedNow)).toBeNull();
+
+      // 2. Throttle hold (Retry-After)
+      const retryAt = '2026-09-06T12:00:00.000Z';
+      policy.recordDeferredRetry('heartbeats', retryAt, fixedNow);
+      expect(policy.getHoldReason('heartbeats', '2026-09-05', fixedNow)).toEqual({
+        type: 'throttle',
+        retryAt
+      });
+
+      // 3. Transient error hold
+      policy.recordError('durations', new Error('Connection reset'), fixedNow);
+      const errorHold = policy.getHoldReason('durations', '2026-09-05', fixedNow);
+      expect(errorHold?.type).toBe('error');
+      if (errorHold?.type === 'error') {
+        expect(errorHold.errorMessage).toContain('Error');
+      }
+    });
   });
 
   describe('State Serialization & Restoration', () => {

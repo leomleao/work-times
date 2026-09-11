@@ -12,7 +12,13 @@ export type SyncCapability = 'summaries' | 'durations' | 'heartbeats';
 /**
  * Lifecycle state of a sync capability.
  */
-export type CapabilityStatus = 'available' | 'restricted' | 'untested' | 'error';
+export type CapabilityStatus = 'available' | 'restricted' | 'untested' | 'error' | 'throttled';
+
+export type CapabilityHoldReason =
+  | { type: 'date_restriction'; statusCode: 402 | 403; nextReprobeAt: string }
+  | { type: 'global_restriction'; statusCode: 402 | 403; nextReprobeAt: string }
+  | { type: 'throttle'; retryAt: string }
+  | { type: 'error'; errorMessage?: string; nextReprobeAt: string };
 
 /**
  * The policy window (in calendar days) for which WakaTime Free plan accounts
@@ -267,7 +273,7 @@ export class CapabilityPolicy {
       return false;
     }
 
-    if (record.status === 'restricted' || record.status === 'error') {
+    if (record.status === 'restricted' || record.status === 'throttled' || record.status === 'error') {
       if (!record.nextReprobeAt) return true;
       return now.getTime() >= new Date(record.nextReprobeAt).getTime();
     }
@@ -309,11 +315,69 @@ export class CapabilityPolicy {
       return true;
     }
 
-    if (record.status === 'restricted' || record.status === 'error') {
+    if (record.status === 'restricted' || record.status === 'throttled' || record.status === 'error') {
       return this.shouldReprobe(capability, now);
     }
 
     return false;
+  }
+
+  /**
+   * Returns detailed hold reason when shouldAttempt returns false.
+   * Distinguishes date restriction (actual 402/403), global restriction (actual 402/403),
+   * throttle hold (Retry-After), and error retry hold.
+   */
+  getHoldReason(
+    capability: SyncCapability,
+    date?: string,
+    now: Date = new Date()
+  ): CapabilityHoldReason | null {
+    if (date) {
+      const dateRestr = this.dateRestrictions.get(date)?.get(capability);
+      if (dateRestr && now.getTime() < new Date(dateRestr.nextReprobeAt).getTime()) {
+        return {
+          type: 'date_restriction',
+          statusCode: dateRestr.statusCode,
+          nextReprobeAt: dateRestr.nextReprobeAt
+        };
+      }
+    }
+
+    const record = this.records.get(capability);
+    if (!record) return null;
+
+    if (record.status === 'restricted') {
+      if (!record.nextReprobeAt || now.getTime() < new Date(record.nextReprobeAt).getTime()) {
+        const codeNum = record.restrictionCode?.replace('HTTP_', '');
+        const statusCode: 402 | 403 = codeNum === '402' ? 402 : 403;
+        return {
+          type: 'global_restriction',
+          statusCode,
+          nextReprobeAt: record.nextReprobeAt ?? ''
+        };
+      }
+    }
+
+    if (record.status === 'throttled' || record.restrictionCode === 'RETRY_AFTER') {
+      if (record.nextReprobeAt && now.getTime() < new Date(record.nextReprobeAt).getTime()) {
+        return {
+          type: 'throttle',
+          retryAt: record.nextReprobeAt
+        };
+      }
+    }
+
+    if (record.status === 'error') {
+      if (record.nextReprobeAt && now.getTime() < new Date(record.nextReprobeAt).getTime()) {
+        return {
+          type: 'error',
+          errorMessage: record.errorMessage,
+          nextReprobeAt: record.nextReprobeAt
+        };
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -410,23 +474,76 @@ export class CapabilityPolicy {
   }
 
   /**
+   * Record a deferred retry honoring full upstream Retry-After without shortening.
+   * Retry-After is an endpoint throttle hold with its exact retryAt.
+   * Does NOT encode fake 403 date restrictions.
+   */
+  recordDeferredRetry(
+    capability: SyncCapability,
+    retryAt: string,
+    dateOrNow?: string | Date,
+    maybeNow?: Date
+  ): void {
+    let now: Date;
+
+    if (typeof dateOrNow === 'string') {
+      now = maybeNow ?? new Date();
+    } else {
+      now = dateOrNow ?? new Date();
+    }
+
+    const record = this.records.get(capability);
+    if (!record) return;
+
+    record.status = 'throttled';
+    record.lastProbedAt = now.toISOString();
+    record.nextReprobeAt = retryAt;
+    record.restrictionCode = 'RETRY_AFTER';
+    record.errorMessage = 'Throttled with Retry-After';
+  }
+
+  /**
    * Record an operational or network error for a capability.
+   * If error has an untruncated retryAt (e.g. WakaTimeDeferredRetryError), honors it without shortening.
+   * Transient errors remain errors and do NOT encode fake 403 date restrictions.
    */
   recordError(
     capability: SyncCapability,
     error: Error,
-    now: Date = new Date(),
+    dateOrNow?: string | Date,
+    maybeNowOrCustomInterval?: Date | number,
     customRetryIntervalMs?: number
   ): void {
+    let date: string | undefined;
+    let now: Date;
+    let intervalMs: number | undefined;
+
+    if (typeof dateOrNow === 'string') {
+      date = dateOrNow;
+      now = (maybeNowOrCustomInterval instanceof Date ? maybeNowOrCustomInterval : undefined) ?? new Date();
+      intervalMs = typeof maybeNowOrCustomInterval === 'number' ? maybeNowOrCustomInterval : customRetryIntervalMs;
+    } else {
+      date = undefined;
+      now = (dateOrNow instanceof Date ? dateOrNow : undefined) ?? new Date();
+      intervalMs = typeof maybeNowOrCustomInterval === 'number' ? maybeNowOrCustomInterval : customRetryIntervalMs;
+    }
+
+    const retryAt = (error as { retryAt?: string }).retryAt;
+    if (retryAt) {
+      this.recordDeferredRetry(capability, retryAt, date, now);
+      return;
+    }
+
+    const interval = intervalMs ?? this.errorRetryIntervalMs;
+    const nextReprobe = new Date(now.getTime() + interval);
+
     const record = this.records.get(capability);
     if (!record) return;
-
-    const interval = customRetryIntervalMs ?? this.errorRetryIntervalMs;
-    const nextReprobe = new Date(now.getTime() + interval);
 
     record.status = 'error';
     record.lastProbedAt = now.toISOString();
     record.nextReprobeAt = nextReprobe.toISOString();
+    record.restrictionCode = undefined;
     record.errorMessage = error.name || 'Request Failed';
   }
 
