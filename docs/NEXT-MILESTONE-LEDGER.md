@@ -1,6 +1,6 @@
 # Next milestone execution ledger
 
-Updated: 2026-09-11. Integration worktree: `next-milestone-integration` through accepted P4/CAS `8f6ee4f`, preserving accepted earlier work and the transferred source working-tree changes. Orca run: `run_4e43ac50f8e8`.
+Updated: 2026-09-11. Integration worktree: `next-milestone-integration` through passed G2 `ae468ad`, preserving accepted earlier work and the transferred source working-tree changes. Orca run: `run_4e43ac50f8e8`.
 
 ## Package state
 
@@ -14,8 +14,8 @@ Updated: 2026-09-11. Integration worktree: `next-milestone-integration` through 
 | G1 | `task_62f0c41edff7` | passed | orchestrator | P1, P2, P3 | 400/400 targeted integration tests; 867/867 full tests; check/build clean; migrations, replay, dump compatibility, transport bounds, allocations, evidence and coarse classification reviewed | none |
 | P4 | `task_0fc56bbe5b41` | accepted | agy child `task_60dc17062ecc` / `ctx_c076a3d8ae9b`; orchestrator review/CAS | G1 | worker `c3f961a`, merge `def3839`, transactional generation CAS `8f6ee4f`; independent 75/75 targeted, integrated 902/902 full; check/build clean | none |
 | P5 | `task_c0a4eaa891b2` | accepted | agy child `task_822d2c372bb0` / `ctx_3196158ca32f`; orchestrator review | G1 | corrected worker `d5ee796`, integration merge `2dec50b`; independent 48/48 and combined P4/P5 108/108 targeted tests; full 933/933; check/build clean; verified-zero, capability holds, bounded raw capture, staged-byte accounting, freshness, preservation and cancellation reviewed | none |
-| P6 | `task_13c534fd95f1` | in_progress | agy child `task_03fe209b2544` / `ctx_73141e2cf317`; orchestrator review pending | P5 | Orca worktree `.worktrees/work-times/p6-coordinator` from accepted P5 ledger head `eb6a7ef`; exact `agy --mode accept-edits` verified | Implementation and validation pending |
-| G2 | `task_b07a775ae59f` | pending | orchestrator | P4, P6 | pending | Gate review |
+| P6 | `task_13c534fd95f1` | accepted | agy child `task_03fe209b2544` / `ctx_73141e2cf317`, corrections `ctx_45d99ffd3f6d` / `ctx_0e9140b8e1db`; orchestrator review | P5 | worker `40fe343`, integration merge `ae468ad`; independent engine 191/191; integrated G2 287/287 and full 963/963; check/build clean; shutdown interruption, auth classification, recovery, aggregation, serialization, cancellation, and configurable factory reviewed | none |
+| G2 | `task_b07a775ae59f` | passed | orchestrator | P4, P6 | P4-P6 integrated through `ae468ad`; 287/287 gate tests and 963/963 full tests; check/build clean; atomic registry publication, preservation, durable queue/progress, restrictions, cancellation, and recovery reviewed | none |
 | P7 | `task_62ede9b2f4ce` | prepared | child `task_1056c9aa6c84`; unassigned | G2 | Bounded scheduler/runtime brief frozen; dependency on G2; fs-ext already pinned by orchestrator | Await G2 before worktree and dispatch |
 | P8 | `task_ea65af005d18` | prepared | backend child `task_cdd4fe996bcc`; UI/browser child `task_3c1be5088f4b`; unassigned | G2, then P8A before P8B | Bounded sequential briefs freeze service/API/quality ownership before UI/browser integration | Await G2 before P8A worktree and dispatch |
 | P9 | `task_db905eeaa75e` | accepted | agy `ctx_93af6b374108`, corrections `ctx_7527bef826b0`; orchestrator review | G0 | client-specific recipes and safe metadata integrated at `3a152d8`; independent targeted 43/43; worker full 689/689, check/build clean; Orca production-build smoke verified Codex, Claude Code, and Claude Desktop OAuth recipes | Full G3/G4 synthetic mobile and clipboard-failure evidence remains |
@@ -37,7 +37,7 @@ Updated: 2026-09-11. Integration worktree: `next-milestone-integration` through 
 | --- | --- | --- |
 | G0 | passed | P0 integrated at `ab9297f`, gate record `7f35134`; 76 targeted and 646 full tests passed; typecheck and in-memory build clean; unsupported shapes retain/reject without fabricated duration, identity, completeness, or success. |
 | G1 | passed | P1-P3 integrated through `d83a5c7`; targeted gate 400/400 and full suite 867/867 passed; `pnpm check` reported no errors/warnings; in-memory build succeeded. Direct review found no data loss, additive polling, invalid FK/trigger behavior, or widened work classification under missing evidence. |
-| G2 | pending | — |
+| G2 | passed | P4-P6 integrated through `ae468ad`; targeted engine/reconciliation/classification gate passed 287/287 and full suite passed 963/963; `pnpm check` reported no errors/warnings; in-memory build succeeded. Direct review confirmed truthful shutdown interruption, authoritative auth handling, one-date serialization, durable recovery links, preserved allocations, verified-zero behavior, and atomic registry publication. |
 | G3 | pending | — |
 | G4 | pending | — |
 
@@ -61,3 +61,4 @@ P0 first-pass review kept G0 pending: direct review found migration filename dri
 - 2026-09-11 P10 preparation: froze local evidence child `task_15fbcd5edf05` and sequential operations/documentation child `task_8490d317c298`; both remain dependency-blocked until G3.
 - 2026-09-11 P4: accepted after a bounded correction and integration-owned repository CAS. Full allowlisted-attribute conflicts, strict flags, safe integer pagination, atomic generation rejection, historical retention, registry-only labels, unknown fallback, both identity caches, and classification stability were reviewed. Independent targeted tests passed 75/75; integrated full suite 902/902; check and in-memory build clean.
 - 2026-09-11 P5: accepted after a bounded correction pass. Verified-zero summaries no longer fabricate heartbeat success or evidence; date/global restrictions, throttle holds, and transient errors remain distinct; raw capture is bounded and safe across sequential dates; all staged raw payloads count toward the 64 MiB ceiling; completion timestamps and preservation/cancellation outcomes are truthful. Worker commit `d5ee796`, merge `2dec50b`; independent 48/48, combined P4/P5 108/108, full 933/933, check and in-memory build clean.
+- 2026-09-11 P6/G2: P6 accepted at worker `40fe343` and merged as `ae468ad` after corrections for shutdown aborts, transient error classification, and test-factory connection settings. Independent engine tests passed 191/191; integrated G2 tests passed 287/287; full suite passed 963/963; check and in-memory build were clean.
