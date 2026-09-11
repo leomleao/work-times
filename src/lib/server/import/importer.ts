@@ -142,6 +142,7 @@ export async function importDumps(db: Database.Database, options: ImportOptions)
     db,
     log,
     dryRun: options.dryRun === true,
+    force: options.force === true,
     allowConflicts: options.allowConflicts === true,
     daily,
     heartbeat,
@@ -250,6 +251,7 @@ interface RunContext {
   db: Database.Database;
   log: ImportLogger;
   dryRun: boolean;
+  force: boolean;
   allowConflicts: boolean;
   daily: { byteSize: number; sourceHash: string };
   heartbeat: { byteSize: number; sourceHash: string };
@@ -349,6 +351,36 @@ function executeImport(context: RunContext): ImportReport {
       log.warn(warning);
     }
 
+    // Safeguard: an overlapping dump must not overwrite existing data showing live API, sync, or dump provenance
+    const existingLive = db
+      .prepare(
+        `SELECT accepted_snapshot_version, accepted_source_reference
+         FROM sync_layer_state
+         WHERE date = ? AND (
+           accepted_snapshot_version >= 1 OR
+           accepted_content_hash IS NOT NULL OR
+           accepted_source_reference IS NOT NULL
+         )`
+      )
+      .get(day.date) as { accepted_snapshot_version: number; accepted_source_reference: string | null } | undefined;
+
+    const existingDaily = db
+      .prepare(
+        `SELECT dt.date, si.source_type
+         FROM daily_totals dt
+         LEFT JOIN source_imports si ON si.id = dt.source_import_id
+         WHERE dt.date = ?`
+      )
+      .get(day.date) as { date: string; source_type: string | null } | undefined;
+
+    if (!context.force && (existingLive || existingDaily)) {
+      const ver = existingLive?.accepted_snapshot_version ?? 1;
+      const ref = existingLive?.accepted_source_reference ?? existingDaily?.source_type ?? 'existing';
+      throw new Error(
+        `Cannot overwrite existing data for ${day.date} (version ${ver}, source ${ref}) with an overlapping dump.`
+      );
+    }
+
     writeDailyTotal(statements, day, projectSum, delta, dailyImportId, context.daily.sourceHash);
     statements.insertSourcePayload.run(
       dailyImportId,
@@ -415,7 +447,7 @@ function executeImport(context: RunContext): ImportReport {
         const key = sliceKey(project.name, name);
         const merged = sliceIndex.has(key);
         const { id: sliceId } = statements.insertSlice.get(
-          day.date, projectId, name, entityType, entity.total_seconds, entity.percent,
+          day.date, projectId, name, entityType, 'entity', entity.total_seconds, entity.percent,
           entity.project_root_count, entity.human_additions, entity.human_deletions,
           entity.ai_additions, entity.ai_deletions, entity.ai_sessions, 0, dailyImportId
         ) as { id: number };
@@ -445,7 +477,7 @@ function executeImport(context: RunContext): ImportReport {
       const seconds = Math.max(0, residual);
       unattributedSliceId = (
         statements.insertSlice.get(
-          day.date, projects.unattributedId, UNATTRIBUTED, 'unattributed',
+          day.date, projects.unattributedId, UNATTRIBUTED, 'unattributed', 'unattributed_residual',
           seconds, null, null, 0, 0, 0, 0, 0, 1, dailyImportId
         ) as { id: number }
       ).id;
@@ -530,7 +562,7 @@ function executeImport(context: RunContext): ImportReport {
           machineNameId: beat.machine_name_id,
           userAgentId: beat.user_agent_id
         })) {
-          const key = `${sliceId} ${identity.selectorType} ${identity.value}`;
+          const key = `${sliceId}\u0000${identity.selectorType}\u0000${identity.value}`;
           const existing = identityCounts.get(key);
           if (existing) existing.count++;
           else
@@ -613,7 +645,7 @@ function executeImport(context: RunContext): ImportReport {
 }
 
 function sliceKey(projectName: string, entity: string): string {
-  return `${projectName} ${entity}`;
+  return `${projectName}\u0000${entity}`;
 }
 
 /** Resolves project names to ids, creating rows and widening activity bounds. */
@@ -808,11 +840,11 @@ function prepareStatements(db: Database.Database): Statements {
     // rather than colliding.
     insertSlice: db.prepare(
       `INSERT INTO day_project_entity_slices
-         (date, project_id, entity, entity_type, total_seconds, percent, project_root_count,
+         (date, project_id, entity, entity_type, kind, total_seconds, percent, project_root_count,
           human_additions, human_deletions, ai_additions, ai_deletions, ai_sessions,
           is_unattributed, source_import_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (date, project_id, entity) DO UPDATE SET
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (date, project_id, entity, entity_type, kind) DO UPDATE SET
          total_seconds      = total_seconds + excluded.total_seconds,
          percent            = COALESCE(percent, 0) + COALESCE(excluded.percent, 0),
          project_root_count = COALESCE(project_root_count, excluded.project_root_count),

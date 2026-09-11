@@ -976,4 +976,110 @@ describe('classification model', () => {
       expect(ruleMatchesSlice(globRule, lowercaseSlice)).toBe(false);
     });
   });
+
+  describe('pure slice-kind behavior', () => {
+    it('leaves coarse project_summary slices unclassified by default even when matching broad project rules exist', () => {
+      const projectRule: ClassificationRule = {
+        id: 'rule-proj',
+        selectorType: 'project',
+        selectorValue: 'work-times',
+        matchMode: 'exact',
+        classification: 'work',
+        priority: 100,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const coarseSlice: ClassifiableSlice = {
+        id: 'slice-coarse',
+        project: 'work-times',
+        entityType: 'app',
+        entity: 'work-times',
+        machineIds: ['work-laptop'],
+        editors: ['VS Code'],
+        kind: 'project_summary'
+      };
+
+      // Rule must NOT match coarse slice
+      expect(ruleMatchesSlice(projectRule, coarseSlice)).toBe(false);
+
+      // Classification decision must be unclassified / default
+      const decision = classifySlice(coarseSlice, [projectRule]);
+      expect(decision.classification).toBe('unclassified');
+      expect(decision.source).toBe('default');
+      expect(decision.winningRuleId).toBeNull();
+    });
+
+    it('allows explicit whole-slice override on coarse project_summary slices', () => {
+      const coarseSlice: ClassifiableSlice = {
+        id: 'slice-coarse-override',
+        project: 'work-times',
+        entityType: 'app',
+        entity: 'work-times',
+        machineIds: [],
+        editors: [],
+        kind: 'project_summary'
+      };
+
+      const decision = classifySlice(coarseSlice, [], { classification: 'work' });
+      expect(decision.classification).toBe('work');
+      expect(decision.source).toBe('override');
+      expect(decision.winningRuleId).toBeNull();
+    });
+
+    it('leaves unattributed_residual slices unclassified by default and ignores rules', () => {
+      const broadRule: ClassificationRule = {
+        id: 'rule-broad-entity',
+        selectorType: 'entity',
+        selectorValue: '__unattributed__',
+        matchMode: 'exact',
+        classification: 'personal',
+        priority: 50,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const residualSlice: ClassifiableSlice = {
+        id: 'slice-residual',
+        project: null,
+        entityType: 'unattributed',
+        entity: '__unattributed__',
+        machineIds: [],
+        editors: [],
+        kind: 'unattributed_residual'
+      };
+
+      expect(ruleMatchesSlice(broadRule, residualSlice)).toBe(false);
+
+      const decision = classifySlice(residualSlice, [broadRule]);
+      expect(decision.classification).toBe('unclassified');
+      expect(decision.source).toBe('default');
+    });
+
+    it('evaluates entity slices normally under existing rules', () => {
+      const projectRule: ClassificationRule = {
+        id: 'rule-proj-normal',
+        selectorType: 'project',
+        selectorValue: 'work-times',
+        matchMode: 'exact',
+        classification: 'work',
+        priority: 10,
+        createdAt: '2026-01-01T00:00:00Z'
+      };
+
+      const entitySlice: ClassifiableSlice = {
+        id: 'slice-file',
+        project: 'work-times',
+        entityType: 'file',
+        entity: '/src/main.ts',
+        machineIds: [],
+        editors: [],
+        kind: 'entity'
+      };
+
+      expect(ruleMatchesSlice(projectRule, entitySlice)).toBe(true);
+      const decision = classifySlice(entitySlice, [projectRule]);
+      expect(decision.classification).toBe('work');
+      expect(decision.source).toBe('rule');
+      expect(decision.winningRuleId).toBe('rule-proj-normal');
+    });
+  });
 });

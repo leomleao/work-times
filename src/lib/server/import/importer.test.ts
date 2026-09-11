@@ -498,4 +498,36 @@ describe('guards', () => {
       importDumps(db, { dailyDumpPath: path, heartbeatDumpPath: HEARTBEATS })
     ).rejects.toThrow(/different day counts/);
   });
+
+  it('refuses to overwrite existing daily rows showing live API, sync, or dump provenance', async () => {
+    // Stage an existing daily import, daily total, and sync layer state for 2026-01-03
+    const importId = (
+      db.prepare(`
+        INSERT INTO source_imports (source_type, source_hash, byte_size, status, range_start_date, range_end_date)
+        VALUES ('api_summaries', 'fake-hash-123', 100, 'completed', '2026-01-03', '2026-01-03')
+      `).run()
+    ).lastInsertRowid;
+
+    db.prepare(`
+      INSERT INTO daily_totals (
+        date, timezone, total_seconds, grand_total_json, project_sum_seconds, project_sum_delta, source_import_id, source_hash
+      ) VALUES (
+        '2026-01-03', 'UTC', 3600.0, '{}', 3600.0, 0.0, ?, 'fake-hash-123'
+      )
+    `).run(importId);
+
+    db.prepare(`
+      INSERT INTO sync_layer_state (
+        date, layer, last_attempt_at, last_success_at, last_accepted_change_at,
+        accepted_source_reference, accepted_snapshot_version, accepted_fidelity,
+        accepted_content_hash, verified_timezone, updated_at
+      ) VALUES (
+        '2026-01-03', 'summaries', '2026-01-03T12:00:00Z', '2026-01-03T12:00:00Z', '2026-01-03T12:00:00Z',
+        'api:live-session-123', 2, 'entity_detail', 'some-hash', 'UTC', '2026-01-03T12:00:00Z'
+      )
+    `).run();
+
+    // Importing fixture that includes 2026-01-03 must fail conservatively
+    await expect(importFixtures()).rejects.toThrow(/Cannot overwrite existing data for 2026-01-03/);
+  });
 });

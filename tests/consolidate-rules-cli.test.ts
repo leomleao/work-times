@@ -587,7 +587,8 @@ describe('Consolidate Rules CLI (scripts/consolidate-rules.ts)', () => {
         '005-sync-lifecycle.sql',
         '006-reconciliation-overlay.sql',
         '007-user-agent-registry.sql',
-        '008-connection-lifecycle.sql'
+        '008-connection-lifecycle.sql',
+        '009-slice-semantic-identity.sql'
       ]);
 
       // - Target has match_mode column
