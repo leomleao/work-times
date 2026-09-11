@@ -325,6 +325,48 @@ describe('Sync Capability Policy', () => {
     });
   });
 
+  describe('Date-Aware Restrictions and Reprobing', () => {
+    it('records old-date 402/403 only on that date and does not globally restrict endpoint', () => {
+      const policy = new CapabilityPolicy();
+      policy.recordSuccess('summaries', fixedNow);
+
+      // 2026-08-01 is far outside the 7-day free window relative to fixedNow (2026-09-05)
+      expect(isDateWithinFreeWindow('2026-08-01', fixedNow)).toBe(false);
+
+      // Old date 402
+      policy.recordRestriction('summaries', 402, '2026-08-01', fixedNow);
+
+      // Endpoint-wide status remains available!
+      expect(policy.isAvailable('summaries')).toBe(true);
+      expect(policy.isRestricted('summaries')).toBe(false);
+
+      // Old date should not be attempted
+      expect(policy.shouldAttempt('summaries', '2026-08-01', fixedNow)).toBe(false);
+      expect(policy.shouldReprobe('summaries', '2026-08-01', fixedNow)).toBe(false);
+
+      // Recent dates (yesterday, today) should still be attempted!
+      expect(policy.shouldAttempt('summaries', '2026-09-04', fixedNow)).toBe(true);
+      expect(policy.shouldAttempt('summaries', '2026-09-05', fixedNow)).toBe(true);
+      expect(policy.shouldAttempt('summaries', fixedNow)).toBe(true);
+    });
+
+    it('establishes endpoint-wide restriction when restriction is observed on a recent probe', () => {
+      const policy = new CapabilityPolicy();
+
+      // 2026-09-04 is yesterday, within the 7-day free window relative to fixedNow (2026-09-05)
+      expect(isDateWithinFreeWindow('2026-09-04', fixedNow)).toBe(true);
+
+      // Recent date probe gets 403
+      policy.recordRestriction('heartbeats', 403, '2026-09-04', fixedNow);
+
+      // Endpoint-wide restriction is established!
+      expect(policy.isRestricted('heartbeats')).toBe(true);
+      expect(policy.shouldAttempt('heartbeats', '2026-09-04', fixedNow)).toBe(false);
+      expect(policy.shouldAttempt('heartbeats', '2026-09-05', fixedNow)).toBe(false);
+      expect(policy.shouldAttempt('heartbeats', fixedNow)).toBe(false);
+    });
+  });
+
   describe('State Serialization & Restoration', () => {
     it('serializes to JSON and restores cleanly', () => {
       const policy1 = new CapabilityPolicy();

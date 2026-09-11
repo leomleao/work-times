@@ -1,6 +1,6 @@
 # Next milestone execution ledger
 
-Updated: 2026-09-09. Integration worktree: `next-milestone-integration` at baseline `0376033` plus the transferred source working-tree changes. Orca run: `run_4e43ac50f8e8`.
+Updated: 2026-09-11. Integration worktree: `next-milestone-integration` at baseline `0376033` plus the transferred source working-tree changes. Orca run: `run_4e43ac50f8e8`.
 
 ## Package state
 
@@ -9,8 +9,8 @@ Updated: 2026-09-09. Integration worktree: `next-milestone-integration` at basel
 | P0 | `task_f6b628cd3920` | accepted | agy `ctx_0f2653834e31`, corrections `ctx_f33979ba3af7` / `ctx_94e380835b16`, orchestrator review | none | frozen contracts and fixtures; targeted 76/76; full 646/646; check/build clean; host and Docker Node 24 `fs-ext` proof passed | — |
 | G0 | `task_20644ffca4b1` | passed | orchestrator | P0 | contract matrix, exact migration sequence, lifecycle/lock choice, truthful aggregate/freshness/catch-up failure cases reviewed | — |
 | P1 | `task_7d721f095348` | accepted | agy `ctx_adf276bcf049`, corrections `ctx_78601ac8d4fe`; orchestrator review | G0 | schema/repositories integrated at `9105de7`; independent targeted 62/62; worker check/build clean; recovery, freshness, membership, and CAS corrections verified | G1 integration with P2/P3 pending |
-| P2 | `task_e82c1a05fdde` | running | agy `ctx_186b85a6dc5c` | G0 | supervised child `task_cef3f1b3e028`; worktree `p2-http-oauth` | review and integration pending |
-| P3 | `task_f36f1547ac48` | not_started | unassigned | P1 | pending | — |
+| P2 | `task_e82c1a05fdde` | accepted | agy `ctx_186b85a6dc5c`, corrections `ctx_8d90f9c5c7bd` / `ctx_33633646a73b` / `ctx_fb285094c601`; orchestrator review | G0 | transport/OAuth integrated at `53ee159`; independent targeted 125/125; worker full 771/771, check/build clean; shared pacing, truthful Retry-After, generation CAS/ABA, caller cancellation, and whole-operation deadline verified | G1 integration with P3 pending |
+| P3 | `task_f36f1547ac48` | running | agy stage A `ctx_32c1687d895a` | P1 | normalization child `task_5fb50cfcab5b`; worktree `p3-normalization` from `ec1ae5a`; source baseline checksums verified; terminal launched with `agy --mode accept-edits` | stage A review, then transactional writer stage B |
 | G1 | `task_62f0c41edff7` | pending | orchestrator | P1, P2, P3 | pending | Gate review |
 | P4 | `task_0fc56bbe5b41` | not_started | unassigned | G1 | pending | — |
 | P5 | `task_c0a4eaa891b2` | not_started | unassigned | G1 | pending | — |
@@ -49,3 +49,5 @@ P0 first-pass review kept G0 pending: direct review found migration filename dri
 - 2026-09-09 baseline at `9c00d70`: `pnpm test` passed 570 tests in 34 files; `pnpm check` reported 0 errors and 0 warnings; `pnpm build` completed successfully with the in-memory database build contract.
 - 2026-09-10 P9: accepted after a bounded correction pass. Independent recipe/page tests passed 43/43; exact Codex and Claude recipes, fail-closed expiry handling, safe key metadata, accessible selection, and cleanup paths were reviewed. Integrated at `3a152d8`.
 - 2026-09-10 P1: accepted after boundary corrections. Independent repository/migration tests passed 62/62; populated migration, scoped restart recovery, unchanged-content freshness, exact heartbeat retirement, allocation survival, and atomic connection-generation CAS were reviewed. Integrated at `9105de7`; the historical consolidation test now expects migrations 005-008 and passes 24/24.
+- 2026-09-10 P3A dispatch: Orca readiness detection rejected two attachment attempts after the one-time folder trust screen; manual Orca dispatch `ctx_32c1687d895a` injected the same bounded task into the verified `agy --mode accept-edits` terminal. No implementation ran under the failed attachments.
+- 2026-09-11 P2: accepted after three bounded correction passes. Independent transport/OAuth/schema/capability/discovery tests passed 125/125; one shared paced request gate, full Retry-After, 5-minute whole-operation budget, 30-second per-request/body bound, cancellation, sanitization, and P1 generation CAS/ABA behavior were directly reviewed. Integrated at `53ee159`; worker full 771/771, check and in-memory build clean.

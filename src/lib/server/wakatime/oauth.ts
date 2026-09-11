@@ -1,5 +1,21 @@
 import type { SqliteWakaTimeOAuthConnectionRepository } from '$lib/server/db/repositories';
 import { openWakaTimeToken, sealWakaTimeToken } from './token-seal.js';
+import {
+  WakaTimeOAuthRevokedError,
+  WakaTimeOAuthTransientError,
+  WakaTimeRequestTimeoutError,
+  WakaTimeResponseSizeExceededError,
+  WakaTimeError,
+  sanitizeErrorMessage
+} from './errors.js';
+import {
+  type WakaTimeRequestGate,
+  getApplicationRequestGate
+} from './request-gate.js';
+import {
+  UPSTREAM_REQUEST_TIMEOUT_MS,
+  MAX_RESPONSE_PAYLOAD_BYTES
+} from '../sync/contracts.js';
 
 export const WAKATIME_OAUTH_SCOPES = [
   'read_heartbeats',
@@ -33,6 +49,17 @@ export interface WakaTimeOAuthStatus {
   connectedAt: string | null;
 }
 
+export interface StoredOAuthRecord {
+  accessTokenSealed: string;
+  refreshTokenSealed: string;
+  tokenType: 'Bearer';
+  scopes: string[];
+  expiresAt: string | null;
+  connectedAt: string;
+  updatedAt: string;
+  generation?: number;
+}
+
 export interface WakaTimeOAuthServiceOptions {
   repository: SqliteWakaTimeOAuthConnectionRepository;
   clientId: string | null;
@@ -41,12 +68,18 @@ export interface WakaTimeOAuthServiceOptions {
   encryptionSecret: string | null;
   fetch?: typeof fetch;
   now?: () => Date;
+  gate?: WakaTimeRequestGate;
+  requestTimeoutMs?: number;
+  maxResponseSizeBytes?: number;
 }
 
 export class WakaTimeOAuthError extends Error {
-  constructor(message: string) {
-    super(message);
+  readonly code?: string;
+
+  constructor(message: string, options?: { code?: string }) {
+    super(sanitizeErrorMessage(message));
     this.name = 'WakaTimeOAuthError';
+    this.code = options?.code;
   }
 }
 
@@ -57,9 +90,15 @@ function stringValue(value: unknown): string | null {
 function parseTokenPayload(body: string, contentType: string): OAuthTokenPayload {
   let source: Record<string, unknown>;
   try {
-    source = contentType.includes('json')
-      ? (JSON.parse(body) as Record<string, unknown>)
-      : Object.fromEntries(new URLSearchParams(body));
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      source = Object.fromEntries(new URLSearchParams(body));
+    } else {
+      try {
+        source = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        source = Object.fromEntries(new URLSearchParams(body));
+      }
+    }
   } catch {
     throw new WakaTimeOAuthError('WakaTime returned an invalid token response');
   }
@@ -103,7 +142,12 @@ export class WakaTimeOAuthService {
   readonly #encryptionSecret: string | null;
   readonly #fetch: typeof fetch;
   readonly #now: () => Date;
+  readonly #gate: WakaTimeRequestGate;
+  readonly #requestTimeoutMs: number;
+  readonly #maxResponseSizeBytes: number;
+
   #refreshPromise: Promise<string> | null = null;
+  #lastKnownGeneration = 0;
 
   constructor(options: WakaTimeOAuthServiceOptions) {
     this.#repository = options.repository;
@@ -112,8 +156,17 @@ export class WakaTimeOAuthService {
     this.#encryptionSecret = options.encryptionSecret;
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#now = options.now ?? (() => new Date());
+    this.#gate = options.gate ?? getApplicationRequestGate();
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? UPSTREAM_REQUEST_TIMEOUT_MS;
+    this.#maxResponseSizeBytes = options.maxResponseSizeBytes ?? MAX_RESPONSE_PAYLOAD_BYTES;
     this.callbackUrl = new URL('/oauth/wakatime/callback', options.publicUrl).toString();
     this.installUrl = new URL('/integrations/wakatime', options.publicUrl).toString();
+
+    try {
+      this.#lastKnownGeneration = this.#repository.get()?.generation ?? 0;
+    } catch {
+      this.#lastKnownGeneration = 0;
+    }
   }
 
   get appConfigured(): boolean {
@@ -126,6 +179,10 @@ export class WakaTimeOAuthService {
 
   get ready(): boolean {
     return this.appConfigured && this.encryptionReady;
+  }
+
+  get generation(): number {
+    return this.#repository.get()?.generation ?? this.#lastKnownGeneration;
   }
 
   status(): WakaTimeOAuthStatus {
@@ -154,112 +211,344 @@ export class WakaTimeOAuthService {
     return url.toString();
   }
 
-  async exchangeCode(code: string): Promise<void> {
+  async exchangeCode(code: string, signal?: AbortSignal): Promise<void> {
     this.#assertReady();
     if (!code.trim()) throw new WakaTimeOAuthError('Authorization code is required');
-    const token = await this.#requestToken({
-      grant_type: 'authorization_code',
-      code: code.trim(),
-      redirect_uri: this.callbackUrl
-    });
+
+    const token = await this.#requestToken(
+      {
+        grant_type: 'authorization_code',
+        code: code.trim(),
+        redirect_uri: this.callbackUrl
+      },
+      signal
+    );
+
     if (!token.refreshToken) {
       throw new WakaTimeOAuthError('WakaTime token response omitted the refresh token');
     }
-    this.#saveToken(token, token.refreshToken, this.#now().toISOString());
+
+    const current = this.#repository.get();
+    const nextGeneration = Math.max(this.#lastKnownGeneration, current?.generation ?? 0) + 1;
+    this.#lastKnownGeneration = nextGeneration;
+
+    const record = this.#buildStoredRecord(
+      token,
+      token.refreshToken,
+      this.#now().toISOString(),
+      nextGeneration
+    );
+    this.#repository.upsert(record);
   }
 
-  async getAccessToken(): Promise<string> {
+  async getAccessToken(signal?: AbortSignal): Promise<string> {
     const connection = this.#repository.get();
     if (!connection) throw new WakaTimeOAuthError('WakaTime is not connected');
     if (connection.expiresAt) {
       const expiresAt = Date.parse(connection.expiresAt);
       if (!Number.isFinite(expiresAt) || expiresAt <= this.#now().getTime() + REFRESH_EARLY_MS) {
-        return this.refreshAccessToken();
+        return this.refreshAccessToken(signal);
       }
     }
     return this.#open(connection.accessTokenSealed);
   }
 
-  async refreshAccessToken(): Promise<string> {
+  async refreshAccessToken(signal?: AbortSignal): Promise<string> {
     if (this.#refreshPromise) return this.#refreshPromise;
-    this.#refreshPromise = this.#refreshAccessToken().finally(() => {
+    this.#refreshPromise = this.#refreshAccessToken(signal).finally(() => {
       this.#refreshPromise = null;
     });
     return this.#refreshPromise;
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(signal?: AbortSignal): Promise<void> {
     const connection = this.#repository.get();
     if (!connection) return;
     this.#assertReady();
+
+    // Monotonically advance/capture lastKnownGeneration so any in-flight refresh cannot match after delete
+    this.#lastKnownGeneration = Math.max(this.#lastKnownGeneration, connection.generation);
+
     const refreshToken = this.#open(connection.refreshTokenSealed);
-    const response = await this.#fetch(REVOKE_URL, {
-      method: 'POST',
-      redirect: 'manual',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: new URLSearchParams({
-        client_id: this.#clientId!,
-        client_secret: this.#clientSecret!,
-        token: refreshToken
-      }).toString()
-    });
-    if (!response.ok) {
-      throw new WakaTimeOAuthError(`WakaTime token revocation failed (HTTP ${response.status})`);
+    try {
+      const { status } = await this.#executeHttp(
+        REVOKE_URL,
+        {
+          client_id: this.#clientId!,
+          client_secret: this.#clientSecret!,
+          token: refreshToken
+        },
+        signal
+      );
+
+      if (status < 200 || status >= 300) {
+        throw new WakaTimeOAuthError(`WakaTime token revocation failed (HTTP ${status})`);
+      }
+    } finally {
+      this.#repository.delete();
     }
-    this.#repository.delete();
   }
 
-  async #refreshAccessToken(): Promise<string> {
+  async #refreshAccessToken(signal?: AbortSignal): Promise<string> {
     this.#assertReady();
     const existing = this.#repository.get();
     if (!existing) throw new WakaTimeOAuthError('WakaTime is not connected');
+
+    const expectedGeneration = existing.generation;
+    this.#lastKnownGeneration = Math.max(this.#lastKnownGeneration, expectedGeneration);
+
     const existingRefreshToken = this.#open(existing.refreshTokenSealed);
-    const token = await this.#requestToken({
-      grant_type: 'refresh_token',
-      refresh_token: existingRefreshToken,
-      redirect_uri: this.callbackUrl
-    });
+    const token = await this.#requestToken(
+      {
+        grant_type: 'refresh_token',
+        refresh_token: existingRefreshToken,
+        redirect_uri: this.callbackUrl
+      },
+      signal
+    );
+
     const refreshToken = token.refreshToken ?? existingRefreshToken;
-    this.#saveToken(token, refreshToken, existing.connectedAt);
+    const now = this.#now();
+
+    const tokens = {
+      accessTokenSealed: sealWakaTimeToken(token.accessToken, this.#encryptionSecret!),
+      refreshTokenSealed: sealWakaTimeToken(refreshToken, this.#encryptionSecret!),
+      expiresAt:
+        token.expiresIn === null
+          ? null
+          : new Date(now.getTime() + token.expiresIn * 1000).toISOString(),
+      updatedAt: now.toISOString()
+    };
+
+    try {
+      const updated = this.#repository.updateTokensCAS(tokens, expectedGeneration);
+      if (!updated) {
+        throw new WakaTimeOAuthError(
+          'STALE_CONNECTION_GENERATION: Token refresh persistence aborted because connection was deleted or updated concurrently',
+          { code: 'STALE_CONNECTION_GENERATION' }
+        );
+      }
+    } catch (err) {
+      if (err instanceof WakaTimeOAuthError) throw err;
+      throw new WakaTimeOAuthError(
+        `STALE_CONNECTION_GENERATION: ${err instanceof Error ? err.message : 'CAS generation mismatch'}`,
+        { code: 'STALE_CONNECTION_GENERATION' }
+      );
+    }
+
     return token.accessToken;
   }
 
-  async #requestToken(parameters: Record<string, string>): Promise<OAuthTokenPayload> {
-    const response = await this.#fetch(TOKEN_URL, {
-      method: 'POST',
-      redirect: 'manual',
-      headers: {
-        Accept: 'application/json, application/x-www-form-urlencoded',
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: new URLSearchParams({
+  async #readResponseBody(
+    response: Response,
+    signal?: AbortSignal,
+    endpoint?: string
+  ): Promise<string> {
+    const contentLength = response.headers.get('content-length');
+    if (contentLength) {
+      const bytes = Number.parseInt(contentLength, 10);
+      if (!Number.isNaN(bytes) && bytes > this.#maxResponseSizeBytes) {
+        throw new WakaTimeResponseSizeExceededError(this.#maxResponseSizeBytes, endpoint);
+      }
+    }
+
+    if (response.body && typeof response.body.getReader === 'function') {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+
+      try {
+        while (true) {
+          if (signal?.aborted) {
+            await reader.cancel(signal.reason).catch(() => {});
+            throw signal.reason ?? new Error('Request aborted');
+          }
+
+          let abortListener: (() => void) | undefined;
+          const abortPromise = new Promise<never>((_, reject) => {
+            if (signal?.aborted) {
+              reject(signal.reason ?? new Error('Request aborted'));
+              return;
+            }
+            abortListener = () => {
+              reader.cancel(signal?.reason).catch(() => {});
+              reject(signal?.reason ?? new Error('Request aborted'));
+            };
+            signal?.addEventListener('abort', abortListener, { once: true });
+          });
+
+          try {
+            const { done, value } = await Promise.race([reader.read(), abortPromise]);
+            if (abortListener) {
+              signal?.removeEventListener('abort', abortListener);
+            }
+            if (signal?.aborted) {
+              throw signal.reason ?? new Error('Request aborted');
+            }
+            if (done) break;
+
+            if (value) {
+              totalBytes += value.byteLength;
+              if (totalBytes > this.#maxResponseSizeBytes) {
+                await reader.cancel('Response payload size limit exceeded').catch(() => {});
+                throw new WakaTimeResponseSizeExceededError(this.#maxResponseSizeBytes, endpoint);
+              }
+              chunks.push(value);
+            }
+          } catch (err) {
+            if (abortListener) {
+              signal?.removeEventListener('abort', abortListener);
+            }
+            throw err;
+          }
+        }
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {}
+      }
+
+      if (signal?.aborted) {
+        throw signal.reason ?? new Error('Request aborted');
+      }
+
+      const totalBuffer = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        totalBuffer.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return new TextDecoder().decode(totalBuffer);
+    }
+
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > this.#maxResponseSizeBytes) {
+      throw new WakaTimeResponseSizeExceededError(this.#maxResponseSizeBytes, endpoint);
+    }
+    return text;
+  }
+
+  async #executeHttp(
+    url: string,
+    bodyParams: Record<string, string>,
+    callerSignal?: AbortSignal
+  ): Promise<{ status: number; text: string; contentType: string }> {
+    if (callerSignal?.aborted) {
+      throw callerSignal.reason ?? new Error('Request aborted before start');
+    }
+
+    const permit = await this.#gate.acquire({ signal: callerSignal });
+
+    const attemptController = new AbortController();
+    const onCallerAbort = () => {
+      attemptController.abort(callerSignal?.reason ?? new Error('Request aborted by caller'));
+    };
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+
+    const timeoutTimer = setTimeout(() => {
+      attemptController.abort(
+        new WakaTimeRequestTimeoutError(this.#requestTimeoutMs, new URL(url).pathname)
+      );
+    }, this.#requestTimeoutMs);
+
+    try {
+      const response = await this.#fetch(url, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: {
+          Accept: 'application/json, application/x-www-form-urlencoded',
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams(bodyParams).toString(),
+        signal: attemptController.signal
+      });
+
+      const text = await this.#readResponseBody(
+        response,
+        attemptController.signal,
+        new URL(url).pathname
+      );
+      return {
+        status: response.status,
+        text,
+        contentType: response.headers.get('content-type') ?? ''
+      };
+    } catch (err) {
+      if (attemptController.signal.aborted) {
+        const reason = attemptController.signal.reason;
+        if (reason instanceof WakaTimeRequestTimeoutError) {
+          throw reason;
+        }
+        if (callerSignal?.aborted) {
+          throw callerSignal.reason ?? new Error('Request aborted by caller');
+        }
+      }
+      if (err instanceof WakaTimeOAuthError || err instanceof WakaTimeError) {
+        throw err;
+      }
+      const msg = err instanceof Error ? err.message : 'Network transport error';
+      throw new WakaTimeOAuthTransientError(sanitizeErrorMessage(msg), new URL(url).pathname);
+    } finally {
+      clearTimeout(timeoutTimer);
+      if (callerSignal) {
+        callerSignal.removeEventListener('abort', onCallerAbort);
+      }
+      permit.release();
+    }
+  }
+
+  async #requestToken(
+    parameters: Record<string, string>,
+    signal?: AbortSignal
+  ): Promise<OAuthTokenPayload> {
+    const { status, text, contentType } = await this.#executeHttp(
+      TOKEN_URL,
+      {
         client_id: this.#clientId!,
         client_secret: this.#clientSecret!,
         ...parameters
-      }).toString()
-    });
-    if (!response.ok) {
-      throw new WakaTimeOAuthError(`WakaTime token exchange failed (HTTP ${response.status})`);
+      },
+      signal
+    );
+
+    if (status < 200 || status >= 300) {
+      if (status === 400 || status === 401) {
+        // Upstream explicitly revoked or rejected refresh token / client auth
+        throw new WakaTimeOAuthRevokedError('/oauth/token');
+      }
+      if (status >= 500 && status <= 599) {
+        throw new WakaTimeOAuthTransientError(
+          `WakaTime token server error (HTTP ${status})`,
+          '/oauth/token',
+          status
+        );
+      }
+      throw new WakaTimeOAuthError(`WakaTime token exchange failed (HTTP ${status})`);
     }
-    return parseTokenPayload(await response.text(), response.headers.get('content-type') ?? '');
+
+    return parseTokenPayload(text, contentType);
   }
 
-  #saveToken(token: OAuthTokenPayload, refreshToken: string, connectedAt: string): void {
+  #buildStoredRecord(
+    token: OAuthTokenPayload,
+    refreshToken: string,
+    connectedAt: string,
+    generation?: number
+  ): StoredOAuthRecord {
     const now = this.#now();
-    this.#repository.upsert({
+    return {
       accessTokenSealed: sealWakaTimeToken(token.accessToken, this.#encryptionSecret!),
       refreshTokenSealed: sealWakaTimeToken(refreshToken, this.#encryptionSecret!),
       tokenType: 'Bearer',
       scopes: token.scopes,
-      expiresAt: token.expiresIn === null
-        ? null
-        : new Date(now.getTime() + token.expiresIn * 1000).toISOString(),
+      expiresAt:
+        token.expiresIn === null
+          ? null
+          : new Date(now.getTime() + token.expiresIn * 1000).toISOString(),
       connectedAt,
-      updatedAt: now.toISOString()
-    });
+      updatedAt: now.toISOString(),
+      generation
+    };
   }
 
   #open(sealed: string): string {
@@ -276,4 +565,3 @@ export class WakaTimeOAuthService {
     }
   }
 }
-

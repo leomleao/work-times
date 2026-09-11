@@ -464,8 +464,8 @@ describe('SQLite Repositories and Application State Schema', () => {
 
       db.prepare(`
         INSERT INTO day_project_entity_slices (
-          id, date, project_id, entity, entity_type, total_seconds, source_import_id
-        ) VALUES (1, '2026-01-01', ?, '__unattributed__', 'unattributed', 3600.0, 1)
+          id, date, project_id, entity, entity_type, kind, is_unattributed, total_seconds, source_import_id
+        ) VALUES (1, '2026-01-01', ?, '__unattributed__', 'unattributed', 'unattributed_residual', 1, 3600.0, 1)
       `).run(projectRow.id);
 
       db.prepare(`
@@ -476,31 +476,31 @@ describe('SQLite Repositories and Application State Schema', () => {
 
       const insertStmt = db.prepare(`
         INSERT INTO daily_time_allocations (
-          id, date, project_id, entity, classification, allocated_seconds, note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          id, date, project_id, entity, entity_type, kind, classification, allocated_seconds, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       // 1. Valid allocation matching slice total_seconds
-      insertStmt.run('alloc_1', '2026-01-01', projectRow.id, '__unattributed__', 'work', 3600.0, 'Approved');
+      insertStmt.run('alloc_1', '2026-01-01', projectRow.id, '__unattributed__', 'unattributed', 'unattributed_residual', 'work', 3600.0, 'Approved');
 
       // 2. Allocation with mismatched seconds fails
       expect(() =>
-        insertStmt.run('alloc_bad_sec', '2026-01-02', projectRow.id, 'src/index.ts', 'work', 1230.0, 'Wrong')
+        insertStmt.run('alloc_bad_sec', '2026-01-02', projectRow.id, 'src/index.ts', 'file', 'entity', 'work', 1230.0, 'Wrong')
       ).toThrow(/allocated_seconds does not match authoritative slice total_seconds/);
 
-      // 3. Allocation on non-existent slice fails (both via trigger and composite FK)
+      // 3. Allocation on non-existent slice fails (via trigger)
       expect(() =>
-        insertStmt.run('alloc_missing_slice', '2026-01-03', projectRow.id, 'missing.ts', 'work', 500.0, 'Missing')
+        insertStmt.run('alloc_missing_slice', '2026-01-03', projectRow.id, 'missing.ts', 'file', 'entity', 'work', 500.0, 'Missing')
       ).toThrow(/allocated_seconds does not match authoritative slice total_seconds/);
 
-      // 4. Duplicate whole-slice allocation on (date, project_id, entity) fails UNIQUE constraint
+      // 4. Duplicate whole-slice allocation on (date, project_id, entity, entity_type, kind) fails UNIQUE constraint
       expect(() =>
-        insertStmt.run('alloc_dup', '2026-01-01', projectRow.id, '__unattributed__', 'personal', 3600.0, 'Dup')
+        insertStmt.run('alloc_dup', '2026-01-01', projectRow.id, '__unattributed__', 'unattributed', 'unattributed_residual', 'personal', 3600.0, 'Dup')
       ).toThrow(/UNIQUE constraint failed/);
 
       // 5. Classification restricted to work | personal only ('unclassified' rejected)
       expect(() =>
-        insertStmt.run('alloc_unclass', '2026-01-02', projectRow.id, 'src/index.ts', 'unclassified', 1234.5, 'Unclass')
+        insertStmt.run('alloc_unclass', '2026-01-02', projectRow.id, 'src/index.ts', 'file', 'entity', 'unclassified', 1234.5, 'Unclass')
       ).toThrow(/CHECK constraint failed/);
     });
   });

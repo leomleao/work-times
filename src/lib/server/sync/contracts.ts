@@ -1015,7 +1015,7 @@ export const RECOMMENDED_MIGRATION_SEQUENCE: MigrationSpec[] = [
     filename: '006-reconciliation-overlay.sql',
     name: 'reconciliation-overlay',
     purpose:
-      'Migrate daily_time_allocations from ON DELETE CASCADE to detached state with allocation semantic identity (date, project_id, entity) and append-only reconciliation revisions; add slice kind/identity constraints for project_summary and unattributed residual slices; introduce active heartbeat membership relation seeded from existing heartbeats; preserve foreign keys under transactional SQLite table rebuilds.',
+      'Migrate daily_time_allocations from ON DELETE CASCADE to detached state with the transitional legacy allocation identity (date, project_id, entity) and append-only reconciliation revisions; add slice kind/identity constraints for project_summary and unattributed residual slices; introduce active heartbeat membership relation seeded from existing heartbeats; preserve foreign keys under transactional SQLite table rebuilds.',
     tables: [
       'day_project_entity_slices',
       'daily_time_allocations',
@@ -1053,6 +1053,21 @@ export const RECOMMENDED_MIGRATION_SEQUENCE: MigrationSpec[] = [
     rebuildRules: [
       'Add generation (INTEGER DEFAULT 1), bound_archive_identity, and rebound_at columns.',
       'Add trigger enforcing CAS comparison (WHERE generation = NEW.generation) on update.'
+    ]
+  },
+  {
+    number: '009',
+    filename: '009-slice-semantic-identity.sql',
+    name: 'slice-semantic-identity',
+    purpose:
+      'Complete collision-proof slice and allocation identity as (date, project_id, entity, entity_type, kind), preserving stable IDs, detached decisions, and append-only revision history without guessing across semantic boundaries.',
+    tables: ['day_project_entity_slices', 'daily_time_allocations', 'slice_identities', 'classification_revisions'],
+    rebuildRules: [
+      'Run as a forward-only runner transaction with foreign keys enabled.',
+      'Rebuild slice and allocation uniqueness around (date, project_id, entity, entity_type, kind).',
+      'Populate each legacy allocation only from exactly one matching current slice; fail and roll back missing or ambiguous mappings.',
+      'Preserve slice and allocation IDs, source references, child identities, foreign keys, detached state, user decisions, and revision history.',
+      'Match allocation validation triggers on the complete semantic key so coarse and entity decisions cannot steal each other.'
     ]
   }
 ];
