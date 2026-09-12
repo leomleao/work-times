@@ -25,12 +25,7 @@ import {
   getRecentIntentDates
 } from '$lib/server/sync/calendar';
 
-export interface SyncRunsRouteDeps {
-  runtime?: AdminSyncRuntimeSurface;
-  sync?: SyncService;
-}
-
-export function _createGetHandler(deps?: SyncRunsRouteDeps): RequestHandler {
+export function _createGetHandler(runtimeSurface: AdminSyncRuntimeSurface): RequestHandler {
   return async ({ locals, url }) => {
     if (!locals.admin) {
       return json({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, { status: 401 });
@@ -39,18 +34,20 @@ export function _createGetHandler(deps?: SyncRunsRouteDeps): RequestHandler {
     const limitParam = url.searchParams.get('limit');
     const limit = limitParam ? Math.min(50, Math.max(1, Number(limitParam) || 50)) : 50;
 
-    const rt = deps?.runtime ?? (deps?.sync ? { ...(runtime as unknown as AdminSyncRuntimeSurface), sync: deps.sync } : undefined);
-    const adminSync = getAdminSyncService(rt);
-    const collection: AdminSyncRunsCollectionDto = adminSync.getRunsCollection({ limit });
-
-    return json(collection);
+    const rt = runtimeSurface;
+    try {
+      const adminSync = getAdminSyncService(rt);
+      const collection: AdminSyncRunsCollectionDto = adminSync.getRunsCollection({ limit });
+      return json(collection);
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
   };
 }
 
-export const GET = _createGetHandler();
-
-export function _createPostHandler(deps?: SyncRunsRouteDeps): RequestHandler {
+export function _createPostHandler(runtimeSurface: AdminSyncRuntimeSurface): RequestHandler {
   return async ({ locals, request }) => {
+    const rt = runtimeSurface;
     let body: Record<string, unknown>;
     try {
       body = await request.json();
@@ -66,8 +63,8 @@ export function _createPostHandler(deps?: SyncRunsRouteDeps): RequestHandler {
       validateAdminMutationAuth({
         locals,
         request,
-        publicUrl: runtime.config.publicUrl,
-        sessionSecret: runtime.sessionSecret,
+        publicUrl: rt.config.publicUrl,
+        sessionSecret: rt.sessionSecret,
         submittedCsrf
       });
     } catch (err) {
@@ -122,10 +119,14 @@ export function _createPostHandler(deps?: SyncRunsRouteDeps): RequestHandler {
 
     // Capture "now" once per request
     const now = new Date();
-    const rt = deps?.runtime ?? (deps?.sync ? { ...(runtime as unknown as AdminSyncRuntimeSurface), sync: deps.sync } : undefined);
-    const db = rt?.db ?? runtime.db;
+    const db = rt.db;
 
-    const sourceTimezone = getVerifiedSourceTimezone(db);
+    let sourceTimezone: string | null = null;
+    try {
+      sourceTimezone = getVerifiedSourceTimezone(db);
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
     if (!sourceTimezone) {
       return json(
         { error: 'Verified source timezone unavailable', code: 'TIMEZONE_UNAVAILABLE' },
@@ -144,7 +145,7 @@ export function _createPostHandler(deps?: SyncRunsRouteDeps): RequestHandler {
         typeof body.rangeEndDate !== 'string'
       ) {
         return json(
-          { error: `Mode '${mode}' requires both rangeStartDate and rangeEndDate`, code: 'MISSING_DATE_RANGE' },
+          { error: 'Both rangeStartDate and rangeEndDate are required', code: 'MISSING_DATE_RANGE' },
           { status: 400 }
         );
       }
@@ -175,7 +176,7 @@ export function _createPostHandler(deps?: SyncRunsRouteDeps): RequestHandler {
       const diffDays = differenceInDays(rangeStartDate, rangeEndDate) + 1;
       if (diffDays > MAX_BACKFILL_RANGE_DAYS) {
         return json(
-          { error: `Requested range of ${diffDays} days exceeds maximum limit of ${MAX_BACKFILL_RANGE_DAYS} days`, code: 'RANGE_EXCEEDED' },
+          { error: 'Requested range exceeds maximum limit of 366 days', code: 'RANGE_EXCEEDED' },
           { status: 400 }
         );
       }
@@ -231,4 +232,5 @@ export function _createPostHandler(deps?: SyncRunsRouteDeps): RequestHandler {
   };
 }
 
-export const POST = _createPostHandler();
+export const GET = _createGetHandler(runtime);
+export const POST = _createPostHandler(runtime);

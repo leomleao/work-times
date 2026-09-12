@@ -29,7 +29,17 @@ import {
 } from '../sync/contracts.js';
 import { isValidDateString, getZonedDateString, getRecentIntentDates } from '../sync/calendar.js';
 import type { SqliteSyncRepository } from '../db/repositories/sync.js';
-import { runtime } from '../runtime.js';
+import { runtime, type ServerRuntime, type RuntimeReadiness } from '../runtime.js';
+import type { SyncScheduler, SchedulerScheduleState } from '../sync/scheduler.js';
+
+export class AdminSyncReadError extends Error {
+  readonly code = 'SYNC_STATE_UNAVAILABLE';
+  readonly status = 503;
+  constructor(message = 'Sync state unavailable') {
+    super(message);
+    this.name = 'AdminSyncReadError';
+  }
+}
 
 /** Hard cap on sync run rows materialized for the sync page. */
 export const MAX_SYNC_RUN_ROWS = 50;
@@ -101,7 +111,7 @@ export interface DateQualityProjection {
   degradedLayers: string[];
 }
 
-export interface AdminSyncReadinessDto {
+export interface AdminSyncReadinessDto extends RuntimeReadiness {
   oauthAppConfigured: boolean;
   oauthConnected: boolean;
   hasActiveGrant: boolean;
@@ -110,17 +120,9 @@ export interface AdminSyncReadinessDto {
   discoveryReady: boolean;
   degradedCapabilities: string[];
   lastProbedAt: string | null;
-  sourceTimezone: string | null;
 }
 
-export interface AdminSyncScheduleDto {
-  enabled: boolean;
-  lastTickAt: string | null;
-  nextTickAt: string | null;
-  lastEnqueuedRunId: number | null;
-  failureBackoffUntil: string | null;
-  activeRunId: number | null;
-}
+export type AdminSyncScheduleDto = SchedulerScheduleState;
 
 export interface AdminSyncDegradationDto {
   summariesDegraded: boolean;
@@ -374,14 +376,16 @@ export function getVerifiedSourceTimezone(db: Database.Database): string | null 
       .prepare(`SELECT timezone FROM daily_totals WHERE timezone IS NOT NULL AND timezone != '' ORDER BY date DESC LIMIT 1`)
       .get() as { timezone: string } | undefined;
     if (dailyRow?.timezone) return dailyRow.timezone;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
   return null;
 }
 
 /**
  * Returns today's ISO string (YYYY-MM-DD) in the specified timezone.
  */
-function getTodayInTimezone(now: Date = new Date(), timezone = 'UTC'): string {
+function getTodayInTimezone(now: Date, timezone: string): string {
   return getZonedDateString(timezone, now);
 }
 
@@ -394,7 +398,33 @@ export function getDateQualityProjection(
   now: Date = new Date(),
   timezone?: string | null
 ): DateQualityProjection {
-  const tz = timezone ?? getVerifiedSourceTimezone(db);
+  let tz: string | null = null;
+  try {
+    tz = timezone ?? getVerifiedSourceTimezone(db);
+  } catch {
+    return {
+      date,
+      qualityStatus: 'missing',
+      isStale: true,
+      isProvisional: false,
+      disposition: 'DATA_UNAVAILABLE',
+      lastSyncedAt: null,
+      degradedLayers: []
+    };
+  }
+
+  if (!tz) {
+    return {
+      date,
+      qualityStatus: 'missing',
+      isStale: true,
+      isProvisional: false,
+      disposition: 'TIMEZONE_UNAVAILABLE',
+      lastSyncedAt: null,
+      degradedLayers: []
+    };
+  }
+
   if (!isValidDateString(date)) {
     return {
       date,
@@ -406,8 +436,8 @@ export function getDateQualityProjection(
     };
   }
 
-  const todayStr = tz ? getTodayInTimezone(now, tz) : null;
-  const isProvisional = todayStr ? date === todayStr : false;
+  const todayStr = getTodayInTimezone(now, tz);
+  const isProvisional = date === todayStr;
 
   type DayRowRecord = {
     id: number;
@@ -482,7 +512,17 @@ export function getDateQualityProjection(
         | undefined;
       runMode = r?.mode ?? null;
     }
-  } catch {}
+  } catch (err) {
+    return {
+      date,
+      qualityStatus: 'missing',
+      isStale: true,
+      isProvisional: false,
+      disposition: 'DATA_UNAVAILABLE',
+      lastSyncedAt: null,
+      degradedLayers: []
+    };
+  }
 
   const degradedLayers: string[] = [];
   if (dayRow?.summaries_status === 'restricted') degradedLayers.push('summaries');
@@ -525,8 +565,8 @@ export function getDateQualityProjection(
       hasRestriction: Boolean(l.has_restriction),
       hasFailure: Boolean(l.has_failure)
     };
-    const evaluation = evaluateDateFreshness(date, freshnessRecord, now, tz ?? 'UTC');
-    if (evaluation.isStale || !tz) {
+    const evaluation = evaluateDateFreshness(date, freshnessRecord, now, tz);
+    if (evaluation.isStale) {
       isStale = true;
     }
   }
@@ -534,7 +574,7 @@ export function getDateQualityProjection(
   if (!dayRow && layerRows.length === 0 && !dailyTotalsRow) {
     isStale = true;
   }
-  if (!dailyTotalsRow && (dayRow || layerRows.length > 0)) {
+  if (!dailyTotalsRow) {
     isStale = true;
   }
 
@@ -543,6 +583,7 @@ export function getDateQualityProjection(
     summaryLayer.accepted_source_reference &&
     summaryLayer.accepted_content_hash &&
     summaryLayer.accepted_fidelity &&
+    summaryLayer.verified_timezone &&
     typeof summaryLayer.accepted_snapshot_version === 'number' &&
     summaryLayer.accepted_snapshot_version > 0 &&
     !summaryLayer.has_failure &&
@@ -658,7 +699,8 @@ export function getSyncAdminData(
   db: Database.Database,
   options?: AdminSyncDataOptions
 ): SyncAdminData {
-  const config = options?.config ?? (options?.runtime ? options.runtime.config : runtime.config);
+  const rt = options?.runtime ?? (runtime);
+  const config = options?.config ?? rt.config;
   const limit = options?.limit ?? MAX_SYNC_RUN_ROWS;
   const now = options?.now ?? new Date();
   const sourceTimezone = options?.timezone ?? getVerifiedSourceTimezone(db);
@@ -681,24 +723,25 @@ export function getSyncAdminData(
         'SELECT access_token_sealed, generation, bound_archive_identity, rebound_at FROM wakatime_oauth_connection WHERE id = 1'
       )
       .get() as ConnectionRow | undefined;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   const oauthConnected = Boolean(connectionRow);
   const hasActiveGrant = Boolean(connectionRow?.access_token_sealed);
 
   let appCapRow: { value: string } | undefined = undefined;
+  let schedulingSettingRow: { value: string } | undefined = undefined;
   try {
     appCapRow = db
       .prepare("SELECT value FROM app_settings WHERE key = 'capability_policy_state'")
       .get() as { value: string } | undefined;
-  } catch {}
-
-  let schedulingSettingRow: { value: string } | undefined = undefined;
-  try {
     schedulingSettingRow = db
       .prepare("SELECT value FROM app_settings WHERE key = 'sync.scheduling_enabled'")
       .get() as { value: string } | undefined;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   const schedulingEnabled = schedulingSettingRow?.value === 'true';
 
@@ -733,7 +776,9 @@ export function getSyncAdminData(
          ORDER BY id DESC LIMIT ?`
       )
       .all(limit) as typeof rawRuns;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   let capabilityState: CapabilityPolicyState | null = parseCapabilityPolicyState(appCapRow?.value);
   if (!capabilityState) {
@@ -762,7 +807,9 @@ export function getSyncAdminData(
         c: number;
       }
     ).c;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   // Never infer auth failure from error text!
   let has401Blocked = false;
@@ -772,13 +819,34 @@ export function getSyncAdminData(
       latestRun?.advisory_codes?.includes('OAUTH_REVOKED') ||
       db.prepare(`SELECT 1 FROM sync_layer_state WHERE status_code IN ('AUTH_REVOKED', 'HTTP_401') LIMIT 1`).get()
     );
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   const reconnectRequired = has401Blocked;
   const isBlocked = has401Blocked;
   const discoveryReady = oauthAppConfigured && oauthConnected && !reconnectRequired;
 
+  if (!rt?.scheduler?.getScheduleState || !rt?.getReadiness) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
+
+  let schedule: AdminSyncScheduleDto;
+  try {
+    schedule = rt.scheduler.getScheduleState();
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
+
+  let readinessData: RuntimeReadiness;
+  try {
+    readinessData = rt.getReadiness();
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
+
   const readiness: AdminSyncReadinessDto = {
+    ...readinessData,
     oauthAppConfigured,
     oauthConnected,
     hasActiveGrant,
@@ -786,46 +854,8 @@ export function getSyncAdminData(
     reconnectRequired,
     discoveryReady,
     degradedCapabilities,
-    lastProbedAt: capabilityState?.updatedAt ?? latestRun?.started_at ?? null,
-    sourceTimezone
+    lastProbedAt: capabilityState?.updatedAt ?? latestRun?.started_at ?? null
   };
-
-  const schedulerSurface = options?.runtime?.scheduler ?? (runtime as any).scheduler;
-  let schedule: AdminSyncScheduleDto = {
-    enabled: schedulingEnabled,
-    lastTickAt: null,
-    nextTickAt: null,
-    lastEnqueuedRunId: null,
-    failureBackoffUntil: null,
-    activeRunId: null
-  };
-
-  if (schedulerSurface) {
-    if (typeof schedulerSurface.getScheduleState === 'function') {
-      try {
-        const state = schedulerSurface.getScheduleState();
-        if (state) {
-          schedule = {
-            enabled: state.enabled ?? schedulingEnabled,
-            lastTickAt: state.lastTickAt ?? null,
-            nextTickAt: state.nextTickAt ?? null,
-            lastEnqueuedRunId: state.lastEnqueuedRunId ?? null,
-            failureBackoffUntil: state.failureBackoffUntil ?? null,
-            activeRunId: state.activeRunId ?? null
-          };
-        }
-      } catch {}
-    } else {
-      schedule = {
-        enabled: schedulingEnabled,
-        lastTickAt: typeof schedulerSurface.getLastTickAt === 'function' ? schedulerSurface.getLastTickAt() : null,
-        nextTickAt: typeof schedulerSurface.getNextTickAt === 'function' ? schedulerSurface.getNextTickAt() : null,
-        lastEnqueuedRunId: latestRun?.id ?? null,
-        failureBackoffUntil: typeof schedulerSurface.failureBackoffUntil === 'function' ? schedulerSurface.failureBackoffUntil() : null,
-        activeRunId: activeRunRow?.id ?? null
-      };
-    }
-  }
 
   let rateLimitedUntil: string | null = null;
   try {
@@ -835,7 +865,9 @@ export function getSyncAdminData(
       )
       .get(now.toISOString()) as { retry_at: string | null } | undefined;
     rateLimitedUntil = retryWaitRow?.retry_at ?? null;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   const degradation: AdminSyncDegradationDto = {
     summariesDegraded: capabilityState?.capabilities?.summaries?.status === 'restricted',
@@ -883,7 +915,9 @@ export function getSyncAdminData(
         )
         .get(activeRunRow.id) as { last_p: string | null } | undefined;
       lastProgressAt = progressRow?.last_p ?? activeRunRow.started_at;
-    } catch {}
+    } catch (err) {
+      throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+    }
   }
 
   const activeProgress: AdminSyncActiveProgressDto = {
@@ -913,7 +947,9 @@ export function getSyncAdminData(
         .prepare(`SELECT 1 FROM sync_runs WHERE mode = 'registry' AND status IN ('queued', 'running') LIMIT 1`)
         .get()
     );
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   const registry: AdminSyncRegistryDto = {
     lastRefreshedAt: regRefreshRow?.last_refreshed ?? null,
@@ -947,7 +983,9 @@ export function getSyncAdminData(
          ORDER BY date DESC, id DESC LIMIT ?`
       )
       .all(MAX_SYNC_DAY_ROWS) as typeof rawDays;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   const dates: AdminSyncDateDetailDto[] = rawDays.map((d) => {
     const quality = getDateQualityProjection(db, d.date, now, sourceTimezone);
@@ -982,8 +1020,8 @@ export function getSyncAdminData(
     daysFailed: clampCount(r.days_failed),
     degradedCapabilities: boundedCsvList(r.degraded_capabilities, MAX_SYNC_RUN_CODES),
     advisoryCodes: boundedCsvList(r.advisory_codes, MAX_SYNC_RUN_CODES),
-    summary: truncateNullableText(r.summary, MAX_DIAGNOSTIC_LENGTH),
-    errorMessage: truncateNullableText(r.error_message, MAX_DIAGNOSTIC_LENGTH)
+    summary: null,
+    errorMessage: sanitizeErrorMessage(r.error_message)
   }));
 
   const syncDays: SyncDayItem[] = rawDays.map((d) => {
@@ -999,7 +1037,7 @@ export function getSyncAdminData(
       totalSeconds,
       formattedDuration: formatDuration(totalSeconds),
       heartbeatCount: clampCount(d.heartbeat_count),
-      errorMessage: truncateNullableText(d.error_message),
+      errorMessage: sanitizeErrorMessage(d.error_message),
       syncedAt: d.synced_at
     };
   });
@@ -1012,7 +1050,9 @@ export function getSyncAdminData(
       )
       .get() as { last_success: string | null } | undefined;
     lastAcceptedSuccessAt = lastSuccessRow?.last_success ?? null;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   const isEmpty = runs.length === 0 && dates.length === 0;
 
@@ -1056,7 +1096,9 @@ export function getSyncRunsCollection(
   try {
     const countRow = db.prepare(`SELECT COUNT(*) as c FROM sync_runs`).get() as { c: number };
     totalCount = countRow?.c ?? totalCount;
-  } catch {}
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
 
   return {
     runs: adminData.runs,
@@ -1080,70 +1122,43 @@ export function getSyncRunDetail(
   const offset = (page - 1) * pageSize;
   const tz = options?.timezone ?? getVerifiedSourceTimezone(db);
 
-  const runRow = db
-    .prepare(
-      `SELECT id, started_at, finished_at, trigger, mode, status,
-              range_start_date, range_end_date, day_count, days_synced, days_failed,
-              degraded_capabilities, advisory_codes, summary, error_message,
-              policy_state_json, resumed_from_run_id
-       FROM sync_runs
-       WHERE id = ?`
-    )
-    .get(runId) as
-    | {
-        id: number;
-        started_at: string;
-        finished_at: string | null;
-        trigger: string;
-        mode: string;
-        status: string;
-        range_start_date: string | null;
-        range_end_date: string | null;
-        day_count: number;
-        days_synced: number;
-        days_failed: number;
-        degraded_capabilities: string | null;
-        advisory_codes: string | null;
-        summary: string | null;
-        error_message: string | null;
-        policy_state_json: string | null;
-        resumed_from_run_id: number | null;
-      }
-    | undefined;
+  let runRow: any;
+  let totalDays = 0;
+  let dayRows: any[] = [];
+  try {
+    runRow = db
+      .prepare(
+        `SELECT id, started_at, finished_at, trigger, mode, status,
+                range_start_date, range_end_date, day_count, days_synced, days_failed,
+                degraded_capabilities, advisory_codes, summary, error_message,
+                policy_state_json, resumed_from_run_id
+         FROM sync_runs
+         WHERE id = ?`
+      )
+      .get(runId);
 
-  if (!runRow) return null;
+    if (!runRow) return null;
 
-  const totalDaysRow = db
-    .prepare(`SELECT COUNT(*) as c FROM sync_days WHERE sync_run_id = ?`)
-    .get(runId) as { c: number };
-  const totalDays = totalDaysRow.c;
+    const totalDaysRow = db
+      .prepare(`SELECT COUNT(*) as c FROM sync_days WHERE sync_run_id = ?`)
+      .get(runId) as { c: number } | undefined;
+    totalDays = totalDaysRow?.c ?? 0;
+
+    dayRows = db
+      .prepare(
+        `SELECT id, sync_run_id, date, status, disposition, summaries_status, durations_status, heartbeats_status,
+                total_seconds, heartbeat_count, advisory_codes_json, error_message, synced_at
+         FROM sync_days
+         WHERE sync_run_id = ?
+         ORDER BY date ASC
+         LIMIT ? OFFSET ?`
+      )
+      .all(runId, pageSize, offset) as any[];
+  } catch (err) {
+    throw new AdminSyncReadError('SYNC_STATE_UNAVAILABLE');
+  }
+
   const totalPages = totalDays === 0 ? 1 : Math.ceil(totalDays / pageSize);
-
-  const dayRows = db
-    .prepare(
-      `SELECT id, sync_run_id, date, status, disposition, summaries_status, durations_status, heartbeats_status,
-              total_seconds, heartbeat_count, advisory_codes_json, error_message, synced_at
-       FROM sync_days
-       WHERE sync_run_id = ?
-       ORDER BY date ASC
-       LIMIT ? OFFSET ?`
-    )
-    .all(runId, pageSize, offset) as Array<{
-      id: number;
-      sync_run_id: number | null;
-      date: string;
-      status: string;
-      disposition: string | null;
-      summaries_status: string | null;
-      durations_status: string | null;
-      heartbeats_status: string | null;
-      total_seconds: number;
-      heartbeat_count: number;
-      advisory_codes_json: string | null;
-      error_message: string | null;
-      synced_at: string;
-    }>;
-
   const now = options?.now ?? new Date();
   const days: AdminSyncDateDetailDto[] = dayRows.map((d) => {
     const quality = getDateQualityProjection(db, d.date, now, tz);
@@ -1198,40 +1213,23 @@ export function getSyncRunDetail(
 /**
  * Backward compatibility loader function matching existing signature.
  */
-export function getSyncData(db: Database.Database, config: RuntimeConfig): SyncViewData {
-  return getSyncAdminData(db, { config });
+export function getSyncData(
+  db: Database.Database,
+  config: RuntimeConfig,
+  rt: AdminSyncRuntimeSurface = runtime
+): SyncViewData {
+  const adminData = getSyncAdminData(db, { config, runtime: rt });
+  return adminData;
 }
 
 // ============================================================================
-// Local Runtime Surface and AdminSyncService
+// Runtime Surface and AdminSyncService
 // ============================================================================
 
-export interface AdminSyncRuntimeSurface {
-  readonly db: Database.Database;
-  readonly config: RuntimeConfig;
-  readonly sync?: SyncService;
-  readonly syncRepository?: SqliteSyncRepository;
-  readonly scheduler?: {
-    getScheduleState?: () => {
-      enabled?: boolean;
-      lastTickAt?: string | null;
-      nextTickAt?: string | null;
-      lastEnqueuedRunId?: number | null;
-      failureBackoffUntil?: string | null;
-      activeRunId?: number | null;
-    };
-    getNextTickAt?: () => string | null;
-    getLastTickAt?: () => string | null;
-    isPaused?: () => boolean;
-    failureBackoffUntil?: () => string | null;
-    [key: string]: unknown;
-  };
-  readonly lifecycle?: {
-    getReadiness?: () => Promise<AdminSyncReadinessDto> | AdminSyncReadinessDto;
-    [key: string]: unknown;
-  };
-  readonly getReadiness?: () => Promise<AdminSyncReadinessDto> | AdminSyncReadinessDto;
-}
+export type AdminSyncRuntimeSurface = Pick<
+  ServerRuntime,
+  'db' | 'config' | 'sessionSecret' | 'scheduler' | 'lifecycle' | 'getReadiness'
+> & { readonly sync: SyncService };
 
 export class AdminSyncService {
   constructor(private readonly runtimeSurface: AdminSyncRuntimeSurface) {}
@@ -1244,12 +1242,16 @@ export class AdminSyncService {
     return this.runtimeSurface.config;
   }
 
+  get sessionSecret(): string {
+    return this.runtimeSurface.sessionSecret;
+  }
+
   get sync(): SyncService {
-    const s = this.runtimeSurface.sync ?? (runtime as any).sync;
-    if (!s) {
-      throw new Error('SyncService is not configured on runtime');
-    }
-    return s;
+    return this.runtimeSurface.sync;
+  }
+
+  get scheduler(): SyncScheduler {
+    return this.runtimeSurface.scheduler;
   }
 
   getAdminData(options?: { limit?: number; now?: Date; timezone?: string }): SyncAdminData {
@@ -1274,26 +1276,19 @@ export class AdminSyncService {
   }
 
   async enqueue(request: RunRequest): Promise<{ runId: number; reused: boolean }> {
-    return this.sync.enqueue(request);
+    return this.runtimeSurface.sync.enqueue(request);
   }
 
   async cancel(runId: number): Promise<RunStatus> {
-    return this.sync.cancel(runId);
+    return this.runtimeSurface.sync.cancel(runId);
   }
 
   async getReadiness(): Promise<AdminSyncReadinessDto> {
-    const lifecycleSurface = this.runtimeSurface.lifecycle ?? (runtime as any).lifecycle;
-    if (lifecycleSurface && typeof lifecycleSurface.getReadiness === 'function') {
-      return lifecycleSurface.getReadiness();
-    }
-    if (this.runtimeSurface.getReadiness) {
-      return this.runtimeSurface.getReadiness();
-    }
     const adminData = this.getAdminData();
     return adminData.readiness;
   }
 }
 
-export function getAdminSyncService(customRuntime?: AdminSyncRuntimeSurface): AdminSyncService {
-  return new AdminSyncService(customRuntime ?? (runtime as unknown as AdminSyncRuntimeSurface));
+export function getAdminSyncService(customRuntime: AdminSyncRuntimeSurface): AdminSyncService {
+  return new AdminSyncService(customRuntime);
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { GET } from './+server.js';
+import { GET, _createGetHandler as createDetailGetHandler } from './+server.js';
 import { POST as cancelPOST, _createPostHandler as createCancelHandler } from './cancel/+server.js';
 import { POST as retryPOST, _createPostHandler as createRetryHandler } from './retry/+server.js';
 import { runtime } from '$lib/server/runtime';
@@ -71,6 +71,25 @@ describe('/api/admin/sync-runs/[id] routes', () => {
       expect(data.days).toHaveLength(1);
       expect(data.days[0].date).toBe('2026-02-28');
     });
+
+    it('returns 503 on GET when query fails', async () => {
+      const brokenDb = {
+        prepare: () => {
+          throw new Error('Database error');
+        }
+      } as any;
+      const customGet = createDetailGetHandler({ ...runtime, db: brokenDb });
+
+      const res = await customGet({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        params: { id: '1' } as any,
+        url: new URL('http://localhost:3000/api/admin/sync-runs/1')
+      } as any);
+
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe('SYNC_STATE_UNAVAILABLE');
+    });
   });
 
   describe('POST /api/admin/sync-runs/[id]/cancel', () => {
@@ -115,12 +134,15 @@ describe('/api/admin/sync-runs/[id] routes', () => {
         enqueue: async () => ({ runId: 1, reused: false }),
         cancel: async (id: number) => {
           cancelledId = id;
+          runtime.db
+            .prepare(`UPDATE sync_runs SET status = 'cancelled', cancel_requested_at = '2026-03-01T10:05:00.000Z' WHERE id = ?`)
+            .run(id);
           return 'cancelled' as RunStatus;
         },
         start: async () => {},
         stop: async () => {}
       };
-      const customCancel = createCancelHandler({ sync: mockService });
+      const customCancel = createCancelHandler({ ...runtime, sync: mockService });
 
       const req = new Request(`http://localhost:3000/api/admin/sync-runs/${runId}/cancel`, {
         method: 'POST',
@@ -137,7 +159,38 @@ describe('/api/admin/sync-runs/[id] routes', () => {
       const data = await res.json();
       expect(data.runId).toBe(runId);
       expect(data.status).toBe('cancelled');
+      expect(data.cancelledAt).toBe('2026-03-01T10:05:00.000Z');
       expect(cancelledId).toBe(runId);
+    });
+
+    it('returns 503 when cancel lacks persisted cancellation timestamp', async () => {
+      const info = runtime.db
+        .prepare(`INSERT INTO sync_runs (started_at, status, trigger, mode) VALUES ('2026-03-01T10:00:00.000Z', 'running', 'manual', 'recent')`)
+        .run();
+      const runId = Number(info.lastInsertRowid);
+
+      const mockService: SyncService = {
+        enqueue: async () => ({ runId: 1, reused: false }),
+        cancel: async () => 'cancelled' as RunStatus, // does not persist timestamp
+        start: async () => {},
+        stop: async () => {}
+      };
+      const customCancel = createCancelHandler({ ...runtime, sync: mockService });
+
+      const req = new Request(`http://localhost:3000/api/admin/sync-runs/${runId}/cancel`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf }
+      });
+
+      const res = await customCancel({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        params: { id: String(runId) } as any,
+        request: req
+      } as any);
+
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe('SYNC_STATE_UNAVAILABLE');
     });
 
     it('returns 404 when cancelling nonexistent run', async () => {
@@ -207,7 +260,34 @@ describe('/api/admin/sync-runs/[id] routes', () => {
       } as any);
 
       expect(res.status).toBe(400);
-      expect((await res.json()).error).toContain('not part of parent sync run');
+      const data = await res.json();
+      expect(data.code).toBe('TARGET_DATE_NOT_IN_RUN');
+    });
+
+    it('rejects caller-supplied idempotencyKey with 400 INVALID_REQUEST', async () => {
+      const info = runtime.db
+        .prepare(`INSERT INTO sync_runs (started_at, status, trigger, mode) VALUES ('2026-03-01T10:00:00.000Z', 'failed', 'manual', 'recent')`)
+        .run();
+      const runId = Number(info.lastInsertRowid);
+      runtime.db
+        .prepare(`INSERT INTO sync_days (sync_run_id, date, status, total_seconds, synced_at) VALUES (?, '2026-02-28', 'failed', 0, '2026-03-01T10:00:00.000Z')`)
+        .run(runId);
+
+      const req = new Request(`http://localhost:3000/api/admin/sync-runs/${runId}/retry`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf },
+        body: JSON.stringify({ targetDate: '2026-02-28', idempotencyKey: 'caller-key-1' })
+      });
+
+      const res = await retryPOST({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        params: { id: String(runId) } as any,
+        request: req
+      } as any);
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.code).toBe('INVALID_REQUEST');
     });
 
     it('rejects retrying restricted date without post-reconnect authorization', async () => {
@@ -260,7 +340,7 @@ describe('/api/admin/sync-runs/[id] routes', () => {
         start: async () => {},
         stop: async () => {}
       };
-      const customRetry = createRetryHandler({ sync: mockService });
+      const customRetry = createRetryHandler({ ...runtime, sync: mockService });
 
       const req = new Request(`http://localhost:3000/api/admin/sync-runs/${runId}/retry`, {
         method: 'POST',
@@ -281,6 +361,41 @@ describe('/api/admin/sync-runs/[id] routes', () => {
       expect(enqueuedReq!.resumedFromRunId).toBe(runId);
       expect(enqueuedReq!.mode).toBe('retry');
       expect(enqueuedReq!.idempotencyKey).toBe(`retry-${runId}-gen0-2026-02-28`);
+    });
+
+    it('handles duplicate concurrent retry and returns 200 with existing run', async () => {
+      const info = runtime.db
+        .prepare(`INSERT INTO sync_runs (started_at, status, trigger, mode) VALUES ('2026-03-01T10:00:00.000Z', 'failed', 'manual', 'recent')`)
+        .run();
+      const runId = Number(info.lastInsertRowid);
+
+      runtime.db
+        .prepare(`INSERT INTO sync_days (sync_run_id, date, status, total_seconds, synced_at) VALUES (?, '2026-02-28', 'failed', 0, '2026-03-01T10:00:00.000Z')`)
+        .run(runId);
+
+      const mockService: SyncService = {
+        enqueue: async () => ({ runId: 55, reused: true }),
+        cancel: async () => 'cancelled' as RunStatus,
+        start: async () => {},
+        stop: async () => {}
+      };
+      const customRetry = createRetryHandler({ ...runtime, sync: mockService });
+
+      const req = new Request(`http://localhost:3000/api/admin/sync-runs/${runId}/retry`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf },
+        body: JSON.stringify({ targetDate: '2026-02-28' })
+      });
+
+      const res = await customRetry({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        params: { id: String(runId) } as any,
+        request: req
+      } as any);
+
+      expect(res.status).toBe(202);
+      const data = await res.json();
+      expect(data.newRunId).toBe(55);
     });
 
     it('enforces single retry for restricted date per reconnect generation', async () => {
@@ -311,7 +426,7 @@ describe('/api/admin/sync-runs/[id] routes', () => {
         start: async () => {},
         stop: async () => {}
       };
-      const customRetry = createRetryHandler({ sync: mockService });
+      const customRetry = createRetryHandler({ ...runtime, sync: mockService });
 
       const req1 = new Request(`http://localhost:3000/api/admin/sync-runs/${parentRunId}/retry`, {
         method: 'POST',
@@ -352,6 +467,31 @@ describe('/api/admin/sync-runs/[id] routes', () => {
       expect(res2.status).toBe(409);
       const data2 = await res2.json();
       expect(data2.code).toBe('ALREADY_RETRIED');
+    });
+
+    it('returns 503 when connection query fails in retry', async () => {
+      const brokenDb = {
+        prepare: () => {
+          throw new Error('Database connection error');
+        }
+      } as any;
+      const customRetry = createRetryHandler({ ...runtime, db: brokenDb });
+
+      const req = new Request(`http://localhost:3000/api/admin/sync-runs/1/retry`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf },
+        body: JSON.stringify({ targetDate: '2026-02-28' })
+      });
+
+      const res = await customRetry({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        params: { id: '1' } as any,
+        request: req
+      } as any);
+
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe('SYNC_STATE_UNAVAILABLE');
     });
   });
 });

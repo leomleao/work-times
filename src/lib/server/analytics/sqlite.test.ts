@@ -452,7 +452,27 @@ describe('SqliteWorkOnlyAnalytics - Sentinel Privacy Tests', () => {
     });
 
     expect(summary.dataQuality.asOf).toBeNull();
+    expect(summary.dataQuality.hasMissingDays).toBe(true);
+    expect(summary.dataQuality.hasStaleDays).toBe(true);
     expect(summary.dataQuality.advisoryCodes).toContain('TIMEZONE_UNAVAILABLE');
+  });
+
+  it('marks date stale and incomplete when daily_totals row is absent', async () => {
+    db.prepare(`
+      INSERT OR REPLACE INTO account_settings (wakatime_user_id, timezone, weekday_start, keystroke_timeout_seconds, writes_only, plan, has_premium_features, updated_at)
+      VALUES ('user_1', 'UTC', 1, 120, 0, 'free', 0, '2026-03-01T00:00:00.000Z')
+    `).run();
+    // Delete any daily_totals for the test range
+    db.prepare(`DELETE FROM daily_totals WHERE date = '2026-04-01'`).run();
+
+    const summary = await analytics.getRangeSummary({
+      start: '2026-04-01',
+      end: '2026-04-01'
+    });
+
+    expect(summary.dataQuality.hasMissingDays).toBe(true);
+    expect(summary.dataQuality.hasStaleDays).toBe(true);
+    expect(summary.dataQuality.advisoryCodes).toContain('STALE_MISSING_COVERAGE');
   });
 
   it('enforces verified_zero requires explicit verified_zero evidence', async () => {
@@ -483,6 +503,37 @@ describe('SqliteWorkOnlyAnalytics - Sentinel Privacy Tests', () => {
     const summary = await analytics.getRangeSummary({
       start: '2026-03-10',
       end: '2026-03-10'
+    });
+
+    expect(summary.dataQuality.asOf).toBeNull();
+    expect(summary.dataQuality.advisoryCodes).toContain('UNVERIFIED_ZERO');
+  });
+
+  it('rejects verified_zero if summaryLayer.verified_timezone is missing', async () => {
+    db.prepare(`
+      INSERT OR REPLACE INTO account_settings (wakatime_user_id, timezone, weekday_start, keystroke_timeout_seconds, writes_only, plan, has_premium_features, updated_at)
+      VALUES ('user_1', 'UTC', 1, 120, 0, 'free', 0, '2026-03-01T00:00:00.000Z')
+    `).run();
+
+    db.prepare(`
+      INSERT OR REPLACE INTO daily_totals (date, total_seconds, timezone, grand_total_json, source_import_id, source_hash)
+      VALUES ('2026-03-11', 0, 'UTC', '{}', 1, 'h_zero_2')
+    `).run();
+
+    db.prepare(`
+      INSERT OR REPLACE INTO sync_layer_state (
+        date, layer, last_attempt_at, last_success_at, accepted_fidelity,
+        accepted_source_reference, accepted_content_hash, accepted_snapshot_version,
+        verified_timezone, updated_at
+      ) VALUES (
+        '2026-03-11', 'summaries', '2026-03-11T10:00:00.000Z', '2026-03-11T10:00:00.000Z',
+        'verified_zero', 'ref', 'hash', 1, NULL, '2026-03-11T10:00:00.000Z'
+      )
+    `).run();
+
+    const summary = await analytics.getRangeSummary({
+      start: '2026-03-11',
+      end: '2026-03-11'
     });
 
     expect(summary.dataQuality.asOf).toBeNull();

@@ -155,16 +155,20 @@ describe('/api/admin/sync-runs route', () => {
 
     it('fails with 422 when verified source timezone is unavailable', async () => {
       const emptyDb = new Database(':memory:');
+      emptyDb.exec(`
+        CREATE TABLE sync_layer_state (id INTEGER PRIMARY KEY, layer TEXT, verified_timezone TEXT, updated_at TEXT);
+        CREATE TABLE account_settings (timezone TEXT);
+        CREATE TABLE daily_totals (date TEXT PRIMARY KEY, timezone TEXT);
+      `);
       const customPost = createPostHandler({
-        runtime: {
-          db: emptyDb,
-          sync: {
-            enqueue: async () => ({ runId: 1, reused: false }),
-            cancel: async () => 'cancelled' as RunStatus,
-            start: async () => {},
-            stop: async () => {}
-          }
-        } as any
+        ...runtime,
+        db: emptyDb,
+        sync: {
+          enqueue: async () => ({ runId: 1, reused: false }),
+          cancel: async () => 'cancelled' as RunStatus,
+          start: async () => {},
+          stop: async () => {}
+        }
       });
 
       const req = new Request('http://localhost:3000/api/admin/sync-runs', {
@@ -182,6 +186,36 @@ describe('/api/admin/sync-runs route', () => {
       expect(res.status).toBe(422);
       const data = await res.json();
       expect(data.code).toBe('TIMEZONE_UNAVAILABLE');
+    });
+
+    it('fails with 503 when prerequisite query fails on POST', async () => {
+      const brokenDb = new Database(':memory:');
+      const customPost = createPostHandler({
+        ...runtime,
+        db: brokenDb,
+        sync: {
+          enqueue: async () => ({ runId: 1, reused: false }),
+          cancel: async () => 'cancelled' as RunStatus,
+          start: async () => {},
+          stop: async () => {}
+        }
+      });
+
+      const req = new Request('http://localhost:3000/api/admin/sync-runs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf },
+        body: JSON.stringify({
+          mode: 'recent',
+          idempotencyKey: 'key-broken'
+        })
+      });
+      const res = await customPost({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        request: req
+      } as any);
+      expect(res.status).toBe(503);
+      const data = await res.json();
+      expect(data.code).toBe('SYNC_STATE_UNAVAILABLE');
     });
 
     it('validates date range for backfill mode', async () => {
@@ -263,7 +297,7 @@ describe('/api/admin/sync-runs route', () => {
         start: async () => {},
         stop: async () => {}
       };
-      const customPost = createPostHandler({ sync: mockService });
+      const customPost = createPostHandler({ ...runtime, sync: mockService });
 
       const req = new Request('http://localhost:3000/api/admin/sync-runs', {
         method: 'POST',
@@ -297,7 +331,7 @@ describe('/api/admin/sync-runs route', () => {
         start: async () => {},
         stop: async () => {}
       };
-      const customPost = createPostHandler({ sync: mockService });
+      const customPost = createPostHandler({ ...runtime, sync: mockService });
 
       const req = new Request('http://localhost:3000/api/admin/sync-runs', {
         method: 'POST',
@@ -327,7 +361,7 @@ describe('/api/admin/sync-runs route', () => {
         start: async () => {},
         stop: async () => {}
       };
-      const customPost = createPostHandler({ sync: mockService });
+      const customPost = createPostHandler({ ...runtime, sync: mockService });
 
       const req = new Request('http://localhost:3000/api/admin/sync-runs', {
         method: 'POST',
@@ -346,6 +380,24 @@ describe('/api/admin/sync-runs route', () => {
       expect(response.status).toBe(409);
       const data = await response.json();
       expect(data.code).toBe('SYNC_QUEUE_FULL');
+    });
+
+    it('returns 503 when query fails on GET', async () => {
+      const brokenDb = {
+        prepare: () => {
+          throw new Error('Database error');
+        }
+      } as any;
+      const customGet = createGetHandler({ ...runtime, db: brokenDb });
+
+      const response = await customGet({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        url: new URL('http://localhost:3000/api/admin/sync-runs')
+      } as any);
+
+      expect(response.status).toBe(503);
+      const data = await response.json();
+      expect(data.code).toBe('SYNC_STATE_UNAVAILABLE');
     });
   });
 });

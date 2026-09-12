@@ -5,13 +5,9 @@ import { validateAdminMutationAuth, AdminAuthError } from '$lib/server/auth/admi
 import { getAdminSyncService, type AdminSyncRuntimeSurface } from '$lib/server/admin/sync';
 import type { CancelSyncRunResponseBody, SyncService } from '$lib/server/sync/contracts';
 
-export interface SyncRunCancelRouteDeps {
-  runtime?: AdminSyncRuntimeSurface;
-  sync?: SyncService;
-}
-
-export function _createPostHandler(deps?: SyncRunCancelRouteDeps): RequestHandler {
+export function _createPostHandler(runtimeSurface: AdminSyncRuntimeSurface): RequestHandler {
   return async ({ locals, params, request }) => {
+    const rt = runtimeSurface;
     let body: Record<string, unknown> = {};
     try {
       const text = await request.text();
@@ -30,8 +26,8 @@ export function _createPostHandler(deps?: SyncRunCancelRouteDeps): RequestHandle
       validateAdminMutationAuth({
         locals,
         request,
-        publicUrl: runtime.config.publicUrl,
-        sessionSecret: runtime.sessionSecret,
+        publicUrl: rt.config.publicUrl,
+        sessionSecret: rt.sessionSecret,
         submittedCsrf
       });
     } catch (err) {
@@ -49,24 +45,42 @@ export function _createPostHandler(deps?: SyncRunCancelRouteDeps): RequestHandle
       return json({ error: 'Invalid run ID: must be a positive integer', code: 'INVALID_RUN_ID' }, { status: 400 });
     }
 
-    const rt = deps?.runtime ?? (deps?.sync ? { ...(runtime as unknown as AdminSyncRuntimeSurface), sync: deps.sync } : undefined);
-    const db = rt?.db ?? runtime.db;
+    const db = rt.db;
 
-    const existing = db
-      .prepare(`SELECT id, status FROM sync_runs WHERE id = ?`)
-      .get(id) as { id: number; status: string } | undefined;
+    let existing: { id: number; status: string } | undefined;
+    try {
+      existing = db
+        .prepare(`SELECT id, status FROM sync_runs WHERE id = ?`)
+        .get(id) as { id: number; status: string } | undefined;
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
 
     if (!existing) {
-      return json({ error: `Sync run ${id} not found`, code: 'NOT_FOUND' }, { status: 404 });
+      return json({ error: 'Sync run not found', code: 'NOT_FOUND' }, { status: 404 });
     }
 
     const adminSync = getAdminSyncService(rt);
     try {
       const status = await adminSync.cancel(id);
+      let runAfter: { finished_at: string | null; cancel_requested_at: string | null } | undefined;
+      try {
+        runAfter = db
+          .prepare(`SELECT finished_at, cancel_requested_at FROM sync_runs WHERE id = ?`)
+          .get(id) as { finished_at: string | null; cancel_requested_at: string | null } | undefined;
+      } catch (err) {
+        return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+      }
+
+      const cancelledAt = runAfter?.cancel_requested_at ?? runAfter?.finished_at ?? null;
+      if (!cancelledAt) {
+        return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+      }
+
       const response: CancelSyncRunResponseBody = {
         runId: id,
         status,
-        cancelledAt: new Date().toISOString()
+        cancelledAt
       };
       return json(response);
     } catch (err) {
@@ -78,4 +92,4 @@ export function _createPostHandler(deps?: SyncRunCancelRouteDeps): RequestHandle
   };
 }
 
-export const POST = _createPostHandler();
+export const POST = _createPostHandler(runtime);

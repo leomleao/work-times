@@ -9,7 +9,8 @@ import {
   getSyncData,
   getAdminSyncService,
   getVerifiedSourceTimezone,
-  AdminSyncService
+  AdminSyncService,
+  AdminSyncReadError
 } from './sync.js';
 import type { SyncService, RunRequest, RunStatus } from '../sync/contracts.js';
 
@@ -282,8 +283,8 @@ describe('Admin Sync Backend', () => {
       expect(adminData.readiness.hasActiveGrant).toBe(true);
       expect(adminData.readiness.discoveryReady).toBe(true);
 
-      expect(adminData.schedule.enabled).toBe(true);
-      expect(adminData.schedule.lastEnqueuedRunId).toBeNull();
+      expect(adminData.schedule.schedulingEnabled).toBeDefined();
+      expect(adminData.schedule.timezone).toBeDefined();
 
       expect(adminData.registry.totalEntries).toBe(1);
       expect(adminData.registry.distinctEditors).toBe(1);
@@ -340,6 +341,10 @@ describe('Admin Sync Backend', () => {
       const adminService = getAdminSyncService({
         db,
         config: {} as any,
+        sessionSecret: 'secret',
+        scheduler: {} as any,
+        lifecycle: {} as any,
+        getReadiness: () => ({ state: "running", ready: true, schedulingEnabled: true, sourceTimezone: "Europe/London", nextDueAt: null, activeRunId: null, currentDate: null, lastProgressAt: null, errorCode: null, migrationsComplete: true, recoveryComplete: true, serviceRegistered: true, ownershipLockHeld: true }),
         sync: mockService
       });
 
@@ -355,24 +360,39 @@ describe('Admin Sync Backend', () => {
     it('populates schedule state from scheduler.getScheduleState and avoids fake fallback', () => {
       const mockScheduler = {
         getScheduleState: () => ({
-          enabled: true,
-          lastTickAt: '2026-03-01T09:00:00.000Z',
-          nextTickAt: '2026-03-01T10:00:00.000Z',
-          lastEnqueuedRunId: 42,
-          failureBackoffUntil: null,
-          activeRunId: null
+          schedulingEnabled: true,
+          paused: false,
+          pauseReason: null,
+          timezone: 'Europe/London',
+          lastHandledSlots: { hourly: null, daily: null },
+          nextDue: { recent: "2026-03-01T10:00:00.000Z", reconcile: null, compare: null },
+          catchupCursor: null,
+          seeded: true
         })
       };
 
-      const dataWithScheduler = getSyncAdminData(db, {
-        runtime: { db, config: {} as any, scheduler: mockScheduler }
-      });
-      expect(dataWithScheduler.schedule.nextTickAt).toBe('2026-03-01T10:00:00.000Z');
-      expect(dataWithScheduler.schedule.lastEnqueuedRunId).toBe(42);
+      const mockRuntime = {
+        db,
+        config: {} as any,
+        sessionSecret: 'test-secret',
+        sync: {} as any,
+        scheduler: mockScheduler,
+        lifecycle: {} as any,
+        getReadiness: () => ({ ready: true, status: 'ready', reason: null })
+      } as any;
 
-      // When scheduler is absent, nextTickAt must be null (never computed next-UTC-hour)
-      const dataWithoutScheduler = getSyncAdminData(db);
-      expect(dataWithoutScheduler.schedule.nextTickAt).toBeNull();
+      const dataWithScheduler = getSyncAdminData(db, {
+        runtime: mockRuntime
+      });
+      expect(dataWithScheduler.schedule.nextDue.recent).toBe("2026-03-01T10:00:00.000Z");
+      expect(dataWithScheduler.schedule.schedulingEnabled).toBe(true);
+
+      // When scheduler or readiness is absent, SYNC_STATE_UNAVAILABLE is thrown
+      expect(() =>
+        getSyncAdminData(db, {
+          runtime: { ...mockRuntime, scheduler: undefined }
+        })
+      ).toThrow(AdminSyncReadError);
     });
 
     it('requires complete summary evidence and daily_totals for verified_zero', () => {
@@ -391,7 +411,8 @@ describe('Admin Sync Backend', () => {
         SET accepted_fidelity = 'verified_zero',
             accepted_source_reference = 'ref-1',
             accepted_content_hash = 'hash-1',
-            accepted_snapshot_version = 1
+            accepted_snapshot_version = 1,
+            verified_timezone = 'UTC'
         WHERE layer = 'summaries' AND date = '2026-03-01';
         INSERT INTO daily_totals (date, total_seconds, timezone)
         VALUES ('2026-03-01', 0, 'UTC');

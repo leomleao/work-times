@@ -7,13 +7,9 @@ import type { RetrySyncRunRequestBody, RetrySyncRunResponseBody, RunRequest, Syn
 import { isValidDateString } from '$lib/server/sync/calendar';
 import { IdempotencyConflictError, QueueFullError } from '$lib/server/db/repositories/sync';
 
-export interface SyncRunRetryRouteDeps {
-  runtime?: AdminSyncRuntimeSurface;
-  sync?: SyncService;
-}
-
-export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler {
+export function _createPostHandler(runtimeSurface: AdminSyncRuntimeSurface): RequestHandler {
   return async ({ locals, params, request }) => {
+    const rt = runtimeSurface;
     let body: RetrySyncRunRequestBody & { csrfToken?: string; idempotencyKey?: string } = {};
     try {
       const text = await request.text();
@@ -24,6 +20,10 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
       return json({ error: 'Malformed JSON payload', code: 'MALFORMED_JSON' }, { status: 400 });
     }
 
+    if ('idempotencyKey' in body && body.idempotencyKey !== undefined) {
+      return json({ error: 'idempotencyKey is not permitted on retry', code: 'INVALID_REQUEST' }, { status: 400 });
+    }
+
     const submittedCsrf =
       (typeof body.csrfToken === 'string' ? body.csrfToken : null) ??
       request.headers.get('x-csrf-token');
@@ -32,8 +32,8 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
       validateAdminMutationAuth({
         locals,
         request,
-        publicUrl: runtime.config.publicUrl,
-        sessionSecret: runtime.sessionSecret,
+        publicUrl: rt.config.publicUrl,
+        sessionSecret: rt.sessionSecret,
         submittedCsrf
       });
     } catch (err) {
@@ -51,35 +51,44 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
       return json({ error: 'Invalid run ID: must be a positive integer', code: 'INVALID_RUN_ID' }, { status: 400 });
     }
 
-    const rt = deps?.runtime ?? (deps?.sync ? { ...(runtime as unknown as AdminSyncRuntimeSurface), sync: deps.sync } : undefined);
-    const db = rt?.db ?? runtime.db;
+    const db = rt.db;
 
-    const parentRun = db
-      .prepare(`SELECT id, status, mode, started_at FROM sync_runs WHERE id = ?`)
-      .get(id) as { id: number; status: string; mode: string; started_at: string } | undefined;
+    let parentRun: { id: number; status: string; mode: string; started_at: string } | undefined;
+    try {
+      parentRun = db
+        .prepare(`SELECT id, status, mode, started_at FROM sync_runs WHERE id = ?`)
+        .get(id) as { id: number; status: string; mode: string; started_at: string } | undefined;
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
 
     if (!parentRun) {
-      return json({ error: `Sync run ${id} not found`, code: 'NOT_FOUND' }, { status: 404 });
+      return json({ error: 'Sync run not found', code: 'NOT_FOUND' }, { status: 404 });
     }
 
     const targetDate = typeof body.targetDate === 'string' ? body.targetDate.trim() : undefined;
     if (targetDate && !isValidDateString(targetDate)) {
-      return json({ error: `targetDate '${targetDate}' is not a valid YYYY-MM-DD date`, code: 'INVALID_TARGET_DATE' }, { status: 400 });
+      return json({ error: 'Invalid target date', code: 'INVALID_TARGET_DATE' }, { status: 400 });
     }
 
-    const parentDays = db
-      .prepare(
-        `SELECT date, status, summaries_status, durations_status, heartbeats_status
-         FROM sync_days
-         WHERE sync_run_id = ?`
-      )
-      .all(id) as Array<{
-        date: string;
-        status: string;
-        summaries_status: string | null;
-        durations_status: string | null;
-        heartbeats_status: string | null;
-      }>;
+    let parentDays: Array<{
+      date: string;
+      status: string;
+      summaries_status: string | null;
+      durations_status: string | null;
+      heartbeats_status: string | null;
+    }> = [];
+    try {
+      parentDays = db
+        .prepare(
+          `SELECT date, status, summaries_status, durations_status, heartbeats_status
+           FROM sync_days
+           WHERE sync_run_id = ?`
+        )
+        .all(id) as typeof parentDays;
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
 
     type ConnectionRow = { generation: number; rebound_at: string | null };
     let connectionRow: ConnectionRow | undefined = undefined;
@@ -87,7 +96,9 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
       connectionRow = db
         .prepare(`SELECT generation, rebound_at FROM wakatime_oauth_connection WHERE id = 1`)
         .get() as ConnectionRow | undefined;
-    } catch {}
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
 
     const isPostReconnect = Boolean(
       connectionRow?.rebound_at &&
@@ -100,7 +111,7 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
       const matchingDay = parentDays.find((d) => d.date === targetDate);
       if (!matchingDay) {
         return json(
-          { error: `targetDate '${targetDate}' was not part of parent sync run ${id}`, code: 'TARGET_DATE_NOT_IN_RUN' },
+          { error: 'Target date not in parent run', code: 'TARGET_DATE_NOT_IN_RUN' },
           { status: 400 }
         );
       }
@@ -119,22 +130,26 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
       } else if (isRestricted) {
         if (isPostReconnect) {
           // Durably verify restricted date has not already been retried under this reconnect generation
-          const priorRetry = db
-            .prepare(
-              `SELECT r.id FROM sync_runs r
-               JOIN sync_days d ON d.sync_run_id = r.id
-               WHERE r.resumed_from_run_id = ?
-                 AND d.date = ?
-                 AND r.started_at >= ?
-               LIMIT 1`
-            )
-            .get(parentRun.id, targetDate, connectionRow!.rebound_at) as { id: number } | undefined;
+          try {
+            const priorRetry = db
+              .prepare(
+                `SELECT r.id FROM sync_runs r
+                 JOIN sync_days d ON d.sync_run_id = r.id
+                 WHERE r.resumed_from_run_id = ?
+                   AND d.date = ?
+                   AND r.started_at >= ?
+                 LIMIT 1`
+              )
+              .get(parentRun.id, targetDate, connectionRow!.rebound_at) as { id: number } | undefined;
 
-          if (priorRetry) {
-            return json(
-              { error: 'Restricted date has already been retried for this connection generation', code: 'ALREADY_RETRIED' },
-              { status: 409 }
-            );
+            if (priorRetry) {
+              return json(
+                { error: 'Restricted date has already been retried for this connection generation', code: 'ALREADY_RETRIED' },
+                { status: 409 }
+              );
+            }
+          } catch (err) {
+            return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
           }
           eligibleDates = [targetDate];
         } else {
@@ -145,7 +160,7 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
         }
       } else {
         return json(
-          { error: `Date '${targetDate}' is not eligible for retry`, code: 'DATE_NOT_ELIGIBLE' },
+          { error: 'Date is not eligible for retry', code: 'DATE_NOT_ELIGIBLE' },
           { status: 400 }
         );
       }
@@ -157,7 +172,7 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
 
       if (eligibleDates.length === 0) {
         return json(
-          { error: `No failed or interrupted dates eligible for retry in sync run ${id}`, code: 'NO_ELIGIBLE_DATES' },
+          { error: 'No eligible dates for retry', code: 'NO_ELIGIBLE_DATES' },
           { status: 400 }
         );
       }
@@ -166,11 +181,7 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
     eligibleDates.sort();
 
     const gen = connectionRow?.generation ?? 0;
-    const defaultKey = `retry-${id}-gen${gen}-${eligibleDates.join(',')}`;
-    const idempotencyKey =
-      typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim().length > 0
-        ? body.idempotencyKey.trim()
-        : defaultKey;
+    const idempotencyKey = `retry-${id}-gen${gen}-${eligibleDates.join(',')}`;
 
     const runRequest: RunRequest = {
       mode: 'retry',
@@ -211,4 +222,4 @@ export function _createPostHandler(deps?: SyncRunRetryRouteDeps): RequestHandler
   };
 }
 
-export const POST = _createPostHandler();
+export const POST = _createPostHandler(runtime);

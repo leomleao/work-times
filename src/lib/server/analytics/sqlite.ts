@@ -205,12 +205,19 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
     const timezone = this.getSourceTimezone();
 
     if (!timezone) {
-      hasIncompleteSummary = true;
-      advisories.add('TIMEZONE_UNAVAILABLE');
+      return {
+        asOf: null,
+        hasMissingDays: true,
+        hasStaleDays: true,
+        hasLimitedDetail: false,
+        advisoryCodes: ['TIMEZONE_UNAVAILABLE']
+      };
     }
 
     for (const date of dates) {
       if (!dailyTotalsMap.has(date)) {
+        hasMissingDays = true;
+        hasStaleDays = true;
         hasIncompleteSummary = true;
         advisories.add('STALE_MISSING_COVERAGE');
       }
@@ -261,6 +268,7 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
         row.accepted_source_reference &&
         row.accepted_content_hash &&
         row.accepted_fidelity &&
+        row.verified_timezone &&
         typeof row.accepted_snapshot_version === 'number' &&
         row.accepted_snapshot_version > 0 &&
         !row.has_failure &&
@@ -307,7 +315,7 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
         hasFailure: Boolean(row.has_failure)
       };
 
-      const evalResult = evaluateDateFreshness(date, freshnessRecord, now, timezone ?? 'UTC');
+      const evalResult = evaluateDateFreshness(date, freshnessRecord, now, timezone);
       const isAgeOrUnresolvedStale = evalResult.reasons.some(
         (r) =>
           r !== RECONCILE_CODES.CURRENT_DAY_PROVISIONAL &&

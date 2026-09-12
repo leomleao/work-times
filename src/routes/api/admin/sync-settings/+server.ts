@@ -11,51 +11,52 @@ import type {
 } from '$lib/server/sync/contracts';
 import type { AdminSyncRuntimeSurface } from '$lib/server/admin/sync';
 
-export interface SyncSettingsRouteDeps {
-  runtime?: AdminSyncRuntimeSurface;
-}
-
 function getPersistedSettingsUpdatedAt(db: Database.Database): string {
-  try {
-    const row = db
-      .prepare(
-        `SELECT MAX(updated_at) as latest_updated FROM (
-           SELECT updated_at FROM app_settings WHERE key = 'sync.scheduling_enabled'
-           UNION
-           SELECT rebound_at as updated_at FROM wakatime_oauth_connection WHERE id = 1
-           UNION
-           SELECT created_at as updated_at FROM wakatime_oauth_connection WHERE id = 1
-         ) WHERE updated_at IS NOT NULL`
-      )
-      .get() as { latest_updated: string | null } | undefined;
-    if (row?.latest_updated) return row.latest_updated;
-  } catch {}
-  return '';
+  const row = db
+    .prepare(
+      `SELECT MAX(updated_at) as latest_updated FROM (
+         SELECT updated_at FROM app_settings WHERE key = 'sync.scheduling_enabled'
+         UNION
+         SELECT rebound_at as updated_at FROM wakatime_oauth_connection WHERE id = 1
+         UNION
+         SELECT updated_at FROM wakatime_oauth_connection WHERE id = 1
+         UNION
+         SELECT connected_at as updated_at FROM wakatime_oauth_connection WHERE id = 1
+       ) WHERE updated_at IS NOT NULL`
+    )
+    .get() as { latest_updated: string | null } | undefined;
+  return row?.latest_updated ?? '';
 }
 
-export function _createGetHandler(deps?: SyncSettingsRouteDeps): RequestHandler {
+export function _createGetHandler(runtimeSurface: AdminSyncRuntimeSurface): RequestHandler {
   return async ({ locals }) => {
     if (!locals.admin) {
       return json({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, { status: 401 });
     }
 
-    const db = deps?.runtime?.db ?? runtime.db;
-    const repo = new SqliteSyncRepository(db);
-    const settings = repo.getSyncSettings();
+    const rt = runtimeSurface;
+    const db = rt.db;
+    try {
+      const repo = new SqliteSyncRepository(db);
+      const settings = repo.getSyncSettings();
 
-    return json({
-      schedulingEnabled: settings.schedulingEnabled,
-      connectionGeneration: settings.connectionGeneration,
-      boundArchiveIdentity: settings.boundArchiveIdentity,
-      updatedAt: getPersistedSettingsUpdatedAt(db)
-    });
+      return json({
+        schedulingEnabled: settings.schedulingEnabled,
+        connectionGeneration: settings.connectionGeneration,
+        boundArchiveIdentity: settings.boundArchiveIdentity,
+        updatedAt: getPersistedSettingsUpdatedAt(db)
+      });
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
   };
 }
 
-export const GET = _createGetHandler();
+export const GET = _createGetHandler(runtime);
 
-export function _createPostHandler(deps?: SyncSettingsRouteDeps): RequestHandler {
+export function _createPostHandler(runtimeSurface: AdminSyncRuntimeSurface): RequestHandler {
   return async ({ locals, request }) => {
+    const rt = runtimeSurface;
     let body: UpdateSyncSettingsRequestBody & { csrfToken?: string } = {};
     try {
       const text = await request.text();
@@ -74,8 +75,8 @@ export function _createPostHandler(deps?: SyncSettingsRouteDeps): RequestHandler
       validateAdminMutationAuth({
         locals,
         request,
-        publicUrl: runtime.config.publicUrl,
-        sessionSecret: runtime.sessionSecret,
+        publicUrl: rt.config.publicUrl,
+        sessionSecret: rt.sessionSecret,
         submittedCsrf
       });
     } catch (err) {
@@ -88,31 +89,46 @@ export function _createPostHandler(deps?: SyncSettingsRouteDeps): RequestHandler
       throw err;
     }
 
-    const db = deps?.runtime?.db ?? runtime.db;
-    const repo = new SqliteSyncRepository(db);
+    const db = rt.db;
 
-    if (body.schedulingEnabled !== undefined) {
-      if (typeof body.schedulingEnabled !== 'boolean') {
-        return json({ error: 'schedulingEnabled must be a boolean', code: 'INVALID_SETTINGS' }, { status: 400 });
-      }
-      repo.updateSyncSettings({ schedulingEnabled: body.schedulingEnabled });
+    // Validate all prerequisites before any mutation
+    if (body.schedulingEnabled !== undefined && typeof body.schedulingEnabled !== 'boolean') {
+      return json({ error: 'schedulingEnabled must be a boolean', code: 'INVALID_SETTINGS' }, { status: 400 });
     }
 
+    let conn: { bound_archive_identity: string | null } | undefined;
     if (body.bindCurrentConnection === true) {
-      const conn = db
-        .prepare(`SELECT bound_archive_identity FROM wakatime_oauth_connection WHERE id = 1`)
-        .get() as { bound_archive_identity: string | null } | undefined;
+      try {
+        conn = db
+          .prepare(`SELECT bound_archive_identity FROM wakatime_oauth_connection WHERE id = 1`)
+          .get() as { bound_archive_identity: string | null } | undefined;
+      } catch (err) {
+        return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+      }
 
-      if (!conn || !conn.bound_archive_identity) {
+      if (!conn || !conn.bound_archive_identity || conn.bound_archive_identity.trim().length === 0) {
         return json(
           { error: 'Archive identity unavailable', code: 'ARCHIVE_IDENTITY_UNAVAILABLE' },
           { status: 400 }
         );
       }
+    }
 
+    // Now execute mutations
+    const repo = new SqliteSyncRepository(db);
+
+    if (body.schedulingEnabled !== undefined) {
+      try {
+        repo.updateSyncSettings({ schedulingEnabled: body.schedulingEnabled });
+      } catch (err) {
+        return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+      }
+    }
+
+    if (body.bindCurrentConnection === true) {
       const oauthRepo = new SqliteWakaTimeOAuthConnectionRepository(db);
       try {
-        oauthRepo.rebind(conn.bound_archive_identity);
+        oauthRepo.rebind(conn!.bound_archive_identity!);
       } catch {
         return json(
           { error: 'Failed to rebind connection', code: 'REBIND_FAILED' },
@@ -121,16 +137,20 @@ export function _createPostHandler(deps?: SyncSettingsRouteDeps): RequestHandler
       }
     }
 
-    const updated = repo.getSyncSettings();
-    const response: UpdateSyncSettingsResponseBody = {
-      schedulingEnabled: updated.schedulingEnabled,
-      connectionGeneration: updated.connectionGeneration,
-      boundArchiveIdentity: updated.boundArchiveIdentity,
-      updatedAt: getPersistedSettingsUpdatedAt(db)
-    };
+    try {
+      const updated = repo.getSyncSettings();
+      const response: UpdateSyncSettingsResponseBody = {
+        schedulingEnabled: updated.schedulingEnabled,
+        connectionGeneration: updated.connectionGeneration,
+        boundArchiveIdentity: updated.boundArchiveIdentity,
+        updatedAt: getPersistedSettingsUpdatedAt(db)
+      };
 
-    return json(response);
+      return json(response);
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
   };
 }
 
-export const POST = _createPostHandler();
+export const POST = _createPostHandler(runtime);

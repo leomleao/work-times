@@ -3,11 +3,7 @@ import type { RequestHandler } from './$types';
 import { runtime } from '$lib/server/runtime';
 import { getSyncRunDetail, type AdminSyncRuntimeSurface } from '$lib/server/admin/sync';
 
-export interface SyncRunDetailRouteDeps {
-  runtime?: AdminSyncRuntimeSurface;
-}
-
-export function _createGetHandler(deps?: SyncRunDetailRouteDeps): RequestHandler {
+export function _createGetHandler(runtimeSurface: AdminSyncRuntimeSurface): RequestHandler {
   return async ({ locals, params, url }) => {
     if (!locals.admin) {
       return json({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, { status: 401 });
@@ -24,14 +20,19 @@ export function _createGetHandler(deps?: SyncRunDetailRouteDeps): RequestHandler
     const page = pageParam ? Math.max(1, Number(pageParam) || 1) : 1;
     const pageSize = pageSizeParam ? Math.min(50, Math.max(1, Number(pageSizeParam) || 50)) : 50;
 
-    const db = deps?.runtime?.db ?? runtime.db;
-    const detail = getSyncRunDetail(db, id, { page, pageSize });
-    if (!detail) {
-      return json({ error: `Sync run ${id} not found`, code: 'NOT_FOUND' }, { status: 404 });
-    }
+    const rt = runtimeSurface;
+    const db = rt.db;
+    try {
+      const detail = getSyncRunDetail(db, id, { page, pageSize });
+      if (!detail) {
+        return json({ error: 'Sync run not found', code: 'NOT_FOUND' }, { status: 404 });
+      }
 
-    return json(detail);
+      return json(detail);
+    } catch (err) {
+      return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
+    }
   };
 }
 
-export const GET = _createGetHandler();
+export const GET = _createGetHandler(runtime);
