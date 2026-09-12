@@ -1,4 +1,4 @@
-import { json, redirect, type Handle } from '@sveltejs/kit';
+import { json, redirect, type Handle, type ServerInit } from '@sveltejs/kit';
 import { runtime } from '$lib/server/runtime';
 import {
   ADMIN_SESSION_COOKIE,
@@ -8,6 +8,18 @@ import {
   verifyCsrfToken
 } from '$lib/server/security/http';
 import { safeLoginRedirect as safeRedirect } from '$lib/server/oauth/continuation';
+
+export const init: ServerInit = async () => {
+  // Build and test guards: do not start production runtime, timers, or network
+  if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+    return;
+  }
+  if (process.env.npm_lifecycle_event === 'build' || process.env.BUILDING) {
+    return;
+  }
+
+  await runtime.lifecycle.start();
+};
 
 export const handle: Handle = async ({ event, resolve }) => {
   const { pathname } = event.url;
