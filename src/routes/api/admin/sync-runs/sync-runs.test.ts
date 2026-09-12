@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { GET, POST } from './+server.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { GET, POST, _createPostHandler as createPostHandler, _createGetHandler as createGetHandler } from './+server.js';
 import { runtime } from '$lib/server/runtime';
 import { csrfTokenForSession } from '$lib/server/security/http';
-import { setSyncService, resetSyncService } from '$lib/server/admin/sync';
 import type { SyncService, RunRequest, RunStatus } from '$lib/server/sync/contracts';
 import { IdempotencyConflictError, QueueFullError } from '$lib/server/db/repositories/sync';
+import Database from 'better-sqlite3';
 
 describe('/api/admin/sync-runs route', () => {
   const adminPrincipal = { username: 'admin', sessionExpiresAt: '2099-01-01T00:00:00.000Z' };
@@ -14,11 +14,14 @@ describe('/api/admin/sync-runs route', () => {
   const validCsrf = csrfTokenForSession(validSessionToken, runtime.sessionSecret);
 
   beforeEach(() => {
-    resetSyncService();
-  });
-
-  afterEach(() => {
-    resetSyncService();
+    try {
+      runtime.db.prepare(`
+        INSERT OR REPLACE INTO account_settings (wakatime_user_id, timezone, weekday_start, keystroke_timeout_seconds, writes_only, plan, has_premium_features, updated_at)
+        VALUES ('test-user', 'America/New_York', 1, 120, 0, 'free', 0, '2026-01-01T00:00:00.000Z')
+      `).run();
+    } catch {
+      // Table might already have row or custom schema
+    }
   });
 
   describe('GET', () => {
@@ -30,7 +33,7 @@ describe('/api/admin/sync-runs route', () => {
 
       expect(response.status).toBe(401);
       const data = await response.json();
-      expect(data.error).toBe('Unauthorized');
+      expect(data).toEqual({ error: 'Unauthorized', code: 'UNAUTHORIZED' });
     });
 
     it('returns 200 with collection DTO when authenticated', async () => {
@@ -61,6 +64,8 @@ describe('/api/admin/sync-runs route', () => {
 
       const response = await POST({ locals: {} as any, request: req } as any);
       expect(response.status).toBe(401);
+      const data = await response.json();
+      expect(data).toEqual({ error: 'Unauthorized', code: 'UNAUTHORIZED' });
     });
 
     it('rejects cross-origin requests with 403', async () => {
@@ -80,7 +85,7 @@ describe('/api/admin/sync-runs route', () => {
       } as any);
       expect(response.status).toBe(403);
       const data = await response.json();
-      expect(data.error).toBe('Cross-origin request rejected');
+      expect(data).toEqual({ error: 'Forbidden', code: 'FORBIDDEN' });
     });
 
     it('rejects invalid CSRF token with 403', async () => {
@@ -100,7 +105,7 @@ describe('/api/admin/sync-runs route', () => {
       } as any);
       expect(response.status).toBe(403);
       const data = await response.json();
-      expect(data.error).toBe('Invalid or missing CSRF token');
+      expect(data).toEqual({ error: 'Forbidden', code: 'FORBIDDEN' });
     });
 
     it('validates mode and idempotencyKey', async () => {
@@ -127,6 +132,56 @@ describe('/api/admin/sync-runs route', () => {
         request: reqNoKey
       } as any);
       expect(resNoKey.status).toBe(400);
+    });
+
+    it('rejects range fields for recent mode with RANGE_FIELDS_REJECTED_FOR_RECENT', async () => {
+      const req = new Request('http://localhost:3000/api/admin/sync-runs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf },
+        body: JSON.stringify({
+          mode: 'recent',
+          idempotencyKey: 'key-recent-range',
+          rangeStartDate: '2026-03-01'
+        })
+      });
+      const res = await POST({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        request: req
+      } as any);
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.code).toBe('RANGE_FIELDS_REJECTED_FOR_RECENT');
+    });
+
+    it('fails with 422 when verified source timezone is unavailable', async () => {
+      const emptyDb = new Database(':memory:');
+      const customPost = createPostHandler({
+        runtime: {
+          db: emptyDb,
+          sync: {
+            enqueue: async () => ({ runId: 1, reused: false }),
+            cancel: async () => 'cancelled' as RunStatus,
+            start: async () => {},
+            stop: async () => {}
+          }
+        } as any
+      });
+
+      const req = new Request('http://localhost:3000/api/admin/sync-runs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf },
+        body: JSON.stringify({
+          mode: 'recent',
+          idempotencyKey: 'key-no-tz'
+        })
+      });
+      const res = await customPost({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        request: req
+      } as any);
+      expect(res.status).toBe(422);
+      const data = await res.json();
+      expect(data.code).toBe('TIMEZONE_UNAVAILABLE');
     });
 
     it('validates date range for backfill mode', async () => {
@@ -208,7 +263,7 @@ describe('/api/admin/sync-runs route', () => {
         start: async () => {},
         stop: async () => {}
       };
-      setSyncService(mockService);
+      const customPost = createPostHandler({ sync: mockService });
 
       const req = new Request('http://localhost:3000/api/admin/sync-runs', {
         method: 'POST',
@@ -219,7 +274,7 @@ describe('/api/admin/sync-runs route', () => {
         })
       });
 
-      const response = await POST({
+      const response = await customPost({
         locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
         request: req
       } as any);
@@ -242,7 +297,7 @@ describe('/api/admin/sync-runs route', () => {
         start: async () => {},
         stop: async () => {}
       };
-      setSyncService(mockService);
+      const customPost = createPostHandler({ sync: mockService });
 
       const req = new Request('http://localhost:3000/api/admin/sync-runs', {
         method: 'POST',
@@ -253,7 +308,7 @@ describe('/api/admin/sync-runs route', () => {
         })
       });
 
-      const response = await POST({
+      const response = await customPost({
         locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
         request: req
       } as any);
@@ -272,7 +327,7 @@ describe('/api/admin/sync-runs route', () => {
         start: async () => {},
         stop: async () => {}
       };
-      setSyncService(mockService);
+      const customPost = createPostHandler({ sync: mockService });
 
       const req = new Request('http://localhost:3000/api/admin/sync-runs', {
         method: 'POST',
@@ -283,7 +338,7 @@ describe('/api/admin/sync-runs route', () => {
         })
       });
 
-      const response = await POST({
+      const response = await customPost({
         locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
         request: req
       } as any);
@@ -294,3 +349,4 @@ describe('/api/admin/sync-runs route', () => {
     });
   });
 });
+

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { GET, POST } from './+server.js';
+import { GET, POST, _createPostHandler as createPostHandler, _createGetHandler as createGetHandler } from './+server.js';
 import { runtime } from '$lib/server/runtime';
 import { csrfTokenForSession } from '$lib/server/security/http';
+import Database from 'better-sqlite3';
 
 describe('/api/admin/sync-settings route', () => {
   const adminPrincipal = { username: 'admin', sessionExpiresAt: '2099-01-01T00:00:00.000Z' };
@@ -14,6 +15,8 @@ describe('/api/admin/sync-settings route', () => {
     it('returns 401 when unauthenticated', async () => {
       const res = await GET({ locals: {} as any } as any);
       expect(res.status).toBe(401);
+      const data = await res.json();
+      expect(data).toEqual({ error: 'Unauthorized', code: 'UNAUTHORIZED' });
     });
 
     it('returns 200 with current settings when authenticated', async () => {
@@ -39,6 +42,8 @@ describe('/api/admin/sync-settings route', () => {
       });
       const res = await POST({ locals: {} as any, request: req } as any);
       expect(res.status).toBe(401);
+      const data = await res.json();
+      expect(data).toEqual({ error: 'Unauthorized', code: 'UNAUTHORIZED' });
     });
 
     it('returns 403 on cross-origin request', async () => {
@@ -52,6 +57,8 @@ describe('/api/admin/sync-settings route', () => {
         request: req
       } as any);
       expect(res.status).toBe(403);
+      const data = await res.json();
+      expect(data).toEqual({ error: 'Forbidden', code: 'FORBIDDEN' });
     });
 
     it('updates schedulingEnabled and returns 200', async () => {
@@ -85,7 +92,27 @@ describe('/api/admin/sync-settings route', () => {
       expect(dataOff.schedulingEnabled).toBe(false);
     });
 
-    it('rebinds connection when bindCurrentConnection is true', async () => {
+    it('returns 400 ARCHIVE_IDENTITY_UNAVAILABLE when bound_archive_identity is absent', async () => {
+      // Clear or set connection row with null bound_archive_identity
+      runtime.db.prepare(`DELETE FROM wakatime_oauth_connection WHERE id = 1`).run();
+
+      const req = new Request('http://localhost:3000/api/admin/sync-settings', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf },
+        body: JSON.stringify({ bindCurrentConnection: true })
+      });
+
+      const res = await POST({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        request: req
+      } as any);
+
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.code).toBe('ARCHIVE_IDENTITY_UNAVAILABLE');
+    });
+
+    it('rebinds connection when bindCurrentConnection is true and identity present', async () => {
       // Ensure connection row exists
       runtime.db
         .prepare(`
@@ -110,6 +137,8 @@ describe('/api/admin/sync-settings route', () => {
       const data = await res.json();
       expect(data.connectionGeneration).toBe(2);
       expect(data.boundArchiveIdentity).toBe('user_test');
+      expect(typeof data.updatedAt).toBe('string');
     });
   });
 });
+

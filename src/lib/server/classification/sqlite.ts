@@ -1988,67 +1988,69 @@ export class SqliteClassificationService {
       project_is_unattributed: number;
     }>;
 
-    if (sliceRows.length === 0) return [];
-
-    let identSql = `
-      SELECT slice_id, selector_type, value FROM (
-        SELECT i.slice_id, i.selector_type, i.value, s.date
-        FROM slice_identities i
-        JOIN day_project_entity_slices s ON s.id = i.slice_id
-        WHERE i.selector_type IN ('machine', 'editor')
-          AND (
-            i.source != 'heartbeat'
-            OR EXISTS (
-              SELECT 1 FROM heartbeats h
-              JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
-              WHERE hm.active = 1
-                AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
-                AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
-                AND (
-                  (i.selector_type = 'machine' AND LOWER(h.machine_name_id) = LOWER(i.value))
-                  OR (i.selector_type = 'editor' AND LOWER(h.user_agent_id) = LOWER(i.value))
-                )
-            )
-          )
-        UNION
-        SELECT s.id AS slice_id, 'machine' AS selector_type, LOWER(h.machine_name_id) AS value, s.date
-        FROM day_project_entity_slices s
-        JOIN heartbeats h ON h.local_date = s.date
-          AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
-          AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
-        JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
-        WHERE hm.active = 1 AND h.machine_name_id IS NOT NULL AND h.machine_name_id != ''
-        UNION
-        SELECT s.id AS slice_id, 'editor' AS selector_type, LOWER(h.user_agent_id) AS value, s.date
-        FROM day_project_entity_slices s
-        JOIN heartbeats h ON h.local_date = s.date
-          AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
-          AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
-        JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
-        WHERE hm.active = 1 AND h.user_agent_id IS NOT NULL AND h.user_agent_id != ''
-      ) sub
-      WHERE 1=1
-    `;
-    const identParams: unknown[] = [];
-    if (filter?.date) {
-      identSql += ` AND sub.date = ?`;
-      identParams.push(filter.date);
-    }
-    if (filter?.startDate) {
-      identSql += ` AND sub.date >= ?`;
-      identParams.push(filter.startDate);
-    }
-    if (filter?.endDate) {
-      identSql += ` AND sub.date <= ?`;
-      identParams.push(filter.endDate);
-    }
-    identSql += ` ORDER BY sub.slice_id ASC, sub.selector_type ASC, sub.value ASC`;
-
-    const identRows = this.db.prepare(identSql).all(...identParams) as Array<{
+    let identRows: Array<{
       slice_id: number;
       selector_type: 'machine' | 'editor';
       value: string;
-    }>;
+    }> = [];
+
+    if (sliceRows.length > 0) {
+      let identSql = `
+        SELECT slice_id, selector_type, value FROM (
+          SELECT i.slice_id, i.selector_type, i.value, s.date
+          FROM slice_identities i
+          JOIN day_project_entity_slices s ON s.id = i.slice_id
+          WHERE i.selector_type IN ('machine', 'editor')
+            AND (
+              i.source != 'heartbeat'
+              OR EXISTS (
+                SELECT 1 FROM heartbeats h
+                JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
+                WHERE hm.active = 1
+                  AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
+                  AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
+                  AND (
+                    (i.selector_type = 'machine' AND LOWER(h.machine_name_id) = LOWER(i.value))
+                    OR (i.selector_type = 'editor' AND LOWER(h.user_agent_id) = LOWER(i.value))
+                  )
+              )
+            )
+          UNION
+          SELECT s.id AS slice_id, 'machine' AS selector_type, LOWER(h.machine_name_id) AS value, s.date
+          FROM day_project_entity_slices s
+          JOIN heartbeats h ON h.local_date = s.date
+            AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
+            AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
+          JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
+          WHERE hm.active = 1 AND h.machine_name_id IS NOT NULL AND h.machine_name_id != ''
+          UNION
+          SELECT s.id AS slice_id, 'editor' AS selector_type, LOWER(h.user_agent_id) AS value, s.date
+          FROM day_project_entity_slices s
+          JOIN heartbeats h ON h.local_date = s.date
+            AND (h.project_id = s.project_id OR (h.project_id IS NULL AND s.kind = 'unattributed_residual'))
+            AND (h.entity = s.entity OR s.kind = 'unattributed_residual')
+          JOIN heartbeat_memberships hm ON hm.heartbeat_id = h.id AND hm.date = s.date
+          WHERE hm.active = 1 AND h.user_agent_id IS NOT NULL AND h.user_agent_id != ''
+        ) sub
+        WHERE 1=1
+      `;
+      const identParams: unknown[] = [];
+      if (filter?.date) {
+        identSql += ` AND sub.date = ?`;
+        identParams.push(filter.date);
+      }
+      if (filter?.startDate) {
+        identSql += ` AND sub.date >= ?`;
+        identParams.push(filter.startDate);
+      }
+      if (filter?.endDate) {
+        identSql += ` AND sub.date <= ?`;
+        identParams.push(filter.endDate);
+      }
+      identSql += ` ORDER BY sub.slice_id ASC, sub.selector_type ASC, sub.value ASC`;
+
+      identRows = this.db.prepare(identSql).all(...identParams) as typeof identRows;
+    }
 
     const identitiesBySlice = new Map<number, { machineIds: string[]; editors: string[] }>();
     for (const r of identRows) {
@@ -2072,7 +2074,7 @@ export class SqliteClassificationService {
       SELECT id, date, project_id, entity, entity_type, kind, classification,
              allocated_seconds, timesheet_code, note, state, detached_at, reattached_at, created_at, updated_at
       FROM daily_time_allocations
-      WHERE state = 'active'
+      WHERE 1=1
     `;
     const allocParams: unknown[] = [];
     if (filter?.date) {
@@ -2089,12 +2091,16 @@ export class SqliteClassificationService {
     }
 
     const allocRows = this.db.prepare(allocSql).all(...allocParams) as DailyTimeAllocationRecord[];
-    const allocationsMap = new Map<string, DailyTimeAllocationRecord>();
+    const activeAllocationsMap = new Map<string, DailyTimeAllocationRecord>();
     for (const a of allocRows) {
-      allocationsMap.set(`${a.date}:${a.project_id}:${a.entity}:${a.entity_type}:${a.kind}`, a);
+      if (a.state === 'active') {
+        activeAllocationsMap.set(`${a.date}:${a.project_id}:${a.entity}:${a.entity_type}:${a.kind}`, a);
+      }
     }
 
-    return sliceRows.map((s) => {
+    const matchedActiveAllocationIds = new Set<string>();
+
+    const sliceItems = sliceRows.map((s) => {
       const idents = identitiesBySlice.get(s.id);
       const machineIds = (idents?.machineIds ?? []).slice().sort();
       const editors = (idents?.editors ?? []).slice().sort();
@@ -2120,8 +2126,11 @@ export class SqliteClassificationService {
       };
 
       const allocation =
-        allocationsMap.get(`${s.date}:${s.project_id}:${s.entity}:${s.entity_type}:${s.kind}`) ??
+        activeAllocationsMap.get(`${s.date}:${s.project_id}:${s.entity}:${s.entity_type}:${s.kind}`) ??
         null;
+      if (allocation) {
+        matchedActiveAllocationIds.add(allocation.id);
+      }
 
       return {
         id: s.id,
@@ -2136,6 +2145,88 @@ export class SqliteClassificationService {
         classifiableSlice
       };
     });
+
+    const detachedAllocations = allocRows.filter(
+      (a) => a.state === 'detached' || !matchedActiveAllocationIds.has(a.id)
+    );
+
+    let syntheticSlices: Array<{
+      id: number;
+      date: string;
+      projectId: number;
+      projectName: string | null;
+      entity: string;
+      entityType: 'file' | 'app' | 'domain' | 'unattributed';
+      totalSeconds: number;
+      isUnattributed: boolean;
+      allocation: DailyTimeAllocationRecord | null;
+      classifiableSlice: ClassifiableSlice;
+    }> = [];
+
+    if (detachedAllocations.length > 0) {
+      let projectMap = new Map<number, { name: string; is_unattributed: number }>();
+      try {
+        const pRows = this.db
+          .prepare(`SELECT id, name, is_unattributed FROM projects`)
+          .all() as Array<{ id: number; name: string; is_unattributed: number }>;
+        projectMap = new Map(pRows.map((p) => [p.id, p]));
+      } catch {}
+
+      const usedIds = new Set<number>(sliceRows.map((s) => s.id));
+      syntheticSlices = detachedAllocations.map((a) => {
+        const proj = projectMap.get(a.project_id);
+        const isUnattributed = Boolean(
+          a.entity_type === 'unattributed' ||
+          a.kind === 'unattributed_residual' ||
+          proj?.is_unattributed
+        );
+        const projectName = isUnattributed ? null : (proj?.name ?? null);
+        const entityType: 'file' | 'app' | 'domain' | 'unattributed' =
+          a.entity_type === 'app'
+            ? 'app'
+            : a.entity_type === 'domain'
+              ? 'domain'
+              : a.entity_type === 'unattributed' || isUnattributed
+                ? 'unattributed'
+                : 'file';
+
+        let hash = 0;
+        for (let i = 0; i < a.id.length; i++) {
+          hash = ((hash << 5) - hash) + a.id.charCodeAt(i);
+          hash |= 0;
+        }
+        let syntheticId = -Math.abs(hash === 0 ? 1 : hash);
+        while (usedIds.has(syntheticId)) {
+          syntheticId = -(Math.abs(syntheticId) + 1);
+        }
+        usedIds.add(syntheticId);
+
+        const classifiableSlice: ClassifiableSlice = {
+          id: String(syntheticId),
+          project: projectName,
+          entityType,
+          entity: a.entity,
+          machineIds: [],
+          editors: [],
+          kind: a.kind
+        };
+
+        return {
+          id: syntheticId,
+          date: a.date,
+          projectId: a.project_id,
+          projectName,
+          entity: a.entity,
+          entityType,
+          totalSeconds: 0,
+          isUnattributed,
+          allocation: a,
+          classifiableSlice
+        };
+      });
+    }
+
+    return [...sliceItems, ...syntheticSlices];
   }
 
   classifySlices(filter?: {
@@ -2312,6 +2403,35 @@ export class SqliteClassificationService {
     }
 
     return rawSlices.map((item) => {
+      const dq = dateQualityMap.get(item.date);
+
+      if (item.id < 0 || item.allocation?.state === 'detached') {
+        const decision: ClassificationDecision = {
+          classification: item.allocation ? item.allocation.classification : 'unclassified',
+          source: 'override',
+          winningRuleId: null,
+          competingRuleIds: []
+        };
+        return {
+          id: item.id,
+          date: item.date,
+          projectId: item.projectId,
+          projectName: item.projectName,
+          entity: item.entity,
+          entityType: item.entityType,
+          totalSeconds: 0,
+          isUnattributed: item.isUnattributed,
+          machineIds: (item.classifiableSlice.machineIds ?? []) as string[],
+          editors: (item.classifiableSlice.editors ?? []) as string[],
+          allocation: item.allocation,
+          decision,
+          disposition: 'detached',
+          qualityStatus: dq?.qualityStatus ?? null,
+          isStale: dq?.isStale ?? false,
+          isProvisional: dq?.isProvisional ?? false
+        };
+      }
+
       let decision: ClassificationDecision;
 
       if (
@@ -2355,8 +2475,6 @@ export class SqliteClassificationService {
           }
         }
       }
-
-      const dq = dateQualityMap.get(item.date);
 
       return {
         id: item.id,

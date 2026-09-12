@@ -110,7 +110,7 @@ export interface AdminSyncReadinessDto {
   discoveryReady: boolean;
   degradedCapabilities: string[];
   lastProbedAt: string | null;
-  sourceTimezone: string;
+  sourceTimezone: string | null;
 }
 
 export interface AdminSyncScheduleDto {
@@ -141,8 +141,8 @@ export interface AdminSyncActiveProgressDto {
 
 export interface AdminSyncRegistryDto {
   lastRefreshedAt: string | null;
-  entityCount: number;
-  projectCount: number;
+  totalEntries: number;
+  distinctEditors: number;
   isRefreshing: boolean;
 }
 
@@ -251,7 +251,7 @@ export interface SyncAdminData extends SyncViewData {
   registry: AdminSyncRegistryDto;
   runs: AdminSyncRunSummaryDto[];
   dates: AdminSyncDateDetailDto[];
-  sourceTimezone: string;
+  sourceTimezone: string | null;
   lastAcceptedSuccessAt: string | null;
 }
 
@@ -354,28 +354,28 @@ export function sanitizeErrorMessage(raw: unknown): string | null {
 }
 
 /**
- * Returns truthful source timezone from accepted database evidence.
+ * Returns truthful source timezone from accepted database evidence, or null if unavailable.
  */
-export function getVerifiedSourceTimezone(db: Database.Database): string {
+export function getVerifiedSourceTimezone(db: Database.Database): string | null {
   try {
     const layerRow = db
       .prepare(
-        `SELECT verified_timezone FROM sync_layer_state WHERE verified_timezone IS NOT NULL ORDER BY updated_at DESC LIMIT 1`
+        `SELECT verified_timezone FROM sync_layer_state WHERE verified_timezone IS NOT NULL AND verified_timezone != '' ORDER BY updated_at DESC LIMIT 1`
       )
       .get() as { verified_timezone: string } | undefined;
     if (layerRow?.verified_timezone) return layerRow.verified_timezone;
 
     const accountRow = db
-      .prepare(`SELECT timezone FROM account_settings LIMIT 1`)
+      .prepare(`SELECT timezone FROM account_settings WHERE timezone IS NOT NULL AND timezone != '' LIMIT 1`)
       .get() as { timezone: string } | undefined;
     if (accountRow?.timezone) return accountRow.timezone;
 
     const dailyRow = db
-      .prepare(`SELECT timezone FROM daily_totals WHERE timezone != 'UTC' ORDER BY date DESC LIMIT 1`)
+      .prepare(`SELECT timezone FROM daily_totals WHERE timezone IS NOT NULL AND timezone != '' ORDER BY date DESC LIMIT 1`)
       .get() as { timezone: string } | undefined;
     if (dailyRow?.timezone) return dailyRow.timezone;
   } catch {}
-  return 'UTC';
+  return null;
 }
 
 /**
@@ -392,7 +392,7 @@ export function getDateQualityProjection(
   db: Database.Database,
   date: string,
   now: Date = new Date(),
-  timezone?: string
+  timezone?: string | null
 ): DateQualityProjection {
   const tz = timezone ?? getVerifiedSourceTimezone(db);
   if (!isValidDateString(date)) {
@@ -406,8 +406,8 @@ export function getDateQualityProjection(
     };
   }
 
-  const todayStr = getTodayInTimezone(now, tz);
-  const isProvisional = date === todayStr;
+  const todayStr = tz ? getTodayInTimezone(now, tz) : null;
+  const isProvisional = todayStr ? date === todayStr : false;
 
   type DayRowRecord = {
     id: number;
@@ -525,8 +525,8 @@ export function getDateQualityProjection(
       hasRestriction: Boolean(l.has_restriction),
       hasFailure: Boolean(l.has_failure)
     };
-    const evaluation = evaluateDateFreshness(date, freshnessRecord, now, tz);
-    if (evaluation.isStale) {
+    const evaluation = evaluateDateFreshness(date, freshnessRecord, now, tz ?? 'UTC');
+    if (evaluation.isStale || !tz) {
       isStale = true;
     }
   }
@@ -534,6 +534,30 @@ export function getDateQualityProjection(
   if (!dayRow && layerRows.length === 0 && !dailyTotalsRow) {
     isStale = true;
   }
+  if (!dailyTotalsRow && (dayRow || layerRows.length > 0)) {
+    isStale = true;
+  }
+
+  const hasCompleteSummaryEvidence = Boolean(
+    summaryLayer &&
+    summaryLayer.accepted_source_reference &&
+    summaryLayer.accepted_content_hash &&
+    summaryLayer.accepted_fidelity &&
+    typeof summaryLayer.accepted_snapshot_version === 'number' &&
+    summaryLayer.accepted_snapshot_version > 0 &&
+    !summaryLayer.has_failure &&
+    !summaryLayer.has_restriction &&
+    !summaryLayer.unresolved_mismatch
+  );
+
+  const isVerifiedZero = Boolean(
+    dailyTotalsRow !== undefined &&
+    dailyTotalsRow.total_seconds === 0 &&
+    (summaryLayer?.accepted_fidelity === 'verified_zero' ||
+      advisoryCodes.includes(RECONCILE_CODES.VERIFIED_ZERO_ACCEPTED)) &&
+    summaryLayer?.last_success_at &&
+    hasCompleteSummaryEvidence
+  );
 
   let qualityStatus: QualityStatus;
 
@@ -573,14 +597,7 @@ export function getDateQualityProjection(
   ) {
     qualityStatus = 'archived_detail_preserved';
     isStale = true;
-  } else if (
-    (summaryLayer?.accepted_fidelity === 'verified_zero' ||
-      advisoryCodes.includes(RECONCILE_CODES.VERIFIED_ZERO_ACCEPTED)) &&
-    summaryLayer?.last_success_at &&
-    !summaryLayer.has_failure &&
-    !summaryLayer.has_restriction &&
-    !summaryLayer.unresolved_mismatch
-  ) {
+  } else if (isVerifiedZero) {
     qualityStatus = 'verified_zero';
   } else if (runMode === 'compare' || dayRow?.disposition === 'comparison_only') {
     qualityStatus = 'comparison_only';
@@ -616,7 +633,7 @@ export function getDatesQualityProjection(
   db: Database.Database,
   dates: string[],
   now: Date = new Date(),
-  timezone?: string
+  timezone?: string | null
 ): Map<string, DateQualityProjection> {
   const result = new Map<string, DateQualityProjection>();
   const tz = timezone ?? getVerifiedSourceTimezone(db);
@@ -773,23 +790,42 @@ export function getSyncAdminData(
     sourceTimezone
   };
 
-  let nextTickAt: string | null = null;
-  if (options?.runtime?.scheduler && typeof options.runtime.scheduler.getNextTickAt === 'function') {
-    nextTickAt = options.runtime.scheduler.getNextTickAt();
-  } else if (schedulingEnabled) {
-    const nextHour = new Date(now.getTime() + 60 * 60 * 1000);
-    nextHour.setMinutes(0, 0, 0);
-    nextTickAt = nextHour.toISOString();
-  }
-
-  const schedule: AdminSyncScheduleDto = {
+  const schedulerSurface = options?.runtime?.scheduler ?? (runtime as any).scheduler;
+  let schedule: AdminSyncScheduleDto = {
     enabled: schedulingEnabled,
-    lastTickAt: latestRun?.started_at ?? null,
-    nextTickAt,
-    lastEnqueuedRunId: latestRun?.id ?? null,
+    lastTickAt: null,
+    nextTickAt: null,
+    lastEnqueuedRunId: null,
     failureBackoffUntil: null,
-    activeRunId: activeRunRow?.id ?? null
+    activeRunId: null
   };
+
+  if (schedulerSurface) {
+    if (typeof schedulerSurface.getScheduleState === 'function') {
+      try {
+        const state = schedulerSurface.getScheduleState();
+        if (state) {
+          schedule = {
+            enabled: state.enabled ?? schedulingEnabled,
+            lastTickAt: state.lastTickAt ?? null,
+            nextTickAt: state.nextTickAt ?? null,
+            lastEnqueuedRunId: state.lastEnqueuedRunId ?? null,
+            failureBackoffUntil: state.failureBackoffUntil ?? null,
+            activeRunId: state.activeRunId ?? null
+          };
+        }
+      } catch {}
+    } else {
+      schedule = {
+        enabled: schedulingEnabled,
+        lastTickAt: typeof schedulerSurface.getLastTickAt === 'function' ? schedulerSurface.getLastTickAt() : null,
+        nextTickAt: typeof schedulerSurface.getNextTickAt === 'function' ? schedulerSurface.getNextTickAt() : null,
+        lastEnqueuedRunId: latestRun?.id ?? null,
+        failureBackoffUntil: typeof schedulerSurface.failureBackoffUntil === 'function' ? schedulerSurface.failureBackoffUntil() : null,
+        activeRunId: activeRunRow?.id ?? null
+      };
+    }
+  }
 
   let rateLimitedUntil: string | null = null;
   try {
@@ -822,7 +858,7 @@ export function getSyncAdminData(
     daysFailed: clampCount(r.days_failed),
     startedAt: truncateText(r.started_at, MAX_LABEL_LENGTH),
     finishedAt: truncateNullableText(r.finished_at, MAX_LABEL_LENGTH),
-    summary: truncateNullableText(r.summary),
+    summary: null,
     errorMessage: sanitizeErrorMessage(r.error_message),
     resumedFromRunId: r.resumed_from_run_id,
     degradedCapabilities: boundedCsvList(r.degraded_capabilities, MAX_SYNC_RUN_CODES),
@@ -881,8 +917,8 @@ export function getSyncAdminData(
 
   const registry: AdminSyncRegistryDto = {
     lastRefreshedAt: regRefreshRow?.last_refreshed ?? null,
-    entityCount: regCountRow?.total_entries ?? 0,
-    projectCount: regCountRow?.total_editors ?? 0,
+    totalEntries: regCountRow?.total_entries ?? 0,
+    distinctEditors: regCountRow?.total_editors ?? 0,
     isRefreshing: isRegistryRefreshing
   };
 
@@ -946,8 +982,8 @@ export function getSyncAdminData(
     daysFailed: clampCount(r.days_failed),
     degradedCapabilities: boundedCsvList(r.degraded_capabilities, MAX_SYNC_RUN_CODES),
     advisoryCodes: boundedCsvList(r.advisory_codes, MAX_SYNC_RUN_CODES),
-    summary: truncateNullableText(r.summary),
-    errorMessage: truncateNullableText(r.error_message)
+    summary: truncateNullableText(r.summary, MAX_DIAGNOSTIC_LENGTH),
+    errorMessage: truncateNullableText(r.error_message, MAX_DIAGNOSTIC_LENGTH)
   }));
 
   const syncDays: SyncDayItem[] = rawDays.map((d) => {
@@ -1140,7 +1176,7 @@ export function getSyncRunDetail(
     daysFailed: clampCount(runRow.days_failed),
     startedAt: truncateText(runRow.started_at, MAX_LABEL_LENGTH),
     finishedAt: truncateNullableText(runRow.finished_at, MAX_LABEL_LENGTH),
-    summary: truncateNullableText(runRow.summary),
+    summary: null,
     errorMessage: sanitizeErrorMessage(runRow.error_message),
     resumedFromRunId: runRow.resumed_from_run_id,
     degradedCapabilities: boundedCsvList(runRow.degraded_capabilities, MAX_SYNC_RUN_CODES),
@@ -1176,10 +1212,22 @@ export interface AdminSyncRuntimeSurface {
   readonly sync?: SyncService;
   readonly syncRepository?: SqliteSyncRepository;
   readonly scheduler?: {
+    getScheduleState?: () => {
+      enabled?: boolean;
+      lastTickAt?: string | null;
+      nextTickAt?: string | null;
+      lastEnqueuedRunId?: number | null;
+      failureBackoffUntil?: string | null;
+      activeRunId?: number | null;
+    };
     getNextTickAt?: () => string | null;
     getLastTickAt?: () => string | null;
     isPaused?: () => boolean;
     failureBackoffUntil?: () => string | null;
+    [key: string]: unknown;
+  };
+  readonly lifecycle?: {
+    getReadiness?: () => Promise<AdminSyncReadinessDto> | AdminSyncReadinessDto;
     [key: string]: unknown;
   };
   readonly getReadiness?: () => Promise<AdminSyncReadinessDto> | AdminSyncReadinessDto;
@@ -1197,10 +1245,11 @@ export class AdminSyncService {
   }
 
   get sync(): SyncService {
-    if (!this.runtimeSurface.sync) {
+    const s = this.runtimeSurface.sync ?? (runtime as any).sync;
+    if (!s) {
       throw new Error('SyncService is not configured on runtime');
     }
-    return this.runtimeSurface.sync;
+    return s;
   }
 
   getAdminData(options?: { limit?: number; now?: Date; timezone?: string }): SyncAdminData {
@@ -1233,6 +1282,10 @@ export class AdminSyncService {
   }
 
   async getReadiness(): Promise<AdminSyncReadinessDto> {
+    const lifecycleSurface = this.runtimeSurface.lifecycle ?? (runtime as any).lifecycle;
+    if (lifecycleSurface && typeof lifecycleSurface.getReadiness === 'function') {
+      return lifecycleSurface.getReadiness();
+    }
     if (this.runtimeSurface.getReadiness) {
       return this.runtimeSurface.getReadiness();
     }
@@ -1241,35 +1294,6 @@ export class AdminSyncService {
   }
 }
 
-// Injected test service handle
-let globalSyncService: SyncService | null = null;
-
-export function setSyncService(service: SyncService | null): void {
-  globalSyncService = service;
-}
-
-export function resetSyncService(): void {
-  globalSyncService = null;
-}
-
 export function getAdminSyncService(customRuntime?: AdminSyncRuntimeSurface): AdminSyncService {
-  if (customRuntime) {
-    return new AdminSyncService(customRuntime);
-  }
-  const rt = runtime as unknown as AdminSyncRuntimeSurface;
-  if (globalSyncService && rt.sync !== globalSyncService) {
-    return new AdminSyncService({ ...rt, sync: globalSyncService });
-  }
-  return new AdminSyncService(rt);
-}
-
-export function getSyncService(): SyncService {
-  if (globalSyncService) {
-    return globalSyncService;
-  }
-  const rt = runtime as unknown as AdminSyncRuntimeSurface;
-  if (rt.sync) {
-    return rt.sync;
-  }
-  throw new Error('SyncService is not configured on runtime');
+  return new AdminSyncService(customRuntime ?? (runtime as unknown as AdminSyncRuntimeSurface));
 }

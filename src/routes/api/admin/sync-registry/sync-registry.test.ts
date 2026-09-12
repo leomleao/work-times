@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { POST } from './refresh/+server.js';
+import { describe, it, expect } from 'vitest';
+import { POST, _createPostHandler as createPostHandler } from './refresh/+server.js';
 import { runtime } from '$lib/server/runtime';
 import { csrfTokenForSession } from '$lib/server/security/http';
-import { setSyncService, resetSyncService } from '$lib/server/admin/sync';
 import type { SyncService, RunRequest, RunStatus } from '$lib/server/sync/contracts';
 
 describe('/api/admin/sync-registry/refresh route', () => {
@@ -12,14 +11,6 @@ describe('/api/admin/sync-registry/refresh route', () => {
   const origin = publicUrl.origin;
   const validCsrf = csrfTokenForSession(validSessionToken, runtime.sessionSecret);
 
-  beforeEach(() => {
-    resetSyncService();
-  });
-
-  afterEach(() => {
-    resetSyncService();
-  });
-
   it('returns 401 when unauthenticated', async () => {
     const req = new Request('http://localhost:3000/api/admin/sync-registry/refresh', {
       method: 'POST',
@@ -27,6 +18,8 @@ describe('/api/admin/sync-registry/refresh route', () => {
     });
     const res = await POST({ locals: {} as any, request: req } as any);
     expect(res.status).toBe(401);
+    const data = await res.json();
+    expect(data).toEqual({ error: 'Unauthorized', code: 'UNAUTHORIZED' });
   });
 
   it('returns 403 on cross-origin request', async () => {
@@ -39,19 +32,29 @@ describe('/api/admin/sync-registry/refresh route', () => {
       request: req
     } as any);
     expect(res.status).toBe(403);
+    const data = await res.json();
+    expect(data).toEqual({ error: 'Forbidden', code: 'FORBIDDEN' });
   });
 
-  it('deduplicates against active registry run and returns 200 with queued: false', async () => {
-    runtime.db
-      .prepare(`INSERT INTO sync_runs (started_at, status, trigger, mode) VALUES ('2026-03-01T10:00:00.000Z', 'running', 'manual', 'registry')`)
-      .run();
+  it('deduplicates against active registry run and returns 200 with queued: false, status: retained', async () => {
+    let enqueuedReq: RunRequest | null = null;
+    const mockService: SyncService = {
+      enqueue: async (req: RunRequest) => {
+        enqueuedReq = req;
+        return { runId: 101, reused: true };
+      },
+      cancel: async () => 'cancelled' as RunStatus,
+      start: async () => {},
+      stop: async () => {}
+    };
+    const customPost = createPostHandler({ sync: mockService });
 
     const req = new Request('http://localhost:3000/api/admin/sync-registry/refresh', {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf }
     });
 
-    const res = await POST({
+    const res = await customPost({
       locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
       request: req
     } as any);
@@ -59,14 +62,13 @@ describe('/api/admin/sync-registry/refresh route', () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.queued).toBe(false);
-    expect(data.status).toBe('published');
+    expect(data.status).toBe('retained');
     expect(data).toHaveProperty('lastRefreshAt');
+    expect(enqueuedReq!.mode).toBe('registry');
+    expect(enqueuedReq!.idempotencyKey).toMatch(/^registry-refresh-gen/);
   });
 
-  it('enqueues registry run when not already running and returns 202 with queued: true', async () => {
-    // Clear any running registry runs
-    runtime.db.prepare(`DELETE FROM sync_runs WHERE mode = 'registry'`).run();
-
+  it('enqueues registry run when not already running and returns 202 with queued: true, status: retained', async () => {
     let enqueuedReq: RunRequest | null = null;
     const mockService: SyncService = {
       enqueue: async (req: RunRequest) => {
@@ -77,14 +79,14 @@ describe('/api/admin/sync-registry/refresh route', () => {
       start: async () => {},
       stop: async () => {}
     };
-    setSyncService(mockService);
+    const customPost = createPostHandler({ sync: mockService });
 
     const req = new Request('http://localhost:3000/api/admin/sync-registry/refresh', {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf }
     });
 
-    const res = await POST({
+    const res = await customPost({
       locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
       request: req
     } as any);
@@ -92,7 +94,9 @@ describe('/api/admin/sync-registry/refresh route', () => {
     expect(res.status).toBe(202);
     const data = await res.json();
     expect(data.queued).toBe(true);
-    expect(data.status).toBe('published');
+    expect(data.status).toBe('retained');
     expect(enqueuedReq!.mode).toBe('registry');
+    expect(enqueuedReq!.idempotencyKey).toMatch(/^registry-refresh-gen/);
   });
 });
+

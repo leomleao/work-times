@@ -86,27 +86,27 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
     this.configuredTimezone = options?.timezone;
   }
 
-  private getSourceTimezone(): string {
+  private getSourceTimezone(): string | null {
     if (this.configuredTimezone) return this.configuredTimezone;
     try {
       const layerRow = this.db
         .prepare(
-          `SELECT verified_timezone FROM sync_layer_state WHERE verified_timezone IS NOT NULL ORDER BY updated_at DESC LIMIT 1`
+          `SELECT verified_timezone FROM sync_layer_state WHERE verified_timezone IS NOT NULL AND verified_timezone != '' ORDER BY updated_at DESC LIMIT 1`
         )
         .get() as { verified_timezone: string } | undefined;
       if (layerRow?.verified_timezone) return layerRow.verified_timezone;
 
       const acct = this.db
-        .prepare(`SELECT timezone FROM account_settings LIMIT 1`)
+        .prepare(`SELECT timezone FROM account_settings WHERE timezone IS NOT NULL AND timezone != '' LIMIT 1`)
         .get() as { timezone: string } | undefined;
       if (acct?.timezone) return acct.timezone;
 
       const daily = this.db
-        .prepare(`SELECT timezone FROM daily_totals WHERE timezone != 'UTC' ORDER BY date DESC LIMIT 1`)
+        .prepare(`SELECT timezone FROM daily_totals WHERE timezone IS NOT NULL AND timezone != '' ORDER BY date DESC LIMIT 1`)
         .get() as { timezone: string } | undefined;
       if (daily?.timezone) return daily.timezone;
     } catch {}
-    return 'UTC';
+    return null;
   }
 
   private fetchProjectBreakdown(
@@ -152,6 +152,8 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
     }
 
     let rows: Array<Record<string, unknown>> = [];
+    let dailyTotalsRows: Array<{ date: string; total_seconds: number }> = [];
+    let queryError = false;
     try {
       const placeholders = dates.map(() => '?').join(',');
       rows = this.db
@@ -165,17 +167,24 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
            WHERE layer = 'summaries' AND date IN (${placeholders})`
         )
         .all(...dates) as Array<Record<string, unknown>>;
-    } catch {
-      rows = [];
-    }
 
-    let dailyTotalsRows: Array<{ date: string; total_seconds: number }> = [];
-    try {
-      const placeholders = dates.map(() => '?').join(',');
       dailyTotalsRows = this.db
         .prepare(`SELECT date, total_seconds FROM daily_totals WHERE date IN (${placeholders})`)
         .all(...dates) as typeof dailyTotalsRows;
-    } catch {}
+    } catch {
+      queryError = true;
+    }
+
+    if (queryError) {
+      return {
+        asOf: null,
+        hasMissingDays: true,
+        hasStaleDays: true,
+        hasLimitedDetail: false,
+        advisoryCodes: ['DATA_UNAVAILABLE']
+      };
+    }
+
     const dailyTotalsMap = new Map<string, number>();
     for (const d of dailyTotalsRows) {
       dailyTotalsMap.set(d.date, d.total_seconds);
@@ -195,7 +204,17 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
     const now = this.getNow();
     const timezone = this.getSourceTimezone();
 
+    if (!timezone) {
+      hasIncompleteSummary = true;
+      advisories.add('TIMEZONE_UNAVAILABLE');
+    }
+
     for (const date of dates) {
+      if (!dailyTotalsMap.has(date)) {
+        hasIncompleteSummary = true;
+        advisories.add('STALE_MISSING_COVERAGE');
+      }
+
       const row = rowMap.get(date);
       if (!row || !row.last_success_at) {
         hasMissingDays = true;
@@ -238,10 +257,26 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
         advisories.add(RECONCILE_CODES.DETAIL_DOWNGRADE);
       }
 
-      const dayTotalSeconds = dailyTotalsMap.get(date);
-      if (dayTotalSeconds === 0 && row.accepted_fidelity !== 'verified_zero') {
+      const hasRequiredSummaryEvidence = Boolean(
+        row.accepted_source_reference &&
+        row.accepted_content_hash &&
+        row.accepted_fidelity &&
+        typeof row.accepted_snapshot_version === 'number' &&
+        row.accepted_snapshot_version > 0 &&
+        !row.has_failure &&
+        !row.has_restriction &&
+        !row.unresolved_mismatch
+      );
+      if (!hasRequiredSummaryEvidence) {
         hasIncompleteSummary = true;
-        advisories.add('UNVERIFIED_ZERO');
+      }
+
+      const dayTotalSeconds = dailyTotalsMap.get(date);
+      if (dayTotalSeconds === 0) {
+        if (row.accepted_fidelity !== 'verified_zero' || !hasRequiredSummaryEvidence) {
+          hasIncompleteSummary = true;
+          advisories.add('UNVERIFIED_ZERO');
+        }
       }
 
       if (row.evidence_matches_summary === 0) {
@@ -272,7 +307,7 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
         hasFailure: Boolean(row.has_failure)
       };
 
-      const evalResult = evaluateDateFreshness(date, freshnessRecord, now, timezone);
+      const evalResult = evaluateDateFreshness(date, freshnessRecord, now, timezone ?? 'UTC');
       const isAgeOrUnresolvedStale = evalResult.reasons.some(
         (r) =>
           r !== RECONCILE_CODES.CURRENT_DAY_PROVISIONAL &&
@@ -316,13 +351,18 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
       asOf = verificationTimestamps[0];
     }
 
-    return sanitizeMcpDataQuality({
+    const sanitized = sanitizeMcpDataQuality({
       asOf,
       hasMissingDays,
       hasStaleDays,
       hasLimitedDetail,
       advisoryCodes: Array.from(advisories)
     });
+    const extraCodes = Array.from(advisories).filter((c) => c === 'UNVERIFIED_ZERO' || c === 'DATA_UNAVAILABLE');
+    return {
+      ...sanitized,
+      advisoryCodes: [...new Set([...sanitized.advisoryCodes, ...extraCodes])]
+    };
   }
 
   async getRangeSummary(input: { start: string; end: string }): Promise<WorkRangeSummary> {

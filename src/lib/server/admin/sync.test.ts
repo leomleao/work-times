@@ -7,9 +7,9 @@ import {
   getSyncAdminData,
   getSyncRunDetail,
   getSyncData,
-  setSyncService,
-  resetSyncService,
-  getSyncService
+  getAdminSyncService,
+  getVerifiedSourceTimezone,
+  AdminSyncService
 } from './sync.js';
 import type { SyncService, RunRequest, RunStatus } from '../sync/contracts.js';
 
@@ -154,16 +154,26 @@ describe('Admin Sync Backend', () => {
           os TEXT NOT NULL,
           refreshed_at TEXT NOT NULL
         );
+
+        CREATE TABLE account_settings (
+          timezone TEXT NOT NULL
+        );
+
+        CREATE TABLE daily_totals (
+          date TEXT PRIMARY KEY,
+          total_seconds REAL NOT NULL DEFAULT 0.0,
+          timezone TEXT NOT NULL
+        );
       `);
     });
 
     afterEach(() => {
       db.close();
-      resetSyncService();
     });
 
     it('projects quality status correctly for various date states', () => {
       const now = new Date('2026-03-01T12:00:00.000Z');
+      db.exec(`INSERT INTO account_settings (timezone) VALUES ('Europe/London');`);
 
       // 1. Missing date -> missing
       const missingProj = getDateQualityProjection(db, '2026-02-15', now);
@@ -215,8 +225,9 @@ describe('Admin Sync Backend', () => {
         INSERT INTO sync_runs (id, started_at, status) VALUES (4, '2026-03-01T11:30:00.000Z', 'succeeded');
         INSERT INTO sync_days (id, sync_run_id, date, status, synced_at, total_seconds, advisory_codes_json)
         VALUES (4, 4, '2026-02-27', 'succeeded', '2026-03-01T11:30:00.000Z', 0, '["VERIFIED_ZERO_ACCEPTED"]');
-        INSERT INTO sync_layer_state (date, layer, last_success_at, updated_at, verified_timezone)
-        VALUES ('2026-02-27', 'summaries', '2026-03-01T11:30:00.000Z', '2026-03-01T11:30:00.000Z', 'Europe/London');
+        INSERT INTO sync_layer_state (date, layer, last_success_at, updated_at, verified_timezone, accepted_fidelity, accepted_source_reference, accepted_content_hash, accepted_snapshot_version)
+        VALUES ('2026-02-27', 'summaries', '2026-03-01T11:30:00.000Z', '2026-03-01T11:30:00.000Z', 'Europe/London', 'verified_zero', 'ref-0', 'hash-0', 1);
+        INSERT INTO daily_totals (date, total_seconds, timezone) VALUES ('2026-02-27', 0, 'Europe/London');
       `);
       const emptyProj = getDateQualityProjection(db, '2026-02-27', now);
       expect(emptyProj.qualityStatus).toBe('verified_zero');
@@ -228,6 +239,7 @@ describe('Admin Sync Backend', () => {
         VALUES (5, 5, '2026-02-26', 'succeeded', 'succeeded', 'succeeded', 'succeeded', '2026-03-01T11:45:00.000Z', 7200);
         INSERT INTO sync_layer_state (date, layer, last_success_at, updated_at, verified_timezone)
         VALUES ('2026-02-26', 'summaries', '2026-03-01T11:45:00.000Z', '2026-03-01T11:45:00.000Z', 'Europe/London');
+        INSERT INTO daily_totals (date, total_seconds, timezone) VALUES ('2026-02-26', 7200, 'Europe/London');
       `);
       const verifiedProj = getDateQualityProjection(db, '2026-02-26', now);
       expect(verifiedProj.qualityStatus).toBe('updated');
@@ -236,6 +248,7 @@ describe('Admin Sync Backend', () => {
 
     it('batch projects multiple dates via getDatesQualityProjection', () => {
       const now = new Date('2026-03-01T12:00:00.000Z');
+      db.exec(`INSERT INTO account_settings (timezone) VALUES ('Europe/London');`);
       const map = getDatesQualityProjection(db, ['2026-02-26', '2026-03-01'], now);
       expect(map.size).toBe(2);
       expect(map.get('2026-03-01')?.isProvisional).toBe(true);
@@ -270,10 +283,10 @@ describe('Admin Sync Backend', () => {
       expect(adminData.readiness.discoveryReady).toBe(true);
 
       expect(adminData.schedule.enabled).toBe(true);
-      expect(adminData.schedule.lastEnqueuedRunId).toBe(1);
+      expect(adminData.schedule.lastEnqueuedRunId).toBeNull();
 
-      expect(adminData.registry.entityCount).toBe(1);
-      expect(adminData.registry.projectCount).toBe(1);
+      expect(adminData.registry.totalEntries).toBe(1);
+      expect(adminData.registry.distinctEditors).toBe(1);
 
       expect(adminData.runs).toHaveLength(1);
       expect(adminData.runs[0].id).toBe(1);
@@ -316,7 +329,7 @@ describe('Admin Sync Backend', () => {
       expect(getSyncRunDetail(db, 999)).toBeNull();
     });
 
-    it('manages service getter/setter correctly', () => {
+    it('resolves sync service via AdminSyncService with test seams', async () => {
       const mockService: SyncService = {
         enqueue: async (req: RunRequest) => ({ runId: 100, reused: false }),
         cancel: async (id: number) => 'cancelled' as RunStatus,
@@ -324,11 +337,68 @@ describe('Admin Sync Backend', () => {
         stop: async () => {}
       };
 
-      setSyncService(mockService);
-      expect(getSyncService()).toBe(mockService);
+      const adminService = getAdminSyncService({
+        db,
+        config: {} as any,
+        sync: mockService
+      });
 
-      resetSyncService();
-      expect(() => getSyncService()).toThrow();
+      expect(adminService.sync).toBe(mockService);
+      const res = await adminService.enqueue({ mode: 'recent', trigger: 'manual', idempotencyKey: 'k' });
+      expect(res.runId).toBe(100);
+    });
+
+    it('returns null for getVerifiedSourceTimezone when no timezone evidence exists in DB', () => {
+      expect(getVerifiedSourceTimezone(db)).toBeNull();
+    });
+
+    it('populates schedule state from scheduler.getScheduleState and avoids fake fallback', () => {
+      const mockScheduler = {
+        getScheduleState: () => ({
+          enabled: true,
+          lastTickAt: '2026-03-01T09:00:00.000Z',
+          nextTickAt: '2026-03-01T10:00:00.000Z',
+          lastEnqueuedRunId: 42,
+          failureBackoffUntil: null,
+          activeRunId: null
+        })
+      };
+
+      const dataWithScheduler = getSyncAdminData(db, {
+        runtime: { db, config: {} as any, scheduler: mockScheduler }
+      });
+      expect(dataWithScheduler.schedule.nextTickAt).toBe('2026-03-01T10:00:00.000Z');
+      expect(dataWithScheduler.schedule.lastEnqueuedRunId).toBe(42);
+
+      // When scheduler is absent, nextTickAt must be null (never computed next-UTC-hour)
+      const dataWithoutScheduler = getSyncAdminData(db);
+      expect(dataWithoutScheduler.schedule.nextTickAt).toBeNull();
+    });
+
+    it('requires complete summary evidence and daily_totals for verified_zero', () => {
+      // Incomplete summary evidence (missing hash and fidelity)
+      db.exec(`
+        INSERT INTO sync_layer_state (layer, date, last_success_at, updated_at, has_failure, has_restriction, unresolved_mismatch)
+        VALUES ('summaries', '2026-03-01', '2026-03-01T12:00:00.000Z', '2026-03-01T12:00:00.000Z', 0, 0, 0);
+      `);
+
+      const q1 = getDateQualityProjection(db, '2026-03-01', new Date('2026-03-01T14:00:00.000Z'), 'UTC');
+      expect(q1.qualityStatus).not.toBe('verified_zero');
+
+      // Add complete required layer evidence and daily_totals = 0
+      db.exec(`
+        UPDATE sync_layer_state
+        SET accepted_fidelity = 'verified_zero',
+            accepted_source_reference = 'ref-1',
+            accepted_content_hash = 'hash-1',
+            accepted_snapshot_version = 1
+        WHERE layer = 'summaries' AND date = '2026-03-01';
+        INSERT INTO daily_totals (date, total_seconds, timezone)
+        VALUES ('2026-03-01', 0, 'UTC');
+      `);
+
+      const q2 = getDateQualityProjection(db, '2026-03-01', new Date('2026-03-01T14:00:00.000Z'), 'UTC');
+      expect(q2.qualityStatus).toBe('verified_zero');
     });
   });
 });

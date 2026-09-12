@@ -356,19 +356,37 @@ describe('SqliteWorkOnlyAnalytics - Sentinel Privacy Tests', () => {
     expect(unverifiedSummary.dataQuality.asOf).toBeNull();
     expect(unverifiedSummary.dataQuality.hasStaleDays).toBe(true);
 
-    // 2. Insert verified layer state for 2026-03-01 and 2026-03-02
+    // 2. Insert verified layer state and daily totals for 2026-03-01 and 2026-03-02
     const ts1 = '2026-03-01T12:00:00.000Z';
     const ts2 = '2026-03-02T15:00:00.000Z';
 
     db.prepare(`
+      INSERT OR REPLACE INTO account_settings (wakatime_user_id, timezone, weekday_start, keystroke_timeout_seconds, writes_only, plan, has_premium_features, updated_at)
+      VALUES ('user_1', 'UTC', 1, 120, 0, 'free', 0, '2026-03-01T00:00:00.000Z')
+    `).run();
+
+    db.prepare(`
+      INSERT INTO daily_totals (date, total_seconds, timezone, grand_total_json, source_import_id, source_hash) VALUES
+        ('2026-03-01', 3600, 'UTC', '{}', 1, 'h1'),
+        ('2026-03-02', 3600, 'UTC', '{}', 1, 'h2')
+      ON CONFLICT(date) DO UPDATE SET total_seconds = excluded.total_seconds, timezone = excluded.timezone
+    `).run();
+
+    db.prepare(`
       INSERT INTO sync_layer_state (
-        date, layer, last_attempt_at, last_success_at, accepted_fidelity, updated_at
+        date, layer, last_attempt_at, last_success_at, accepted_fidelity,
+        accepted_source_reference, accepted_content_hash, accepted_snapshot_version,
+        verified_timezone, updated_at
       ) VALUES
-        ('2026-03-01', 'summaries', ?, ?, 'entity_detail', ?),
-        ('2026-03-02', 'summaries', ?, ?, 'entity_detail', ?)
+        ('2026-03-01', 'summaries', ?, ?, 'entity_detail', 'src_ref_1', 'hash_1', 1, 'UTC', ?),
+        ('2026-03-02', 'summaries', ?, ?, 'entity_detail', 'src_ref_2', 'hash_2', 1, 'UTC', ?)
       ON CONFLICT(date, layer) DO UPDATE SET
         last_success_at = excluded.last_success_at,
-        accepted_fidelity = excluded.accepted_fidelity
+        accepted_fidelity = excluded.accepted_fidelity,
+        accepted_source_reference = excluded.accepted_source_reference,
+        accepted_content_hash = excluded.accepted_content_hash,
+        accepted_snapshot_version = excluded.accepted_snapshot_version,
+        verified_timezone = excluded.verified_timezone
     `).run(ts1, ts1, ts1, ts2, ts2, ts2);
 
     const verifiedSummary = await analytics.getRangeSummary({
@@ -403,5 +421,71 @@ describe('SqliteWorkOnlyAnalytics - Sentinel Privacy Tests', () => {
     expect(qualityJson).not.toContain('confidential');
     expect(qualityJson).not.toContain('tax-return');
     expect(qualityJson).not.toContain('personal');
+  });
+
+  it('fails closed with DATA_UNAVAILABLE when database errors during dataQuality calculation', async () => {
+    // Drop or rename sync_layer_state to trigger SQL error inside computeDataQuality
+    db.prepare('ALTER TABLE sync_layer_state RENAME TO sync_layer_state_backup').run();
+
+    const summary = await analytics.getRangeSummary({
+      start: '2026-03-01',
+      end: '2026-03-02'
+    });
+
+    expect(summary.dataQuality.asOf).toBeNull();
+    expect(summary.dataQuality.hasMissingDays).toBe(true);
+    expect(summary.dataQuality.hasStaleDays).toBe(true);
+    expect(summary.dataQuality.advisoryCodes).toContain('DATA_UNAVAILABLE');
+
+    // Restore table
+    db.prepare('ALTER TABLE sync_layer_state_backup RENAME TO sync_layer_state').run();
+  });
+
+  it('fails closed with TIMEZONE_UNAVAILABLE and asOf null when timezone cannot be verified', async () => {
+    db.prepare('DELETE FROM account_settings').run();
+    db.prepare('UPDATE sync_layer_state SET verified_timezone = NULL').run();
+    db.prepare('UPDATE daily_totals SET timezone = NULL').run();
+
+    const summary = await analytics.getRangeSummary({
+      start: '2026-03-01',
+      end: '2026-03-02'
+    });
+
+    expect(summary.dataQuality.asOf).toBeNull();
+    expect(summary.dataQuality.advisoryCodes).toContain('TIMEZONE_UNAVAILABLE');
+  });
+
+  it('enforces verified_zero requires explicit verified_zero evidence', async () => {
+    // Seed timezone
+    db.prepare(`
+      INSERT OR REPLACE INTO account_settings (wakatime_user_id, timezone, weekday_start, keystroke_timeout_seconds, writes_only, plan, has_premium_features, updated_at)
+      VALUES ('user_1', 'UTC', 1, 120, 0, 'free', 0, '2026-03-01T00:00:00.000Z')
+    `).run();
+
+    // Day with 0 total seconds
+    db.prepare(`
+      INSERT OR REPLACE INTO daily_totals (date, total_seconds, timezone, grand_total_json, source_import_id, source_hash)
+      VALUES ('2026-03-10', 0, 'UTC', '{}', 1, 'h_zero')
+    `).run();
+
+    // Layer state with entity_detail but NOT verified_zero
+    db.prepare(`
+      INSERT OR REPLACE INTO sync_layer_state (
+        date, layer, last_attempt_at, last_success_at, accepted_fidelity,
+        accepted_source_reference, accepted_content_hash, accepted_snapshot_version,
+        verified_timezone, updated_at
+      ) VALUES (
+        '2026-03-10', 'summaries', '2026-03-10T10:00:00.000Z', '2026-03-10T10:00:00.000Z',
+        'entity_detail', 'ref', 'hash', 1, 'UTC', '2026-03-10T10:00:00.000Z'
+      )
+    `).run();
+
+    const summary = await analytics.getRangeSummary({
+      start: '2026-03-10',
+      end: '2026-03-10'
+    });
+
+    expect(summary.dataQuality.asOf).toBeNull();
+    expect(summary.dataQuality.advisoryCodes).toContain('UNVERIFIED_ZERO');
   });
 });
