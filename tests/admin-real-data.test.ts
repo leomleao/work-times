@@ -932,16 +932,16 @@ describe('Admin Real Data & Behavioral View Models (tests/admin-real-data.test.t
       expect(dirty.syncDays[0].heartbeatsStatus).toBe('skipped');
     });
 
-    it('truncates untrusted sync diagnostics and strips control characters', () => {
+    it('maps untrusted sync diagnostics to allowlisted codes without raw text', () => {
       db.prepare(
         `INSERT INTO sync_runs (id, started_at, trigger, status, day_count, days_synced, days_failed, summary, error_message)
          VALUES (1, '2026-09-01T00:00:00Z', 'manual', 'failed', 1, 0, 1, ?, ?)`
       ).run('s'.repeat(9000), 'line one\nline two\u0007bell');
 
       const run = getSyncData(db, mockConfig).syncRuns[0];
-      expect((run.summary ?? '').length).toBeLessThanOrEqual(501);
-      expect(run.errorMessage).toBe('line one line two bell');
-      expect(run.errorMessage).not.toContain('\n');
+      expect(run.summary).toBeNull();
+      expect(run.errorMessage).toBe('UPSTREAM_ERROR');
+      expect(JSON.stringify(run)).not.toContain('line one');
     });
 
     it('rejects a capability policy state that is not the expected shape', () => {
