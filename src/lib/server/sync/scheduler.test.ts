@@ -530,8 +530,86 @@ describe('SyncScheduler', () => {
       expect(catchup).toBeDefined();
       expect(catchup?.dates).toContain('2026-08-20'); // unfinished date
       expect(catchup?.dates).toContain('2026-08-25'); // retryable date
+    });
 
-      // Clean up and test cursor persistence
+    it('SyncScheduler.start evaluates startup catch-up on every enabled unpaused boot with seeded archive and no cursor', async () => {
+      const fakeNow = new Date('2026-09-10T12:00:00.000Z');
+      const { scheduler, db, coordinator } = setupTestEnvironment({
+        now: () => fakeNow,
+        pinnedTimezone: 'Europe/London'
+      });
+
+      // Seeded archive with NO existing cursor
+      scheduler['setAppSetting'](SETTINGS_KEYS.SEEDED, 'true');
+      scheduler['deleteAppSetting'](SETTINGS_KEYS.CATCHUP_CURSOR);
+
+      // Seed standard policy window dates except 2026-09-07 (uncovered recent-window date)
+      db.prepare(`
+        INSERT INTO sync_runs (id, started_at, status, trigger, mode)
+        VALUES (1, '2026-09-09T00:00:00Z', 'succeeded', 'scheduled', 'recent')
+      `).run();
+      const insertSyncDay = db.prepare(`
+        INSERT INTO sync_days (sync_run_id, date, status, synced_at)
+        VALUES (1, ?, 'succeeded', '2026-09-09T00:00:00Z')
+      `);
+      for (const d of ['2026-09-09', '2026-09-08', '2026-09-06', '2026-09-05', '2026-09-04']) {
+        insertSyncDay.run(d);
+      }
+
+      // Dump-accepted date: 2026-08-15 in daily_totals but lacking sync_days.
+      // Must NOT be requeued merely for lacking sync_days.
+      db.prepare(`
+        INSERT INTO source_imports (id, source_type, source_hash, byte_size, started_at, status, dry_run, day_count, record_count, duplicate_count, conflict_count)
+        VALUES (10, 'daily_dump', 'hash-dump-1', 1024, '2026-09-01T00:00:00Z', 'completed', 0, 1, 1, 0, 0)
+      `).run();
+      db.prepare(`
+        INSERT INTO daily_totals (date, timezone, total_seconds, project_sum_seconds, project_sum_delta, grand_total_json, source_import_id, source_hash)
+        VALUES ('2026-08-15', 'Europe/London', 3600, 3600, 0, '{}', 10, 'hash-dump-1')
+      `).run();
+
+      // Due retryable failure: 2026-08-25 in sync_layer_state with next_retry_at in past
+      db.prepare(`
+        INSERT INTO sync_layer_state (date, layer, has_failure, next_retry_at, updated_at)
+        VALUES ('2026-08-25', 'summaries', 1, '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+      `).run();
+
+      // Unfinished date: 2026-08-20 in sync_days with status = 'interrupted'
+      db.prepare(`
+        INSERT INTO sync_runs (id, started_at, status, trigger, mode)
+        VALUES (50, '2026-09-09T00:00:00Z', 'interrupted', 'scheduled', 'recent')
+      `).run();
+      db.prepare(`
+        INSERT INTO sync_days (sync_run_id, date, status, synced_at)
+        VALUES (50, '2026-08-20', 'interrupted', '2026-09-09T00:00:00Z')
+      `).run();
+
+      // Boot scheduler via start(): must evaluate startup catch-up even without existing cursor
+      await scheduler.start();
+
+      expect(coordinator.enqueuedRequests.length).toBeGreaterThan(0);
+      const catchupReq = coordinator.enqueuedRequests.find((r) => r.trigger === 'catchup');
+      expect(catchupReq).toBeDefined();
+      expect(catchupReq?.mode).toBe('retry');
+
+      const dates = catchupReq?.retryDates ?? [];
+      // 1. Uncovered recent-window date MUST be included:
+      expect(dates).toContain('2026-09-07');
+      // 2. Due retryable failure MUST be included:
+      expect(dates).toContain('2026-08-25');
+      // 3. Unfinished date MUST be included:
+      expect(dates).toContain('2026-08-20');
+      // 4. Dump-accepted date lacking sync_days MUST NOT be requeued!
+      expect(dates).not.toContain('2026-08-15');
+
+      // 5. Priority order: today & yesterday first, then uncovered recent-window, then older work
+      expect(dates[0]).toBe('2026-09-10'); // today
+      expect(dates[1]).toBe('2026-09-09'); // yesterday
+      expect(dates[2]).toBe('2026-09-07'); // uncovered recent window date
+
+      // 6. Max 31 and yields
+      expect(dates.length).toBeLessThanOrEqual(31);
+
+      await scheduler.stop();
     });
 
     it('persists continuation cursor only after durable enqueue succeeds', async () => {

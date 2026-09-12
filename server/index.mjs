@@ -60,23 +60,31 @@ async function shutdown(signal) {
   }, SHUTDOWN_DEADLINE_MS);
   if (timeoutTimer.unref) timeoutTimer.unref();
 
-  // 1. Stop accepting new HTTP connections and drain in-flight HTTP requests first
-  await new Promise((resolve) => {
-    if (server?.server?.close) {
-      server.server.close((error) => {
-        if (error) {
-          process.stderr.write(`${JSON.stringify({ event: 'server.http_close_error' })}\n`);
+  // Stop HTTP intake and define drain of genuinely in-flight HTTP requests
+  const drainHttp = () =>
+    new Promise((resolve) => {
+      if (server?.server?.close) {
+        if (typeof server.server.closeIdleConnections === 'function') {
+          server.server.closeIdleConnections();
         }
+        server.server.close((error) => {
+          if (error) {
+            process.stderr.write(`${JSON.stringify({ event: 'server.http_close_error' })}\n`);
+          }
+          resolve();
+        });
+      } else {
         resolve();
-      });
-    } else {
-      resolve();
-    }
-  });
+      }
+    });
 
-  // 2. Stop runtime lifecycle after HTTP drain so in-flight requests cannot use a closed DB
+  // Signal ordering matching milestone 3.4:
+  // 1. Stop HTTP intake & runtime work/timers (scheduler & coordinator stop, active run interrupted, queue preserved)
+  // 2. Drain genuinely in-flight HTTP requests while DB remains open
+  // 3. Close database after consumers stop
+  // 4. Release ownership lock
   try {
-    await lifecycle.stop('shutdown', SHUTDOWN_DEADLINE_MS - 4000);
+    await lifecycle.stop('shutdown', SHUTDOWN_DEADLINE_MS - 4000, drainHttp);
     clearTimeout(timeoutTimer);
     process.stdout.write(`${JSON.stringify({ event: 'server.stopped' })}\n`);
     process.exit(0);

@@ -402,6 +402,93 @@ describe('Lifecycle and Ownership Contracts (P7)', () => {
       expect(isolatedRuntime.lifecycle.getReadiness().ready).toBe(false);
       expect(isolatedRuntime.lifecycle.getReadiness().ownershipLockHeld).toBe(false);
     });
+
+    it('quiesces services, releases lock, closes DB, exposes allowlisted code, and permits later acquire on startup failure', async () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-startup-fail-'));
+      const dbPath = path.join(tempDir, 'test-fail.db');
+
+      const isolatedRuntime = createRuntime({
+        databasePath: dbPath,
+        wakatimeOAuthClientId: null,
+        wakatimeOAuthClientSecret: null,
+        adminUsername: 'admin',
+        adminPasswordHash: null,
+        sessionSecret: '0123456789abcdef0123456789abcdef',
+        publicUrl: parsePublicUrl('http://localhost:3002'),
+        cookieSecure: false,
+        maxDirectImportBytes: 10 * 1024 * 1024
+      });
+
+      // Inject a failure during coordinator.start (after lock acquisition)
+      const originalStart = isolatedRuntime.coordinator.start.bind(isolatedRuntime.coordinator);
+      let shouldFail = true;
+      isolatedRuntime.coordinator.start = async () => {
+        if (shouldFail) {
+          throw new Error('Injected coordinator crash during startup');
+        }
+        return originalStart();
+      };
+
+      // 1. Startup fails after lock acquisition
+      await expect(isolatedRuntime.lifecycle.start()).rejects.toThrow(
+        'Injected coordinator crash during startup'
+      );
+
+      // 2. Readiness is cleared with allowlisted error code
+      const readiness = isolatedRuntime.getReadiness();
+      expect(readiness.ready).toBe(false);
+      expect(readiness.state).toBe('failed');
+      expect(readiness.ownershipLockHeld).toBe(false);
+      expect(readiness.errorCode).toBe('COORDINATOR_FAILED');
+
+      // 3. Services quiesced and DB closed safely
+      expect(isolatedRuntime.scheduler.isRunning()).toBe(false);
+      expect(isolatedRuntime.coordinator.isRunning()).toBe(false);
+      expect(isolatedRuntime.db.open).toBe(false);
+
+      // 4. Lock was released: another process/lock can acquire immediately
+      const siblingLock = new FsExtProcessLock(dbPath);
+      const siblingAcquired = await siblingLock.acquire();
+      expect(siblingAcquired).toBe(true);
+      await siblingLock.release();
+
+      // 5. Does not leave a permanently rejected start promise: start can be invoked again
+      shouldFail = false;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('getReadiness returns ready false with allowlisted errorCode when repository or schema query fails while running', async () => {
+      const testDb = openTestDatabase();
+      const isolatedRuntime = createRuntime(
+        {
+          databasePath: ':memory:',
+          wakatimeOAuthClientId: null,
+          wakatimeOAuthClientSecret: null,
+          adminUsername: 'admin',
+          adminPasswordHash: null,
+          sessionSecret: '0123456789abcdef0123456789abcdef',
+          publicUrl: parsePublicUrl('http://localhost:3002'),
+          cookieSecure: false,
+          maxDirectImportBytes: 10 * 1024 * 1024
+        },
+        testDb
+      );
+
+      await isolatedRuntime.lifecycle.start();
+      expect(isolatedRuntime.lifecycle.getReadiness().ready).toBe(true);
+
+      // Drop table while running to simulate schema/query detail failure
+      testDb.exec('DROP TABLE sync_runs');
+
+      const corruptedReadiness = isolatedRuntime.getReadiness();
+      // Must not silently treat as healthy empty state
+      expect(corruptedReadiness.ready).toBe(false);
+      expect(corruptedReadiness.errorCode).toBe('SCHEMA_QUERY_FAILED');
+      // Must not leak raw SQL error prose
+      expect(corruptedReadiness.errorCode).not.toContain('no such table');
+
+      await isolatedRuntime.lifecycle.stop('shutdown', 20_000);
+    });
   });
 
   describe('Bounded Signal Shutdown & Queue Preservation', () => {
@@ -470,7 +557,7 @@ describe('Lifecycle and Ownership Contracts (P7)', () => {
   });
 
   describe('Custom Server (server/index.mjs) Lifecycle, Signals, & HTTP Drain', () => {
-    it('achieves readiness before listen, serves HTTP, drains connections, and exits cleanly on SIGTERM', async () => {
+    it('achieves readiness before listen, drains a genuinely in-flight HTTP request on SIGTERM, and exits cleanly with 0', async () => {
       const port = await getAvailablePort();
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-srv-sigterm-'));
       const testDb = path.join(tempDir, 'server.db');
@@ -505,15 +592,53 @@ describe('Lifecycle and Ownership Contracts (P7)', () => {
           child.on('exit', (code) => reject(new Error(`Server exited prematurely with code ${code}. Stderr: ${stderr}`)));
         });
 
-        const statusCode = await new Promise<number>((resolve, reject) => {
-          const req = http.get(`http://127.0.0.1:${port}/login`, (res) => resolve(res.statusCode ?? 0));
+        // Start a chunked HTTP POST request that remains genuinely in flight
+        const req = http.request({
+          hostname: '127.0.0.1',
+          port,
+          path: '/login',
+          method: 'POST',
+          headers: {
+            'Transfer-Encoding': 'chunked',
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        });
+
+        const respPromise = new Promise<number>((resolve, reject) => {
+          req.on('response', (res) => {
+            res.on('data', () => {});
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          });
           req.on('error', reject);
         });
-        expect(statusCode).toBe(200);
 
-        // Send SIGTERM for graceful shutdown
+        // Write first chunk: request is actively open and in flight
+        req.write('inflight_param=test&');
+
+        // Deliver SIGTERM while request is genuinely in flight
+        await new Promise((r) => setTimeout(r, 100));
         child.kill('SIGTERM');
 
+        // Wait until child outputs server.stopping event
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error(`Timeout waiting for stopping event. Stderr: ${stderr}`)), 10_000);
+          const interval = setInterval(() => {
+            if (stdout.includes('server.stopping')) {
+              clearInterval(interval);
+              clearTimeout(timeout);
+              resolve();
+            }
+          }, 50);
+        });
+
+        // Complete the in-flight request body while server is draining
+        req.end('second_chunk=complete');
+
+        // Verify the in-flight request is successfully drained and completes
+        const statusCode = await respPromise;
+        expect(statusCode).toBeGreaterThanOrEqual(200);
+
+        // Await clean exit
         const exitCode = await new Promise<number | null>((resolve) => {
           child.on('exit', (code) => resolve(code));
         });
@@ -521,6 +646,12 @@ describe('Lifecycle and Ownership Contracts (P7)', () => {
         expect(exitCode).toBe(0);
         expect(stdout).toContain('server.stopping');
         expect(stdout).toContain('server.stopped');
+
+        // Verify ownership lock was released
+        const siblingLock = new FsExtProcessLock(testDb);
+        const acquired = await siblingLock.acquire();
+        expect(acquired).toBe(true);
+        await siblingLock.release();
       } finally {
         if (child.exitCode === null) {
           child.kill('SIGKILL');

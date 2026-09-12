@@ -403,6 +403,8 @@ export function createRuntime(
     let activeRunId: string | null = null;
     let currentDate: string | null = null;
     let lastProgressAt: string | null = null;
+    let readinessErrorCode: string | null = readinessInternal.errorCode;
+    let schemaQueryFailed = false;
 
     if (readinessInternal.migrationsComplete && db.open) {
       try {
@@ -435,12 +437,18 @@ export function createRuntime(
             lastProgressAt = lastRow.started_at;
           }
         }
-      } catch {
-        // ignore read error if DB is unmigrated or closing
+      } catch (err) {
+        // If the service was running, repository or schema detail failure must NEVER be silently
+        // treated as healthy empty state. Mark ready false with sanitized allowlisted error code.
+        if (readinessInternal.state === 'running') {
+          schemaQueryFailed = true;
+          readinessErrorCode = 'SCHEMA_QUERY_FAILED';
+        }
       }
     }
 
     const isReady =
+      !schemaQueryFailed &&
       readinessInternal.state === 'running' &&
       readinessInternal.ownershipLockHeld &&
       readinessInternal.migrationsComplete &&
@@ -456,7 +464,7 @@ export function createRuntime(
       activeRunId,
       currentDate,
       lastProgressAt,
-      errorCode: readinessInternal.errorCode,
+      errorCode: readinessErrorCode,
       migrationsComplete: readinessInternal.migrationsComplete,
       recoveryComplete: readinessInternal.recoveryComplete,
       serviceRegistered: readinessInternal.serviceRegistered,
@@ -471,67 +479,99 @@ export function createRuntime(
 
       readinessInternal.state = 'starting';
       startPromise = (async () => {
-        // 1. Acquire ownership lock before migrations and recovery
-        const acquired = await processLock.acquire();
-        if (!acquired) {
-          readinessInternal.state = 'failed';
-          readinessInternal.errorCode = 'LOCK_CONTENTION';
-          throw new Error(
-            `Failed to acquire process ownership lock for database "${config.databasePath}": another process is running`
-          );
-        }
-        readinessInternal.ownershipLockHeld = true;
-
-        // 2. Run migrations
         try {
-          ensureMigrated();
-        } catch (err) {
-          readinessInternal.state = 'failed';
-          readinessInternal.errorCode = 'MIGRATION_FAILED';
-          throw err;
-        }
-
-        // 3. Run crash recovery
-        try {
-          await coordinator.runRecovery();
-          readinessInternal.recoveryComplete = true;
-        } catch (err) {
-          readinessInternal.state = 'failed';
-          readinessInternal.errorCode = 'RECOVERY_FAILED';
-          throw err;
-        }
-
-        // 4. Start coordinator
-        try {
-          await coordinator.start();
-          readinessInternal.serviceRegistered = true;
-        } catch (err) {
-          readinessInternal.state = 'failed';
-          readinessInternal.errorCode = 'COORDINATOR_FAILED';
-          throw err;
-        }
-
-        // 5. Start scheduler if scheduling is enabled (dev opt-in guard)
-        try {
-          const settings = syncRepo.getSyncSettings();
-          const isDev = process.env.NODE_ENV === 'development';
-          const devSchedulingOptIn =
-            process.env.DEV_SCHEDULING === 'true' ||
-            process.env.ENABLE_DEV_SCHEDULING === 'true';
-
-          if (settings.schedulingEnabled && (!isDev || devSchedulingOptIn)) {
-            await scheduler.start();
+          // 1. Acquire ownership lock before migrations and recovery
+          const acquired = await processLock.acquire();
+          if (!acquired) {
+            readinessInternal.errorCode = 'LOCK_CONTENTION';
+            throw new Error(
+              `Failed to acquire process ownership lock for database "${config.databasePath}": another process is running`
+            );
           }
-        } catch (err) {
-          readinessInternal.state = 'failed';
-          readinessInternal.errorCode = 'SCHEDULER_FAILED';
-          throw err;
-        }
+          readinessInternal.ownershipLockHeld = true;
 
-        // 6. Mark ready only after all prerequisites succeed
-        readinessInternal.state = 'running';
-        readinessInternal.ready = true;
-        readinessInternal.errorCode = null;
+          // 2. Run migrations
+          try {
+            ensureMigrated();
+          } catch (err) {
+            readinessInternal.errorCode = 'MIGRATION_FAILED';
+            throw err;
+          }
+
+          // 3. Run crash recovery
+          try {
+            await coordinator.runRecovery();
+            readinessInternal.recoveryComplete = true;
+          } catch (err) {
+            readinessInternal.errorCode = 'RECOVERY_FAILED';
+            throw err;
+          }
+
+          // 4. Start coordinator
+          try {
+            await coordinator.start();
+            readinessInternal.serviceRegistered = true;
+          } catch (err) {
+            readinessInternal.errorCode = 'COORDINATOR_FAILED';
+            throw err;
+          }
+
+          // 5. Start scheduler if scheduling is enabled (dev opt-in guard)
+          try {
+            const settings = syncRepo.getSyncSettings();
+            const isDev = process.env.NODE_ENV === 'development';
+            const devSchedulingOptIn =
+              process.env.DEV_SCHEDULING === 'true' ||
+              process.env.ENABLE_DEV_SCHEDULING === 'true';
+
+            if (settings.schedulingEnabled && (!isDev || devSchedulingOptIn)) {
+              await scheduler.start();
+            }
+          } catch (err) {
+            readinessInternal.errorCode = 'SCHEDULER_FAILED';
+            throw err;
+          }
+
+          // 6. Mark ready only after all prerequisites succeed
+          readinessInternal.state = 'running';
+          readinessInternal.ready = true;
+          readinessInternal.errorCode = null;
+        } catch (startupError) {
+          // Any startup failure after lock acquisition:
+          // 1. Quiesce services
+          try {
+            await scheduler.stop();
+          } catch {}
+          try {
+            await coordinator.stop('shutdown', 5000);
+          } catch {}
+
+          // 2. Close owned DB resources safely
+          try {
+            if (db.open) {
+              db.close();
+            }
+          } catch {}
+
+          // 3. Release process lock so a later process can acquire
+          try {
+            await processLock.release();
+          } catch {}
+
+          // 4. Clear readiness and set allowlisted error code
+          readinessInternal.state = 'failed';
+          readinessInternal.ready = false;
+          readinessInternal.ownershipLockHeld = false;
+          readinessInternal.serviceRegistered = false;
+          if (!readinessInternal.errorCode) {
+            readinessInternal.errorCode = 'STARTUP_FAILED';
+          }
+
+          // 5. Reset startPromise so we do not leave a permanently rejected start promise
+          startPromise = null;
+
+          throw startupError;
+        }
       })();
 
       return startPromise;
@@ -539,7 +579,8 @@ export function createRuntime(
 
     async stop(
       reason: 'shutdown' = 'shutdown',
-      deadlineMs: number = SHUTDOWN_GRACE_PERIOD_MS
+      deadlineMs: number = SHUTDOWN_GRACE_PERIOD_MS,
+      drain?: () => Promise<void>
     ): Promise<void> {
       if (stopPromise) return stopPromise;
 
@@ -557,7 +598,14 @@ export function createRuntime(
         readinessInternal.ready = false;
         readinessInternal.serviceRegistered = false;
 
-        // 3. Close database after consumers stop
+        // 3. Drain in-flight HTTP requests while DB is still open
+        if (drain) {
+          try {
+            await drain();
+          } catch {}
+        }
+
+        // 4. Close database after consumers and in-flight HTTP requests stop
         try {
           if (db.open) {
             db.close();
@@ -566,7 +614,7 @@ export function createRuntime(
           // ignore if already closed
         }
 
-        // 4. Release ownership lock
+        // 5. Release ownership lock
         try {
           await processLock.release();
         } catch {
@@ -617,8 +665,18 @@ export function createRuntime(
 if (!(globalThis as Record<symbol, unknown>)[LIFECYCLE_SYMBOL]) {
   (globalThis as Record<symbol, unknown>)[LIFECYCLE_SYMBOL] = {
     start: () => getRuntime().lifecycle.start(),
-    stop: (reason: 'shutdown' = 'shutdown', deadlineMs: number = SHUTDOWN_GRACE_PERIOD_MS) =>
-      getRuntime().lifecycle.stop(reason, deadlineMs),
+    stop: (
+      reason: 'shutdown' = 'shutdown',
+      deadlineMs: number = SHUTDOWN_GRACE_PERIOD_MS,
+      drain?: () => Promise<void>
+    ) =>
+      (
+        getRuntime().lifecycle.stop as (
+          reason: 'shutdown',
+          deadlineMs: number,
+          drain?: () => Promise<void>
+        ) => Promise<void>
+      )(reason, deadlineMs, drain),
     getReadiness: () => getRuntime().lifecycle.getReadiness()
   };
 }

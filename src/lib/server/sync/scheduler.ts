@@ -143,13 +143,25 @@ export class SyncScheduler {
     if (this.running) return;
     this.running = true;
 
-    // Run initial tick / catch-up evaluation if not paused
+    // Run initial startup catch-up and cadence evaluation if not paused
     const pause = this.checkPauseStatus();
     if (!pause.paused) {
       try {
-        await this.tick();
+        const timezone = this.getEffectiveTimezone();
+        const now = this.getNow();
+        if (timezone) {
+          const isSeeded = this.getAppSetting(SETTINGS_KEYS.SEEDED) === 'true';
+          if (!isSeeded) {
+            await this.seedSevenDays(timezone, now);
+          } else {
+            // Evaluate startup catch-up on every enabled unpaused boot (even when no existing cursor)
+            await this.runStartupCatchup(now);
+          }
+        }
+        // Evaluate cadence slots for initial tick, yielding catchup continuation to subsequent ticks
+        await this.tick(now, true);
       } catch (err) {
-        console.error('[SyncScheduler] Initial tick error:', err);
+        console.error('[SyncScheduler] Initial startup evaluation error:', err);
       }
     }
 
@@ -308,7 +320,7 @@ export class SyncScheduler {
    * Evaluates due schedule intents for the current instant.
    * Supports deterministic testing with fake clocks.
    */
-  async tick(overrideNow?: Date): Promise<SchedulerTickResult> {
+  async tick(overrideNow?: Date, skipCatchup = false): Promise<SchedulerTickResult> {
     const now = overrideNow ?? this.getNow();
     const pause = this.checkPauseStatus();
 
@@ -323,21 +335,23 @@ export class SyncScheduler {
 
     const enqueuedIntents: SchedulerTickResult['enqueuedIntents'] = [];
 
-    // 1. First enable: seed seven days if not already seeded
-    const isSeeded = this.getAppSetting(SETTINGS_KEYS.SEEDED) === 'true';
-    if (!isSeeded) {
-      const seedResult = await this.seedSevenDays(timezone, now);
-      if (seedResult) {
-        enqueuedIntents.push(seedResult);
+    if (!skipCatchup) {
+      // 1. First enable: seed seven days if not already seeded
+      const isSeeded = this.getAppSetting(SETTINGS_KEYS.SEEDED) === 'true';
+      if (!isSeeded) {
+        const seedResult = await this.seedSevenDays(timezone, now);
+        if (seedResult) {
+          enqueuedIntents.push(seedResult);
+        }
       }
-    }
 
-    // 2. Catch-up cursor continuation (if active cursor exists)
-    const cursor = this.getAppSetting(SETTINGS_KEYS.CATCHUP_CURSOR);
-    if (cursor) {
-      const catchupResult = await this.runCatchupBatch(timezone, now, cursor);
-      if (catchupResult) {
-        enqueuedIntents.push(catchupResult);
+      // 2. Catch-up cursor continuation (if active cursor exists)
+      const cursor = this.getAppSetting(SETTINGS_KEYS.CATCHUP_CURSOR);
+      if (cursor) {
+        const catchupResult = await this.runCatchupBatch(timezone, now, cursor);
+        if (catchupResult) {
+          enqueuedIntents.push(catchupResult);
+        }
       }
     }
 
