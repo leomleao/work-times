@@ -532,14 +532,28 @@ describe('authenticated MCP HTTP boundary', () => {
           workSeconds: 3600,
           unclassifiedSeconds: 0,
           hasUnclassified: false,
-          days: []
+          days: [],
+          dataQuality: {
+            asOf: '2026-09-02T00:00:00.000Z',
+            hasMissingDays: false,
+            hasStaleDays: false,
+            hasLimitedDetail: false,
+            advisoryCodes: []
+          }
         })),
         getDayEvidence: vi.fn(async () => ({
           date: '2026-09-01',
           workSeconds: 3600,
           unclassifiedSeconds: 0,
           hasUnclassified: false,
-          projects: []
+          projects: [],
+          dataQuality: {
+            asOf: '2026-09-01T00:00:00.000Z',
+            hasMissingDays: false,
+            hasStaleDays: false,
+            hasLimitedDetail: false,
+            advisoryCodes: []
+          }
         }))
       };
 

@@ -345,4 +345,63 @@ describe('SqliteWorkOnlyAnalytics - Sentinel Privacy Tests', () => {
     expect(unclassQuery.projects).toHaveLength(0);
     expect(JSON.stringify(unclassQuery)).not.toContain(SENTINELS.unclassifiedProject);
   });
+
+  it('projects dataQuality with asOf null on missing days and oldest timestamp on complete coverage', async () => {
+    // 1. Range without any sync_layer_state: missing days, asOf null
+    const unverifiedSummary = await analytics.getRangeSummary({
+      start: '2026-03-01',
+      end: '2026-03-02'
+    });
+    expect(unverifiedSummary.dataQuality.hasMissingDays).toBe(true);
+    expect(unverifiedSummary.dataQuality.asOf).toBeNull();
+    expect(unverifiedSummary.dataQuality.hasStaleDays).toBe(true);
+
+    // 2. Insert verified layer state for 2026-03-01 and 2026-03-02
+    const ts1 = '2026-03-01T12:00:00.000Z';
+    const ts2 = '2026-03-02T15:00:00.000Z';
+
+    db.prepare(`
+      INSERT INTO sync_layer_state (
+        date, layer, last_attempt_at, last_success_at, accepted_fidelity, updated_at
+      ) VALUES
+        ('2026-03-01', 'summaries', ?, ?, 'entity_detail', ?),
+        ('2026-03-02', 'summaries', ?, ?, 'entity_detail', ?)
+      ON CONFLICT(date, layer) DO UPDATE SET
+        last_success_at = excluded.last_success_at,
+        accepted_fidelity = excluded.accepted_fidelity
+    `).run(ts1, ts1, ts1, ts2, ts2, ts2);
+
+    const verifiedSummary = await analytics.getRangeSummary({
+      start: '2026-03-01',
+      end: '2026-03-02'
+    });
+    expect(verifiedSummary.dataQuality.hasMissingDays).toBe(false);
+    expect(verifiedSummary.dataQuality.asOf).toBe(ts1); // Oldest timestamp
+
+    // 3. Limited detail / detail downgrade flag
+    db.prepare(`
+      UPDATE sync_layer_state
+      SET accepted_fidelity = 'coarse_project', has_detail_downgrade = 1
+      WHERE date = '2026-03-01' AND layer = 'summaries'
+    `).run();
+
+    const coarseSummary = await analytics.getRangeSummary({
+      start: '2026-03-01',
+      end: '2026-03-02'
+    });
+    expect(coarseSummary.dataQuality.hasLimitedDetail).toBe(true);
+    expect(coarseSummary.dataQuality.advisoryCodes).toContain('DETAIL_DOWNGRADE');
+
+    // 4. Day evidence dataQuality
+    const evidence = await analytics.getDayEvidence({ date: '2026-03-01' });
+    expect(evidence.dataQuality.hasMissingDays).toBe(false);
+    expect(evidence.dataQuality.asOf).toBe(ts1);
+    expect(evidence.dataQuality.hasLimitedDetail).toBe(true);
+
+    // 5. Ensure no raw fields, user IDs, or personal seconds leak into dataQuality
+    const qualityJson = JSON.stringify(coarseSummary.dataQuality);
+    expect(qualityJson).not.toContain('confidential');
+    expect(qualityJson).not.toContain('tax-return');
+    expect(qualityJson).not.toContain('personal');
+  });
 });

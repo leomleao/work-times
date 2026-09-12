@@ -23,6 +23,15 @@ const coverageFields = {
   unclassifiedSeconds: z.number().nonnegative(),
   hasUnclassified: z.boolean()
 };
+const dataQualitySchema = z
+  .object({
+    asOf: z.string().nullable(),
+    hasMissingDays: z.boolean(),
+    hasStaleDays: z.boolean(),
+    hasLimitedDetail: z.boolean(),
+    advisoryCodes: z.array(z.string())
+  })
+  .strict();
 
 export function createWorkTimesMcpServer(analytics: WorkOnlyAnalytics): McpServer {
   const server = new McpServer({
@@ -48,7 +57,8 @@ export function createWorkTimesMcpServer(analytics: WorkOnlyAnalytics): McpServe
           end: isoDate,
           workSeconds: z.number().nonnegative(),
           ...coverageFields,
-          days: z.array(daySummary)
+          days: z.array(daySummary),
+          dataQuality: dataQualitySchema
         })
         .strict(),
       annotations: {
@@ -86,7 +96,8 @@ export function createWorkTimesMcpServer(analytics: WorkOnlyAnalytics): McpServe
           date: isoDate,
           workSeconds: z.number().nonnegative(),
           ...coverageFields,
-          projects: z.array(projectSummary)
+          projects: z.array(projectSummary),
+          dataQuality: dataQualitySchema
         })
         .strict(),
       annotations: {

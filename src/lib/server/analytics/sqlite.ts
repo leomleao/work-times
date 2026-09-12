@@ -10,6 +10,14 @@ import {
   SqliteClassificationService,
   type EvaluatedSlice
 } from '../classification/sqlite.js';
+import {
+  evaluateDateFreshness,
+  sanitizeMcpDataQuality,
+  type LayerFreshnessRecord,
+  type McpDataQuality,
+  type SummaryFidelity,
+  RECONCILE_CODES
+} from '../sync/contracts.js';
 
 export const MAX_ANALYTICS_RANGE_DAYS = 366;
 
@@ -58,14 +66,47 @@ function getDatesInRange(start: string, end: string): string[] {
   return dates;
 }
 
+export interface WorkOnlyAnalyticsOptions {
+  now?: () => Date;
+  timezone?: string;
+}
+
 export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
   private readonly classificationService: SqliteClassificationService;
+  private readonly getNow: () => Date;
+  private readonly configuredTimezone?: string;
 
   constructor(
     private readonly db: Database.Database,
-    classificationService?: SqliteClassificationService
+    classificationService?: SqliteClassificationService,
+    options?: WorkOnlyAnalyticsOptions
   ) {
     this.classificationService = classificationService ?? new SqliteClassificationService(this.db);
+    this.getNow = options?.now ?? (() => new Date());
+    this.configuredTimezone = options?.timezone;
+  }
+
+  private getSourceTimezone(): string {
+    if (this.configuredTimezone) return this.configuredTimezone;
+    try {
+      const layerRow = this.db
+        .prepare(
+          `SELECT verified_timezone FROM sync_layer_state WHERE verified_timezone IS NOT NULL ORDER BY updated_at DESC LIMIT 1`
+        )
+        .get() as { verified_timezone: string } | undefined;
+      if (layerRow?.verified_timezone) return layerRow.verified_timezone;
+
+      const acct = this.db
+        .prepare(`SELECT timezone FROM account_settings LIMIT 1`)
+        .get() as { timezone: string } | undefined;
+      if (acct?.timezone) return acct.timezone;
+
+      const daily = this.db
+        .prepare(`SELECT timezone FROM daily_totals WHERE timezone != 'UTC' ORDER BY date DESC LIMIT 1`)
+        .get() as { timezone: string } | undefined;
+      if (daily?.timezone) return daily.timezone;
+    } catch {}
+    return 'UTC';
   }
 
   private fetchProjectBreakdown(
@@ -97,6 +138,191 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
       .map((r) => ({ name: r.name, seconds: roundSeconds(r.total_seconds) }));
 
     return { categories, languages };
+  }
+
+  private computeDataQuality(dates: string[]): McpDataQuality {
+    if (dates.length === 0) {
+      return {
+        asOf: null,
+        hasMissingDays: false,
+        hasStaleDays: false,
+        hasLimitedDetail: false,
+        advisoryCodes: []
+      };
+    }
+
+    let rows: Array<Record<string, unknown>> = [];
+    try {
+      const placeholders = dates.map(() => '?').join(',');
+      rows = this.db
+        .prepare(
+          `SELECT date, last_attempt_at, last_success_at, last_accepted_change_at,
+                  accepted_source_reference, accepted_snapshot_version, accepted_fidelity,
+                  accepted_content_hash, verified_timezone, evidence_matches_summary,
+                  status_code, next_retry_at, is_stale, unresolved_mismatch,
+                  has_detail_downgrade, has_restriction, has_failure
+           FROM sync_layer_state
+           WHERE layer = 'summaries' AND date IN (${placeholders})`
+        )
+        .all(...dates) as Array<Record<string, unknown>>;
+    } catch {
+      rows = [];
+    }
+
+    let dailyTotalsRows: Array<{ date: string; total_seconds: number }> = [];
+    try {
+      const placeholders = dates.map(() => '?').join(',');
+      dailyTotalsRows = this.db
+        .prepare(`SELECT date, total_seconds FROM daily_totals WHERE date IN (${placeholders})`)
+        .all(...dates) as typeof dailyTotalsRows;
+    } catch {}
+    const dailyTotalsMap = new Map<string, number>();
+    for (const d of dailyTotalsRows) {
+      dailyTotalsMap.set(d.date, d.total_seconds);
+    }
+
+    const rowMap = new Map<string, Record<string, unknown>>();
+    for (const r of rows) {
+      rowMap.set(String(r.date), r);
+    }
+
+    let hasMissingDays = false;
+    let hasStaleDays = false;
+    let hasLimitedDetail = false;
+    let hasIncompleteSummary = false;
+    const advisories = new Set<string>();
+    const verificationTimestamps: string[] = [];
+    const now = this.getNow();
+    const timezone = this.getSourceTimezone();
+
+    for (const date of dates) {
+      const row = rowMap.get(date);
+      if (!row || !row.last_success_at) {
+        hasMissingDays = true;
+        hasStaleDays = true;
+        hasIncompleteSummary = true;
+        advisories.add('STALE_MISSING_COVERAGE');
+        continue;
+      }
+
+      if (
+        row.has_failure ||
+        (row.status_code as string)?.startsWith('HTTP_5') ||
+        row.status_code === 'FAILED'
+      ) {
+        hasIncompleteSummary = true;
+      }
+
+      if (
+        row.has_restriction ||
+        (row.status_code as string)?.startsWith('HTTP_402') ||
+        (row.status_code as string)?.startsWith('HTTP_403') ||
+        row.status_code === 'RESTRICTED'
+      ) {
+        hasLimitedDetail = true;
+        hasIncompleteSummary = true;
+        advisories.add('RESTRICTED');
+      }
+
+      if (Boolean(row.unresolved_mismatch)) {
+        hasIncompleteSummary = true;
+        advisories.add('UNRESOLVED_MISMATCH');
+      }
+
+      if (
+        row.accepted_fidelity === 'coarse_project' ||
+        Boolean(row.has_detail_downgrade) ||
+        row.status_code === RECONCILE_CODES.DETAIL_DOWNGRADE
+      ) {
+        hasLimitedDetail = true;
+        advisories.add(RECONCILE_CODES.DETAIL_DOWNGRADE);
+      }
+
+      const dayTotalSeconds = dailyTotalsMap.get(date);
+      if (dayTotalSeconds === 0 && row.accepted_fidelity !== 'verified_zero') {
+        hasIncompleteSummary = true;
+        advisories.add('UNVERIFIED_ZERO');
+      }
+
+      if (row.evidence_matches_summary === 0) {
+        hasIncompleteSummary = true;
+        advisories.add('EVIDENCE_SUMMARY_MISMATCH');
+      }
+
+      const freshnessRecord: LayerFreshnessRecord = {
+        lastAttemptAt: (row.last_attempt_at as string) ?? null,
+        lastSuccessAt: (row.last_success_at as string) ?? null,
+        lastAcceptedChangeAt: (row.last_accepted_change_at as string) ?? null,
+        acceptedSourceReference: (row.accepted_source_reference as string) ?? null,
+        acceptedSnapshotVersion:
+          typeof row.accepted_snapshot_version === 'number' ? row.accepted_snapshot_version : null,
+        acceptedFidelity: (row.accepted_fidelity as SummaryFidelity) ?? null,
+        acceptedContentHash: (row.accepted_content_hash as string) ?? null,
+        verifiedTimezone: (row.verified_timezone as string) ?? null,
+        evidenceMatchesSummary:
+          row.evidence_matches_summary !== null && row.evidence_matches_summary !== undefined
+            ? Boolean(row.evidence_matches_summary)
+            : null,
+        statusCode: (row.status_code as string) ?? null,
+        nextRetryAt: (row.next_retry_at as string) ?? null,
+        isStale: Boolean(row.is_stale),
+        unresolvedMismatch: Boolean(row.unresolved_mismatch),
+        hasDetailDowngrade: Boolean(row.has_detail_downgrade),
+        hasRestriction: Boolean(row.has_restriction),
+        hasFailure: Boolean(row.has_failure)
+      };
+
+      const evalResult = evaluateDateFreshness(date, freshnessRecord, now, timezone);
+      const isAgeOrUnresolvedStale = evalResult.reasons.some(
+        (r) =>
+          r !== RECONCILE_CODES.CURRENT_DAY_PROVISIONAL &&
+          r !== 'DETAIL_DOWNGRADE_PRESERVED'
+      );
+      if (isAgeOrUnresolvedStale) {
+        hasStaleDays = true;
+        hasIncompleteSummary = true;
+        advisories.add('STALE_DATA');
+      }
+      for (const reason of evalResult.reasons) {
+        if (
+          reason.startsWith('CURRENT_DAY_') ||
+          reason.startsWith('TIMEZONE_') ||
+          reason.startsWith('DETAIL_') ||
+          reason.startsWith('STALE_')
+        ) {
+          advisories.add(reason);
+        } else if (
+          reason.startsWith('RECENT_EXCEEDED') ||
+          reason.startsWith('RECONCILE_EXCEEDED') ||
+          reason.startsWith('COMPARE_EXCEEDED')
+        ) {
+          advisories.add(`STALE_${reason}`);
+        }
+      }
+
+      if (typeof row.last_success_at === 'string') {
+        verificationTimestamps.push(row.last_success_at);
+      }
+    }
+
+    let asOf: string | null = null;
+    if (
+      !hasMissingDays &&
+      !hasIncompleteSummary &&
+      !hasStaleDays &&
+      verificationTimestamps.length === dates.length
+    ) {
+      verificationTimestamps.sort((a, b) => Date.parse(a) - Date.parse(b));
+      asOf = verificationTimestamps[0];
+    }
+
+    return sanitizeMcpDataQuality({
+      asOf,
+      hasMissingDays,
+      hasStaleDays,
+      hasLimitedDetail,
+      advisoryCodes: Array.from(advisories)
+    });
   }
 
   async getRangeSummary(input: { start: string; end: string }): Promise<WorkRangeSummary> {
@@ -232,7 +458,8 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
       workSeconds: finalRangeWork,
       unclassifiedSeconds: finalRangeUnclassified,
       hasUnclassified: finalRangeUnclassified > 0,
-      days
+      days,
+      dataQuality: this.computeDataQuality(dates)
     };
   }
 
@@ -270,7 +497,8 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
           workSeconds: 0,
           unclassifiedSeconds: 0,
           hasUnclassified: false,
-          projects: []
+          projects: [],
+          dataQuality: this.computeDataQuality([input.date])
         };
       }
 
@@ -298,7 +526,8 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
             categories,
             languages
           }
-        ]
+        ],
+        dataQuality: this.computeDataQuality([input.date])
       };
     }
 
@@ -378,7 +607,8 @@ export class SqliteWorkOnlyAnalytics implements WorkOnlyAnalytics {
       workSeconds: roundedDayWork,
       unclassifiedSeconds: roundedDayUnclassified,
       hasUnclassified: roundedDayUnclassified > 0,
-      projects
+      projects,
+      dataQuality: this.computeDataQuality([input.date])
     };
   }
 

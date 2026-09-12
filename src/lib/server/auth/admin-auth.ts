@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { verifyPassword } from '$lib/server/security/password';
 import { generateOpaqueToken, hashOpaqueToken } from '$lib/server/security/tokens';
+import { requestHasTrustedOrigin, verifyCsrfToken } from '$lib/server/security/http';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const SESSION_IDLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -123,4 +124,61 @@ export class LoginAttemptLimiter {
   clear(key: string): void {
     this.#attempts.delete(key);
   }
+}
+
+export class AdminAuthError extends Error {
+  constructor(
+    public readonly status: 401 | 403,
+    message: string
+  ) {
+    super(message);
+    this.name = 'AdminAuthError';
+  }
+}
+
+export interface AdminMutationAuthContext {
+  locals?: {
+    admin?: AdminPrincipal | null;
+    sessionToken?: string | null;
+    csrfToken?: string | null;
+  };
+  request: Request;
+  publicUrl: URL;
+  sessionSecret: string;
+  submittedCsrf?: string | null;
+}
+
+/**
+ * Validates that an administrative mutation is authorized:
+ * 1. An existing admin session is present in locals. API-key, MCP bearer, or OAuth bearer
+ *    credentials cannot control or mutate admin endpoints.
+ * 2. The HTTP request Origin exactly matches the server publicUrl.
+ * 3. A valid HMAC session-bound CSRF token is provided via x-csrf-token header or submitted body.
+ *
+ * Throws AdminAuthError with status 401 or 403 on any failure.
+ */
+export function validateAdminMutationAuth(ctx: AdminMutationAuthContext): {
+  admin: AdminPrincipal;
+  sessionToken: string;
+} {
+  const admin = ctx.locals?.admin;
+  const sessionToken = ctx.locals?.sessionToken;
+
+  if (!admin || !sessionToken) {
+    throw new AdminAuthError(401, 'Unauthorized');
+  }
+
+  if (!requestHasTrustedOrigin(ctx.request, ctx.publicUrl)) {
+    throw new AdminAuthError(403, 'Cross-origin request rejected');
+  }
+
+  const submittedCsrf =
+    ctx.submittedCsrf ??
+    ctx.request.headers.get('x-csrf-token');
+
+  if (!verifyCsrfToken(submittedCsrf, sessionToken, ctx.sessionSecret)) {
+    throw new AdminAuthError(403, 'Invalid or missing CSRF token');
+  }
+
+  return { admin, sessionToken };
 }

@@ -1123,4 +1123,33 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
 
     db.close();
   });
+
+  it('populates disposition and qualityStatus on EvaluatedSlice when sync records exist', async () => {
+    const testDb = openTestDatabase();
+    await importDumps(testDb, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+    const testService = new SqliteClassificationService(testDb);
+
+    testDb.prepare(`
+      INSERT INTO sync_runs (id, started_at, trigger, mode, status)
+      VALUES (1, '2026-01-02T10:00:00.000Z', 'manual', 'recent', 'succeeded')
+    `).run();
+
+    testDb.prepare(`
+      INSERT INTO sync_days (id, sync_run_id, date, status, disposition, synced_at)
+      VALUES (999, 1, '2026-01-02', 'succeeded', 'unchanged', '2026-01-02T10:00:00.000Z')
+    `).run();
+
+    testDb.prepare(`
+      INSERT INTO sync_layer_state (date, layer, last_attempt_at, last_success_at, accepted_fidelity, updated_at)
+      VALUES ('2026-01-02', 'summaries', '2026-01-02T10:00:00.000Z', '2026-01-02T10:00:00.000Z', 'entity_detail', '2026-01-02T10:00:00.000Z')
+    `).run();
+
+    const slices = testService.classifySlices({ date: '2026-01-02' });
+    expect(slices.length).toBeGreaterThan(0);
+    expect(slices[0].disposition).toBe('unchanged');
+    expect(slices[0].qualityStatus).toBe('checked_unchanged');
+    expect(slices[0].isStale).toBe(false);
+
+    testDb.close();
+  });
 });

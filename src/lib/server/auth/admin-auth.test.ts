@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { hashPassword } from '$lib/server/security/password';
 import {
   AdminAuthenticator,
+  AdminAuthError,
   LoginAttemptLimiter,
+  validateAdminMutationAuth,
   type AdminSessionRecord,
   type AdminSessionRepository
 } from './admin-auth';
+import { csrfTokenForSession } from '$lib/server/security/http';
 
 class MemorySessions implements AdminSessionRepository {
   records = new Map<string, AdminSessionRecord>();
@@ -103,5 +106,159 @@ describe('login attempt limiter', () => {
     expect(limiter.allow('client', 1_001)).toBe(true);
     limiter.clear('client');
     expect(limiter.allow('client', 1_002)).toBe(true);
+  });
+});
+
+describe('validateAdminMutationAuth', () => {
+  const publicUrl = new URL('http://localhost:3000');
+  const sessionSecret = 'test-session-secret-32-chars-long!!';
+  const validSessionToken = 'wts_session_test_token_123';
+  const adminPrincipal = { username: 'admin', sessionExpiresAt: '2026-12-31T23:59:59.999Z' };
+  const validCsrf = csrfTokenForSession(validSessionToken, sessionSecret);
+
+  it('succeeds when admin session, exact Origin, and header CSRF match', () => {
+    const request = new Request('http://localhost:3000/api/admin/sync-runs', {
+      method: 'POST',
+      headers: {
+        origin: 'http://localhost:3000',
+        'x-csrf-token': validCsrf
+      }
+    });
+
+    const result = validateAdminMutationAuth({
+      locals: {
+        admin: adminPrincipal,
+        sessionToken: validSessionToken,
+        csrfToken: validCsrf
+      },
+      request,
+      publicUrl,
+      sessionSecret
+    });
+
+    expect(result.admin.username).toBe('admin');
+    expect(result.sessionToken).toBe(validSessionToken);
+  });
+
+  it('succeeds when CSRF token is provided via submitted body parameter', () => {
+    const request = new Request('http://localhost:3000/api/admin/sync-runs', {
+      method: 'POST',
+      headers: {
+        origin: 'http://localhost:3000'
+      }
+    });
+
+    const result = validateAdminMutationAuth({
+      locals: {
+        admin: adminPrincipal,
+        sessionToken: validSessionToken
+      },
+      request,
+      publicUrl,
+      sessionSecret,
+      submittedCsrf: validCsrf
+    });
+
+    expect(result.admin.username).toBe('admin');
+  });
+
+  it('rejects with 401 Unauthorized when admin session is missing', () => {
+    const request = new Request('http://localhost:3000/api/admin/sync-runs', {
+      method: 'POST',
+      headers: {
+        origin: 'http://localhost:3000',
+        authorization: 'Bearer api-key-token-not-admin-session',
+        'x-csrf-token': validCsrf
+      }
+    });
+
+    expect(() =>
+      validateAdminMutationAuth({
+        locals: {
+          admin: null,
+          sessionToken: null
+        },
+        request,
+        publicUrl,
+        sessionSecret
+      })
+    ).toThrow(AdminAuthError);
+
+    try {
+      validateAdminMutationAuth({
+        locals: {},
+        request,
+        publicUrl,
+        sessionSecret
+      });
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect((err as AdminAuthError).status).toBe(401);
+      expect((err as AdminAuthError).message).toBe('Unauthorized');
+    }
+  });
+
+  it('rejects with 403 when Origin header is missing or does not match publicUrl', () => {
+    // Missing origin
+    const reqNoOrigin = new Request('http://localhost:3000/api/admin/sync-runs', {
+      method: 'POST',
+      headers: {
+        'x-csrf-token': validCsrf
+      }
+    });
+
+    expect(() =>
+      validateAdminMutationAuth({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken },
+        request: reqNoOrigin,
+        publicUrl,
+        sessionSecret
+      })
+    ).toThrow(AdminAuthError);
+
+    // Mismatched origin
+    const reqBadOrigin = new Request('http://localhost:3000/api/admin/sync-runs', {
+      method: 'POST',
+      headers: {
+        origin: 'http://evil.attacker.com',
+        'x-csrf-token': validCsrf
+      }
+    });
+
+    try {
+      validateAdminMutationAuth({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken },
+        request: reqBadOrigin,
+        publicUrl,
+        sessionSecret
+      });
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect((err as AdminAuthError).status).toBe(403);
+      expect((err as AdminAuthError).message).toBe('Cross-origin request rejected');
+    }
+  });
+
+  it('rejects with 403 when CSRF token is invalid or missing', () => {
+    const request = new Request('http://localhost:3000/api/admin/sync-runs', {
+      method: 'POST',
+      headers: {
+        origin: 'http://localhost:3000',
+        'x-csrf-token': 'invalid-csrf-token'
+      }
+    });
+
+    try {
+      validateAdminMutationAuth({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken },
+        request,
+        publicUrl,
+        sessionSecret
+      });
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect((err as AdminAuthError).status).toBe(403);
+      expect((err as AdminAuthError).message).toBe('Invalid or missing CSRF token');
+    }
   });
 });

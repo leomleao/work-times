@@ -107,6 +107,10 @@ export interface EvaluatedSlice {
   editors: string[];
   allocation: DailyTimeAllocationRecord | null;
   decision: ClassificationDecision;
+  disposition?: string | null;
+  qualityStatus?: string | null;
+  isStale?: boolean;
+  isProvisional?: boolean;
 }
 
 export interface ShiftedSeconds {
@@ -2207,6 +2211,106 @@ export class SqliteClassificationService {
       }
     }
 
+    const dateQualityMap = new Map<
+      string,
+      { disposition: string | null; qualityStatus: string; isStale: boolean; isProvisional: boolean }
+    >();
+    if (dates.length > 0) {
+      try {
+        const placeholders = dates.map(() => '?').join(',');
+        const dayRows = this.db
+          .prepare(
+            `SELECT date, disposition, status FROM sync_days
+             WHERE date IN (${placeholders})
+             ORDER BY id DESC`
+          )
+          .all(...dates) as Array<{ date: string; disposition: string | null; status: string }>;
+        const layerRows = this.db
+          .prepare(
+            `SELECT date, is_stale, has_restriction, has_failure, has_detail_downgrade, accepted_fidelity, status_code
+             FROM sync_layer_state
+             WHERE layer = 'summaries' AND date IN (${placeholders})`
+          )
+          .all(...dates) as Array<{
+            date: string;
+            is_stale: number;
+            has_restriction: number;
+            has_failure: number;
+            has_detail_downgrade: number;
+            accepted_fidelity: string | null;
+            status_code: string | null;
+          }>;
+        const layerMap = new Map<string, (typeof layerRows)[0]>();
+        for (const lr of layerRows) {
+          layerMap.set(lr.date, lr);
+        }
+        const dayMap = new Map<string, (typeof dayRows)[0]>();
+        for (const dr of dayRows) {
+          if (!dayMap.has(dr.date)) {
+            dayMap.set(dr.date, dr);
+          }
+        }
+
+        for (const date of dates) {
+          const dr = dayMap.get(date);
+          const lr = layerMap.get(date);
+
+          let qualityStatus = 'missing';
+          let isStale = Boolean(lr?.is_stale);
+
+          if (!dr && !lr) {
+            qualityStatus = 'missing';
+          } else if (
+            lr?.status_code?.startsWith('HTTP_401') ||
+            lr?.status_code === 'AUTH_REVOKED'
+          ) {
+            qualityStatus = 'reconnect_required';
+            isStale = true;
+          } else if (
+            dr?.status === 'failed' ||
+            dr?.status === 'interrupted' ||
+            dr?.status === 'cancelled' ||
+            lr?.has_failure
+          ) {
+            qualityStatus = 'failed';
+            isStale = true;
+          } else if (
+            lr?.has_restriction ||
+            lr?.status_code?.startsWith('HTTP_402') ||
+            lr?.status_code?.startsWith('HTTP_403')
+          ) {
+            qualityStatus = 'restricted';
+          } else if (lr?.has_detail_downgrade || dr?.disposition === 'preserved') {
+            qualityStatus = 'archived_detail_preserved';
+            isStale = true;
+          } else if (
+            lr?.accepted_fidelity === 'verified_zero' &&
+            !lr.has_failure &&
+            !lr.has_restriction
+          ) {
+            qualityStatus = 'verified_zero';
+          } else if (isStale) {
+            qualityStatus = 'stale';
+          } else if (dr?.disposition === 'unchanged') {
+            qualityStatus = 'checked_unchanged';
+          } else if (dr?.disposition === 'updated') {
+            qualityStatus = 'updated';
+          } else if (dr?.status === 'succeeded') {
+            qualityStatus = 'updated';
+          }
+
+          dateQualityMap.set(date, {
+            disposition: dr?.disposition ?? null,
+            qualityStatus,
+            isStale,
+            isProvisional: false
+          });
+        }
+      } catch {
+        // Safe fallback if tables are absent in early schema
+      }
+    }
+
     return rawSlices.map((item) => {
       let decision: ClassificationDecision;
 
@@ -2252,6 +2356,8 @@ export class SqliteClassificationService {
         }
       }
 
+      const dq = dateQualityMap.get(item.date);
+
       return {
         id: item.id,
         date: item.date,
@@ -2264,7 +2370,11 @@ export class SqliteClassificationService {
         machineIds: item.classifiableSlice.machineIds as string[],
         editors: item.classifiableSlice.editors as string[],
         allocation: item.allocation,
-        decision
+        decision,
+        disposition: dq?.disposition ?? null,
+        qualityStatus: dq?.qualityStatus ?? null,
+        isStale: dq?.isStale ?? false,
+        isProvisional: dq?.isProvisional ?? false
       };
     });
   }
