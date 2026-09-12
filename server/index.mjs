@@ -22,6 +22,22 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) {
   throw new Error('PORT must be an integer between 1 and 65535');
 }
 
+// Minimal process-local lifecycle bridge: mandatory prerequisite before listen
+const LIFECYCLE_SYMBOL = Symbol.for('work-times.lifecycle');
+const lifecycle = globalThis[LIFECYCLE_SYMBOL];
+
+if (!lifecycle || typeof lifecycle.start !== 'function' || typeof lifecycle.getReadiness !== 'function') {
+  process.stderr.write(`${JSON.stringify({ event: 'server.lifecycle_missing' })}\n`);
+  throw new Error('Mandatory lifecycle bridge (Symbol.for("work-times.lifecycle")) is missing from runtime');
+}
+
+await lifecycle.start();
+const readiness = lifecycle.getReadiness();
+if (!readiness?.ready) {
+  process.stderr.write(`${JSON.stringify({ event: 'server.readiness_failed' })}\n`);
+  throw new Error('Server runtime failed to reach lifecycle readiness before listen');
+}
+
 const app = polka();
 app.use(handler);
 
@@ -36,13 +52,41 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   process.stdout.write(`${JSON.stringify({ event: 'server.stopping', signal })}\n`);
-  server.server.close((error) => {
-    if (error) {
-      process.stderr.write(`${JSON.stringify({ event: 'server.stop_failed' })}\n`);
-      process.exitCode = 1;
+
+  const SHUTDOWN_DEADLINE_MS = 20_000;
+  const timeoutTimer = setTimeout(() => {
+    process.stderr.write(`${JSON.stringify({ event: 'server.stop_timeout' })}\n`);
+    process.exit(1);
+  }, SHUTDOWN_DEADLINE_MS);
+  if (timeoutTimer.unref) timeoutTimer.unref();
+
+  // 1. Stop accepting new HTTP connections and drain in-flight HTTP requests first
+  await new Promise((resolve) => {
+    if (server?.server?.close) {
+      server.server.close((error) => {
+        if (error) {
+          process.stderr.write(`${JSON.stringify({ event: 'server.http_close_error' })}\n`);
+        }
+        resolve();
+      });
+    } else {
+      resolve();
     }
   });
+
+  // 2. Stop runtime lifecycle after HTTP drain so in-flight requests cannot use a closed DB
+  try {
+    await lifecycle.stop('shutdown', SHUTDOWN_DEADLINE_MS - 4000);
+    clearTimeout(timeoutTimer);
+    process.stdout.write(`${JSON.stringify({ event: 'server.stopped' })}\n`);
+    process.exit(0);
+  } catch {
+    clearTimeout(timeoutTimer);
+    process.stderr.write(`${JSON.stringify({ event: 'server.runtime_stop_failed' })}\n`);
+    process.exit(1);
+  }
 }
 
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
+
