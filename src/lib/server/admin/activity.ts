@@ -69,6 +69,10 @@ export interface ActivitySliceItem {
   aiDeletions: number;
   humanAdditions: number;
   humanDeletions: number;
+  disposition?: string | null;
+  qualityStatus?: string | null;
+  isStale?: boolean;
+  isProvisional?: boolean;
 }
 
 export interface ActivityData {
@@ -804,6 +808,10 @@ export function getActivityData(
       decisionSource: s.decision.source,
       winningRuleId: s.decision.winningRuleId,
       hasOverride: Boolean(s.allocation),
+      disposition: s.disposition,
+      qualityStatus: s.qualityStatus,
+      isStale: s.isStale,
+      isProvisional: s.isProvisional,
       aiSessions: clampCount(telem?.ai_sessions),
       aiAdditions: clampCount(telem?.ai_additions),
       aiDeletions: clampCount(telem?.ai_deletions),

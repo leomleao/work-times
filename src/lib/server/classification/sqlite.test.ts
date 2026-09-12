@@ -1123,4 +1123,94 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
 
     db.close();
   });
+
+  it('populates disposition and qualityStatus on EvaluatedSlice when sync records exist', async () => {
+    const testDb = openTestDatabase();
+    await importDumps(testDb, { dailyDumpPath: DAILY, heartbeatDumpPath: HEARTBEATS });
+    const testService = new SqliteClassificationService(testDb);
+
+    testDb.prepare(`
+      INSERT INTO sync_runs (id, started_at, trigger, mode, status)
+      VALUES (1, '2026-01-02T10:00:00.000Z', 'manual', 'recent', 'succeeded')
+    `).run();
+
+    testDb.prepare(`
+      INSERT INTO sync_days (id, sync_run_id, date, status, disposition, synced_at)
+      VALUES (999, 1, '2026-01-02', 'succeeded', 'unchanged', '2026-01-02T10:00:00.000Z')
+    `).run();
+
+    testDb.prepare(`
+      INSERT INTO sync_layer_state (date, layer, last_attempt_at, last_success_at, accepted_fidelity, updated_at)
+      VALUES ('2026-01-02', 'summaries', '2026-01-02T10:00:00.000Z', '2026-01-02T10:00:00.000Z', 'entity_detail', '2026-01-02T10:00:00.000Z')
+    `).run();
+
+    const slices = testService.classifySlices({ date: '2026-01-02' });
+    expect(slices.length).toBeGreaterThan(0);
+    expect(slices[0].disposition).toBe('unchanged');
+    expect(slices[0].qualityStatus).toBe('checked_unchanged');
+    expect(slices[0].isStale).toBe(false);
+
+    testDb.close();
+  });
+
+  it('synthesizes detached allocations into EvaluatedSlice with totalSeconds=0, disposition=detached, and preserved allocation record', () => {
+    const testDb = openTestDatabase();
+    const testService = new SqliteClassificationService(testDb);
+
+    // Insert project
+    const projInfo = testDb.prepare(`
+      INSERT INTO projects (name, is_unattributed, first_seen_at, last_seen_at)
+      VALUES ('Test Project', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    `).run();
+    const projectId = Number(projInfo.lastInsertRowid);
+
+    // Insert detached allocation with state = 'detached' and last known duration
+    testDb.prepare(`
+      INSERT INTO daily_time_allocations (
+        id, date, project_id, entity, entity_type, kind, classification,
+        allocated_seconds, timesheet_code, note, state, detached_at, created_at, updated_at
+      ) VALUES (
+        'alloc-detached-1', '2026-01-05', ?, '/path/to/deleted_file.ts', 'file', 'entity',
+        'work', 1800, 'T123', 'Detached note', 'detached', '2026-01-05T12:00:00.000Z',
+        '2026-01-05T10:00:00.000Z', '2026-01-05T12:00:00.000Z'
+      )
+    `).run(projectId);
+
+    // Also insert another allocation with state = 'detached'
+    testDb.prepare(`
+      INSERT INTO daily_time_allocations (
+        id, date, project_id, entity, entity_type, kind, classification,
+        allocated_seconds, timesheet_code, note, state, detached_at, created_at, updated_at
+      ) VALUES (
+        'alloc-orphan-2', '2026-01-05', ?, '/path/to/missing_file.ts', 'file', 'entity',
+        'personal', 1200, 'T456', 'Orphan note', 'detached', '2026-01-05T12:00:00.000Z',
+        '2026-01-05T10:00:00.000Z', '2026-01-05T12:00:00.000Z'
+      )
+    `).run(projectId);
+
+    const slices = testService.classifySlices({ date: '2026-01-05' });
+    expect(slices).toHaveLength(2);
+
+    const detachedSlice = slices.find((s) => s.allocation?.id === 'alloc-detached-1');
+    expect(detachedSlice).toBeDefined();
+    expect(detachedSlice!.id).toBeLessThan(0);
+    expect(detachedSlice!.totalSeconds).toBe(0);
+    expect(detachedSlice!.disposition).toBe('detached');
+    expect(detachedSlice!.decision.classification).toBe('work');
+    expect(detachedSlice!.decision.source).toBe('override');
+    expect(detachedSlice!.allocation?.allocated_seconds).toBe(1800);
+    expect(detachedSlice!.allocation?.state).toBe('detached');
+
+    const orphanSlice = slices.find((s) => s.allocation?.id === 'alloc-orphan-2');
+    expect(orphanSlice).toBeDefined();
+    expect(orphanSlice!.id).toBeLessThan(0);
+    expect(orphanSlice!.totalSeconds).toBe(0);
+    expect(orphanSlice!.disposition).toBe('detached');
+    expect(orphanSlice!.decision.classification).toBe('personal');
+    expect(orphanSlice!.decision.source).toBe('override');
+    expect(orphanSlice!.allocation?.allocated_seconds).toBe(1200);
+
+    testDb.close();
+  });
 });
+

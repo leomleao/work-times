@@ -1,3 +1,5 @@
+import type { McpDataQuality } from '../sync/contracts.js';
+
 export interface WorkProjectSummary {
   project: string;
   seconds: number;
@@ -18,6 +20,7 @@ export interface WorkRangeSummary {
   unclassifiedSeconds: number;
   hasUnclassified: boolean;
   days: WorkDaySummary[];
+  dataQuality: McpDataQuality;
 }
 
 export interface WorkEvidence {
@@ -26,6 +29,7 @@ export interface WorkEvidence {
   unclassifiedSeconds: number;
   hasUnclassified: boolean;
   projects: WorkProjectSummary[];
+  dataQuality: McpDataQuality;
 }
 
 /**

@@ -2,6 +2,7 @@ import { error } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { runtime } from '$lib/server/runtime';
 import { ActivityFilterError, getActivityData } from '$lib/server/admin/activity';
+import { getDateQualityProjection, getDatesQualityProjection } from '$lib/server/admin/sync';
 
 export const load: PageServerLoad = async ({ url }) => {
   const date = url.searchParams.get('date');
@@ -45,7 +46,21 @@ export const load: PageServerLoad = async ({ url }) => {
       pageSize
     });
 
-    return { activity };
+    const targetDate =
+      activity.filters.selectedDate && activity.filters.selectedDate !== 'all'
+        ? activity.filters.selectedDate
+        : activity.latestDate;
+    const dateQuality = targetDate ? getDateQualityProjection(runtime.db, targetDate) : null;
+    const dateQualityMap = getDatesQualityProjection(
+      runtime.db,
+      activity.distinctDates.slice(0, 14)
+    );
+
+    return {
+      activity,
+      dateQuality,
+      dateQualityMap: Object.fromEntries(dateQualityMap)
+    };
   } catch (err) {
     // A rejected filter is the caller's mistake, so it surfaces as 400 with the
     // validator's own message. Anything else is a genuine server fault and

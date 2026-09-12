@@ -2,6 +2,7 @@ import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { runtime } from '$lib/server/runtime';
 import { verifyCsrfToken } from '$lib/server/security/http';
+import { getDatesQualityProjection } from '$lib/server/admin/sync';
 import {
   MAX_PATTERN_LENGTH,
   SELECTOR_TYPES,
@@ -490,6 +491,9 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     recentSlices = recentSlices.slice(0, 100);
   }
 
+  const sliceDates = [...new Set(recentSlices.map((s) => s.date))];
+  const dateQualityMap = getDatesQualityProjection(runtime.db, sliceDates);
+
   return {
     coverage,
     rules,
@@ -501,6 +505,7 @@ export const load: PageServerLoad = async ({ locals, url }) => {
     revisionState,
     machineNames,
     editorNames,
+    dateQualityMap: Object.fromEntries(dateQualityMap),
     csrfToken: locals.csrfToken
   };
 };
