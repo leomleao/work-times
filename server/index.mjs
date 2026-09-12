@@ -60,31 +60,32 @@ async function shutdown(signal) {
   }, SHUTDOWN_DEADLINE_MS);
   if (timeoutTimer.unref) timeoutTimer.unref();
 
-  // Stop HTTP intake and define drain of genuinely in-flight HTTP requests
-  const drainHttp = () =>
-    new Promise((resolve) => {
-      if (server?.server?.close) {
-        if (typeof server.server.closeIdleConnections === 'function') {
-          server.server.closeIdleConnections();
-        }
-        server.server.close((error) => {
-          if (error) {
-            process.stderr.write(`${JSON.stringify({ event: 'server.http_close_error' })}\n`);
-          }
-          resolve();
-        });
-      } else {
-        resolve();
+  // 1. Begin HTTP shutdown synchronously when signal is handled: invoke server.close immediately
+  // to refuse new intake, while retaining a promise for existing in-flight connections to drain.
+  const drainPromise = new Promise((resolve) => {
+    if (server?.server?.close) {
+      if (typeof server.server.closeIdleConnections === 'function') {
+        server.server.closeIdleConnections();
       }
-    });
+      server.server.close((error) => {
+        if (error) {
+          process.stderr.write(`${JSON.stringify({ event: 'server.http_close_error' })}\n`);
+        }
+        resolve();
+      });
+    } else {
+      resolve();
+    }
+  });
 
-  // Signal ordering matching milestone 3.4:
-  // 1. Stop HTTP intake & runtime work/timers (scheduler & coordinator stop, active run interrupted, queue preserved)
-  // 2. Drain genuinely in-flight HTTP requests while DB remains open
-  // 3. Close database after consumers stop
-  // 4. Release ownership lock
+  // 2. Signal ordering matching milestone 3.4:
+  // - Stop scheduler & coordinator (timers stopped, active run marked interrupted, queue preserved)
+  // - Have lifecycle await the already-started HTTP-drain promise while DB remains open
+  // - Close database after consumers stop
+  // - Release ownership lock
+  // - Keep existing 20-second bound
   try {
-    await lifecycle.stop('shutdown', SHUTDOWN_DEADLINE_MS - 4000, drainHttp);
+    await lifecycle.stop('shutdown', SHUTDOWN_DEADLINE_MS - 4000, () => drainPromise);
     clearTimeout(timeoutTimer);
     process.stdout.write(`${JSON.stringify({ event: 'server.stopped' })}\n`);
     process.exit(0);

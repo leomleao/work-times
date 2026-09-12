@@ -452,8 +452,23 @@ describe('Lifecycle and Ownership Contracts (P7)', () => {
       expect(siblingAcquired).toBe(true);
       await siblingLock.release();
 
-      // 5. Does not leave a permanently rejected start promise: start can be invoked again
-      shouldFail = false;
+      // 5. Permit a later process/runtime to acquire and reach readiness
+      const freshRuntime = createRuntime({
+        databasePath: dbPath,
+        wakatimeOAuthClientId: null,
+        wakatimeOAuthClientSecret: null,
+        adminUsername: 'admin',
+        adminPasswordHash: null,
+        sessionSecret: '0123456789abcdef0123456789abcdef',
+        publicUrl: parsePublicUrl('http://localhost:3002'),
+        cookieSecure: false,
+        maxDirectImportBytes: 10 * 1024 * 1024
+      });
+      await freshRuntime.lifecycle.start();
+      expect(freshRuntime.lifecycle.getReadiness().ready).toBe(true);
+      expect(freshRuntime.lifecycle.getReadiness().ownershipLockHeld).toBe(true);
+      await freshRuntime.lifecycle.stop('shutdown', 20_000);
+
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
@@ -630,6 +645,16 @@ describe('Lifecycle and Ownership Contracts (P7)', () => {
             }
           }, 50);
         });
+
+        // Prove a new connection/request is refused once intake closes
+        const newReqError = await new Promise<Error | null>((resolve) => {
+          const rejectedReq = http.get(`http://127.0.0.1:${port}/login`, (res) => {
+            res.resume();
+            resolve(null);
+          });
+          rejectedReq.on('error', (err) => resolve(err));
+        });
+        expect(newReqError).not.toBeNull();
 
         // Complete the in-flight request body while server is draining
         req.end('second_chunk=complete');
