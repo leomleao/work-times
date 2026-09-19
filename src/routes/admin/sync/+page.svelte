@@ -1,52 +1,628 @@
 <script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
   import AppShell from '$lib/components/AppShell.svelte';
   import MetricCard from '$lib/components/MetricCard.svelte';
-  import Modal from '$lib/components/Modal.svelte';
+  import QualityBadge from '$lib/components/sync/QualityBadge.svelte';
+  import SyncReadinessBanner from '$lib/components/sync/SyncReadinessBanner.svelte';
+  import SyncControls from '$lib/components/sync/SyncControls.svelte';
+  import SyncActiveProgress from '$lib/components/sync/SyncActiveProgress.svelte';
+  import SyncRunsTable from '$lib/components/sync/SyncRunsTable.svelte';
+  import SyncRunDetailModal from '$lib/components/sync/SyncRunDetailModal.svelte';
+  import SyncRegistryCard from '$lib/components/sync/SyncRegistryCard.svelte';
   import type { PageData } from './$types';
+  import type {
+    SyncAdminData,
+    AdminSyncRunSummaryDto,
+    AdminSyncRunDetailDto
+  } from '$lib/server/admin/sync';
   import {
+    Activity,
     AlertCircle,
-    AlertTriangle,
     CheckCircle2,
     Clock,
     Database,
     HardDrive,
-    Info,
     Key,
     Shield,
-    Terminal,
     XCircle
   } from '@lucide/svelte';
 
   let { data } = $props<{ data: PageData }>();
-  let sync = $derived(data.sync);
-  let sumCap = $derived(sync.capabilityState?.capabilities?.summaries);
-  let durCap = $derived(sync.capabilityState?.capabilities?.durations);
-  let hbCap = $derived(sync.capabilityState?.capabilities?.heartbeats);
 
-  // Advisories modal state for real runs
-  let advisoriesModalOpen = $state(false);
-  let selectedRunAdvisories = $state<string[]>([]);
-  let selectedRunId = $state<number>(0);
+  // State initialized from SSR data
+  let sync = $state<SyncAdminData | null>(null);
+  $effect.pre(() => {
+    if (!sync && data.sync) {
+      sync = data.sync;
+    }
+  });
+  let csrfToken = $derived(data.csrfToken);
+  let isUnavailable = $derived(data.unavailable || !sync);
 
-  function openAdvisories(runId: number, codes: string[]) {
+  // Accessible live announcement
+  let announcement = $state('');
+  function announce(message: string) {
+    announcement = message;
+  }
+
+  // Mutation and polling state
+  let busy = $state(false);
+  let pageError = $state<string | null>(null);
+
+  // Selected run details modal state
+  let selectedRunId = $state<number | null>(null);
+  let selectedRunDetail = $state<AdminSyncRunDetailDto | null>(null);
+  let runDetailLoading = $state(false);
+  let runDetailError = $state<string | null>(null);
+  let runDetailPage = $state(1);
+
+  // Derived state
+  let readiness = $derived(sync?.readiness ?? null);
+  let schedule = $derived(sync?.schedule ?? null);
+  let degradation = $derived(sync?.degradation ?? null);
+  let activeProgress = $derived(sync?.activeProgress ?? null);
+  let registry = $derived(sync?.registry ?? null);
+  let runs = $derived(sync?.runs ?? []);
+  let sourceTimezone = $derived(sync?.sourceTimezone ?? 'UTC');
+  let lastAcceptedSuccessAt = $derived(sync?.lastAcceptedSuccessAt ?? null);
+
+  let nextDueTime = $derived.by(() => {
+    if (!schedule?.nextDue) return null;
+    const dues = [schedule.nextDue.recent, schedule.nextDue.reconcile, schedule.nextDue.compare]
+      .filter((d): d is string => Boolean(d))
+      .sort();
+    return dues[0] ?? null;
+  });
+
+  // Polling logic: poll every 2000ms ONLY while active, slower bounded backoff while idle/hidden
+  let isPolling = false;
+  let pollTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  let isUnmounted = false;
+
+  let isWorkActive = $derived(
+    Boolean(
+      activeProgress?.activeRun ||
+      (activeProgress && activeProgress.queueDepth > 0) ||
+      registry?.isRefreshing ||
+      runs.some((r) => r.status === 'running' || r.status === 'queued') ||
+      busy
+    )
+  );
+
+  function getPollInterval(): number {
+    if (typeof document !== 'undefined' && document.hidden) {
+      return 10000;
+    }
+    return isWorkActive ? 2000 : 10000;
+  }
+
+  async function pollSyncState() {
+    if (isUnmounted || isPolling) return;
+    if (pollTimeoutId) {
+      clearTimeout(pollTimeoutId);
+      pollTimeoutId = null;
+    }
+
+    isPolling = true;
+    try {
+      const res = await fetch('/api/admin/sync-runs?limit=50', {
+        headers: { Accept: 'application/json' }
+      });
+
+      if (res.ok) {
+        const collection = await res.json();
+        if (sync) {
+          sync = {
+            ...sync,
+            runs: collection.runs,
+            schedule: collection.schedule,
+            readiness: collection.readiness,
+            activeProgress: {
+              ...sync.activeProgress,
+              activeRun: collection.activeRun,
+              queueDepth: collection.runs.filter((r: AdminSyncRunSummaryDto) => r.status === 'queued').length
+            }
+          };
+        }
+
+        // If a run modal is currently open, refresh its date details too
+        if (selectedRunId !== null && !runDetailLoading) {
+          await loadRunDetail(selectedRunId, runDetailPage, false);
+        }
+      }
+    } catch {
+      // Ignore transient network errors during background polling
+    } finally {
+      isPolling = false;
+      if (!isUnmounted) {
+        scheduleNextPoll(getPollInterval());
+      }
+    }
+  }
+
+  function scheduleNextPoll(delayMs?: number) {
+    if (pollTimeoutId) {
+      clearTimeout(pollTimeoutId);
+      pollTimeoutId = null;
+    }
+    if (isUnmounted) return;
+    const delay = delayMs ?? getPollInterval();
+    pollTimeoutId = setTimeout(() => {
+      pollTimeoutId = null;
+      void pollSyncState();
+    }, delay);
+  }
+
+  // Speed up polling to 2s when work transitions from idle to active
+  let prevWorkActive = false;
+  $effect(() => {
+    const active = isWorkActive;
+    if (active && !prevWorkActive) {
+      prevWorkActive = true;
+      if (!isPolling) {
+        scheduleNextPoll(document.hidden ? 10000 : 2000);
+      }
+    } else if (!active && prevWorkActive) {
+      prevWorkActive = false;
+    }
+  });
+
+  function handleVisibilityChange() {
+    if (!document.hidden) {
+      // Visibility resume should not create duplicate polls
+      if (pollTimeoutId) {
+        clearTimeout(pollTimeoutId);
+        pollTimeoutId = null;
+      }
+      if (!isPolling) {
+        void pollSyncState();
+      }
+    }
+  }
+
+  onMount(() => {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    // Start initial background poll with appropriate interval
+    scheduleNextPoll(getPollInterval());
+  });
+
+  onDestroy(() => {
+    isUnmounted = true;
+    if (pollTimeoutId) {
+      clearTimeout(pollTimeoutId);
+      pollTimeoutId = null;
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    }
+  });
+
+  // Map API errors to human-readable safe descriptions:
+  // Must NEVER return arbitrary server/network error text for unknown codes!
+  function mapSafeError(err: unknown, fallback: string): string {
+    if (!err) return fallback;
+    const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as any).code) : '';
+
+    if (code === 'SYNC_QUEUE_FULL') {
+      return 'The sync queue is currently full (maximum 10 queued runs). Please wait for active runs to complete.';
+    }
+    if (code === 'IDEMPOTENCY_CONFLICT') {
+      return 'An identical mutation with a conflicting payload was previously submitted.';
+    }
+    if (code === 'UNAUTHORIZED') {
+      return 'Session expired. Please log in again.';
+    }
+    if (code === 'FORBIDDEN') {
+      return 'Request rejected: missing or invalid CSRF token or origin.';
+    }
+    if (code === 'TIMEZONE_MISMATCH') {
+      return 'Upstream timezone conflicts with the pinned archive timezone.';
+    }
+    if (code === 'RECONNECT_REQUIRED') {
+      return 'WakaTime re-authorization required before retrying restricted dates.';
+    }
+    if (code === 'RATE_LIMITED') {
+      return 'Upstream rate limit in effect. Requests are backed off.';
+    }
+    if (code === 'SYNC_STATE_UNAVAILABLE') {
+      return 'Sync engine state is currently unavailable.';
+    }
+
+    // Return the operation-specific safe fallback for unknown or unallowlisted codes
+    return fallback;
+  }
+
+  // Stable idempotency keys across ambiguous failed retries for the same payload
+  let recentIdempotencyKey: string | null = null;
+  let backfillIdempotency: { payloadKey: string; idempotencyKey: string } | null = null;
+  let compareIdempotency: { payloadKey: string; idempotencyKey: string } | null = null;
+
+  // Action: Sync Now
+  async function handleSyncNow() {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    if (!recentIdempotencyKey) {
+      recentIdempotencyKey = `manual-recent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+    const idempotencyKey = recentIdempotencyKey;
+
+    try {
+      const res = await fetch('/api/admin/sync-runs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          mode: 'recent',
+          idempotencyKey,
+          csrfToken
+        })
+      });
+
+      const body = await res.json();
+      if (!res.ok) {
+        throw body;
+      }
+
+      // Accepted success: clear the stable key
+      recentIdempotencyKey = null;
+      announce(`Sync run #${body.runId} successfully enqueued.`);
+      await pollSyncState();
+    } catch (err) {
+      pageError = mapSafeError(err, 'Failed to enqueue recent sync');
+      announce(`Error: ${pageError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Action: Bounded Backfill
+  async function handleBackfill(startDate: string, endDate: string) {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    const payloadKey = `${startDate}_${endDate}`;
+    if (!backfillIdempotency || backfillIdempotency.payloadKey !== payloadKey) {
+      backfillIdempotency = {
+        payloadKey,
+        idempotencyKey: `manual-backfill-${startDate}-${endDate}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      };
+    }
+    const idempotencyKey = backfillIdempotency.idempotencyKey;
+
+    try {
+      const res = await fetch('/api/admin/sync-runs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          mode: 'backfill',
+          rangeStartDate: startDate,
+          rangeEndDate: endDate,
+          idempotencyKey,
+          csrfToken
+        })
+      });
+
+      const body = await res.json();
+      if (!res.ok) {
+        throw body;
+      }
+
+      // Accepted success: clear the stable key
+      backfillIdempotency = null;
+      announce(`Backfill run #${body.runId} (${startDate} to ${endDate}) enqueued.`);
+      await pollSyncState();
+    } catch (err) {
+      pageError = mapSafeError(err, 'Failed to enqueue backfill run');
+      announce(`Error: ${pageError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Action: Compare
+  async function handleCompare(startDate: string, endDate: string) {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    const payloadKey = `${startDate}_${endDate}`;
+    if (!compareIdempotency || compareIdempotency.payloadKey !== payloadKey) {
+      compareIdempotency = {
+        payloadKey,
+        idempotencyKey: `manual-compare-${startDate}-${endDate}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      };
+    }
+    const idempotencyKey = compareIdempotency.idempotencyKey;
+
+    try {
+      const res = await fetch('/api/admin/sync-runs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          mode: 'compare',
+          rangeStartDate: startDate,
+          rangeEndDate: endDate,
+          idempotencyKey,
+          csrfToken
+        })
+      });
+
+      const body = await res.json();
+      if (!res.ok) {
+        throw body;
+      }
+
+      // Accepted success: clear the stable key
+      compareIdempotency = null;
+      announce(`Comparison run #${body.runId} (${startDate} to ${endDate}) enqueued.`);
+      await pollSyncState();
+    } catch (err) {
+      pageError = mapSafeError(err, 'Failed to enqueue comparison run');
+      announce(`Error: ${pageError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Action: Toggle Schedule
+  async function handleToggleSchedule(enabled: boolean) {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    try {
+      const res = await fetch('/api/admin/sync-settings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          schedulingEnabled: enabled,
+          csrfToken
+        })
+      });
+
+      const body = await res.json();
+      if (!res.ok) throw body;
+
+      if (sync && sync.schedule) {
+        sync.schedule = {
+          ...sync.schedule,
+          schedulingEnabled: body.schedulingEnabled
+        };
+      }
+
+      announce(`Automated scheduling ${body.schedulingEnabled ? 'enabled' : 'disabled'}.`);
+    } catch (err) {
+      pageError = mapSafeError(err, 'Failed to update schedule settings');
+      announce(`Error: ${pageError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Action: Bind Connection
+  async function handleBindConnection() {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    try {
+      const res = await fetch('/api/admin/sync-settings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          bindCurrentConnection: true,
+          csrfToken
+        })
+      });
+
+      const body = await res.json();
+      if (!res.ok) throw body;
+
+      announce('WakaTime connection generation bound to archive identity.');
+      await pollSyncState();
+    } catch (err) {
+      pageError = mapSafeError(err, 'Failed to bind connection');
+      announce(`Error: ${pageError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Action: Cancel Run
+  async function handleCancelRun(runId: number) {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    try {
+      const res = await fetch(`/api/admin/sync-runs/${runId}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({ csrfToken })
+      });
+
+      const body = await res.json();
+      if (!res.ok) throw body;
+
+      announce(`Run #${runId} cancelled successfully.`);
+      await pollSyncState();
+    } catch (err) {
+      pageError = mapSafeError(err, `Failed to cancel run #${runId}`);
+      announce(`Error: ${pageError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Action: Retry Run
+  async function handleRetryRun(runId: number) {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    try {
+      const res = await fetch(`/api/admin/sync-runs/${runId}/retry`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({ csrfToken })
+      });
+
+      const body = await res.json();
+      if (!res.ok) throw body;
+
+      announce(`Retry run #${body.runId} enqueued for parent run #${runId}.`);
+      await pollSyncState();
+    } catch (err) {
+      pageError = mapSafeError(err, `Failed to retry run #${runId}`);
+      announce(`Error: ${pageError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Action: Retry Single Date
+  async function handleRetryDate(runId: number, date: string) {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    try {
+      const res = await fetch(`/api/admin/sync-runs/${runId}/retry`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({
+          targetDate: date,
+          csrfToken
+        })
+      });
+
+      const body = await res.json();
+      if (!res.ok) throw body;
+
+      announce(`Retry enqueued for date ${date} (Run #${body.runId}).`);
+      await pollSyncState();
+      await loadRunDetail(selectedRunId!, runDetailPage, false);
+    } catch (err) {
+      runDetailError = mapSafeError(err, `Failed to retry date ${date}`);
+      announce(`Error: ${runDetailError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Action: Refresh Registry
+  async function handleRefreshRegistry() {
+    if (busy || !csrfToken) return;
+    busy = true;
+    pageError = null;
+
+    try {
+      const res = await fetch('/api/admin/sync-registry/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
+        body: JSON.stringify({ csrfToken })
+      });
+
+      const body = await res.json();
+      if (!res.ok) throw body;
+
+      if (sync && sync.registry) {
+        sync.registry = {
+          ...sync.registry,
+          isRefreshing: true
+        };
+      }
+
+      announce('User-agent registry refresh enqueued.');
+      scheduleNextPoll(1000);
+    } catch (err) {
+      pageError = mapSafeError(err, 'Failed to initiate registry refresh');
+      announce(`Error: ${pageError}`);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Load Run Details
+  async function loadRunDetail(runId: number, page = 1, showSpinner = true) {
+    if (showSpinner) runDetailLoading = true;
+    runDetailError = null;
+
+    try {
+      const res = await fetch(`/api/admin/sync-runs/${runId}?page=${page}&pageSize=50`, {
+        headers: { Accept: 'application/json' }
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw err;
+      }
+      selectedRunDetail = await res.json();
+      runDetailPage = page;
+    } catch (err) {
+      runDetailError = mapSafeError(err, `Failed to load details for run #${runId}`);
+    } finally {
+      if (showSpinner) runDetailLoading = false;
+    }
+  }
+
+  function handleSelectRun(runId: number) {
     selectedRunId = runId;
-    selectedRunAdvisories = codes;
-    advisoriesModalOpen = true;
+    void loadRunDetail(runId, 1, true);
+  }
+
+  function handleCloseRunModal() {
+    selectedRunId = null;
+    selectedRunDetail = null;
+    runDetailError = null;
   }
 </script>
 
 <svelte:head>
-  <title>API Sync & Capabilities — Work Times</title>
+  <title>API Sync Engine & Operations — Work Times</title>
 </svelte:head>
+
+<!-- Live accessibility announcement region -->
+<div class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="live-announcement">
+  {announcement}
+</div>
 
 <AppShell>
   <header class="page-header">
     <div>
       <p class="eyebrow">Data Ingestion Engine</p>
-      <h1>API Sync & Capability State.</h1>
+      <h1>Operational Sync & Capabilities.</h1>
       <p class="lede">
-        Inspect upstream WakaTime API sync runs, recorded daily sync states, and discovered
-        account plan capability boundaries. Background incremental sync is deferred.
+        Execute verified WakaTime synchronizations, inspect execution progress and layer outcomes,
+        and manage schedule and user-agent registry settings.
       </p>
     </div>
     <div class="header-actions">
@@ -57,338 +633,125 @@
     </div>
   </header>
 
-  <!-- Truthful status banners -->
-  <div style="max-width: 1180px; margin: 0 auto 20px; display: flex; flex-direction: column; gap: 12px;">
-    {#if !sync.oauthAppConfigured}
-      <div class="notice info" role="status">
-        <Key size={18} style="flex-shrink: 0; color: var(--accent);" />
-        <div>
-          <strong>The WakaTime OAuth app is unconfigured.</strong>
-          <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
-            Add <code>WAKATIME_OAUTH_CLIENT_ID</code>, the App Secret, and a persistent <code>SESSION_SECRET</code> to the server environment.
-          </p>
-        </div>
+  {#if isUnavailable}
+    <div class="notice danger" role="alert" style="max-width: 1180px; margin: 0 auto 24px;" data-testid="sync-unavailable-banner">
+      <AlertCircle size={18} style="flex-shrink: 0;" />
+      <div>
+        <strong>Sync State Unavailable.</strong>
+        <p style="margin: 4px 0 0; font-size: 13px;">
+          The sync service could not be initialized or database tables are unavailable.
+        </p>
       </div>
-    {:else if !sync.oauthConnected}
-      <div class="notice info" role="status">
-        <Key size={18} style="flex-shrink: 0; color: var(--accent);" />
-        <div>
-          <strong>WakaTime authorization is required.</strong>
-          <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
-            <a href="/integrations/wakatime" style="color: var(--text); text-decoration: underline;">Open the secure connection page</a> to authorize read-only access.
-          </p>
-        </div>
-      </div>
-    {:else}
-      <div class="notice safe" role="status">
-        <CheckCircle2 size={18} style="flex-shrink: 0; color: var(--work);" />
-        <div>
-          <strong>WakaTime OAuth is connected. Safe capability discovery is ready.</strong>
-          <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
-            Run safe discovery for this Docker database: <code>docker compose run --rm --build work-times-tools wakatime:discover</code>.
-            This probes the upstream API without modifying telemetry and stores discovered account limits.
-          </p>
+    </div>
+  {:else}
+    <!-- Top-level error notification banner if present -->
+    {#if pageError}
+      <div class="notice danger" role="alert" style="max-width: 1180px; margin: 0 auto 16px;" data-testid="page-error-banner">
+        <AlertCircle size={18} style="flex-shrink: 0;" />
+        <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+          <span>{pageError}</span>
+          <button
+            type="button"
+            class="button ghost sm"
+            style="color: var(--danger); padding: 2px 6px;"
+            onclick={() => (pageError = null)}
+          >
+            Dismiss
+          </button>
         </div>
       </div>
     {/if}
 
-    <div class="notice neutral" role="status">
-      <Clock size={18} style="flex-shrink: 0; color: var(--muted);" />
-      <div>
-        <strong>Background and live incremental sync execution is deferred.</strong>
-        <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
-          Automated background synchronization is intentionally deferred in this architecture. All data synchronization
-          is initiated through explicit operator CLI commands to guarantee predictable execution, safe idempotency, and auditability.
-        </p>
-      </div>
-    </div>
-  </div>
-
-  <!-- KPI Metrics -->
-  <section class="metrics" aria-label="Sync engine status overview">
-    <MetricCard
-      label="WakaTime OAuth"
-      value={sync.oauthConnected ? 'Connected' : 'Disconnected'}
-      subtext={sync.oauthConnected ? 'Encrypted server-side tokens' : 'Authorization required'}
-      badge={sync.discoveryReady ? 'Ready' : 'Setup'}
-      badgeVariant={sync.discoveryReady ? 'work' : 'neutral'}
-    />
-    <MetricCard
-      label="Recorded Sync Runs"
-      value={sync.syncRuns.length.toLocaleString()}
-      subtext="Historical sync run executions"
-      badge={sync.syncRuns.length > 0 ? 'Recorded' : 'Empty'}
-      badgeVariant="neutral"
-    />
-    <MetricCard
-      label="Tracked Sync Days"
-      value={sync.syncDays.length.toLocaleString()}
-      subtext="Day-level sync records in SQLite"
-      badge={sync.syncDays.length > 0 ? 'Indexed' : 'Empty'}
-      badgeVariant={sync.syncDays.length > 0 ? 'safe' : 'neutral'}
-    />
-    <MetricCard
-      label="Background Engine"
-      value="Deferred"
-      subtext="Live background polling disabled"
-      badge="Architectural"
-      badgeVariant="neutral"
-    />
-  </section>
-
-  <!-- Capability Boundaries Panel -->
-  <div style="max-width: 1180px; margin: 0 auto 24px;">
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <p class="eyebrow">Policy & Plan Boundaries</p>
-          <h2>WakaTime API Capabilities</h2>
-        </div>
-        <span class="badge {sync.capabilityState ? 'safe' : 'neutral'}">
-          {sync.capabilityState ? 'Probed' : 'Not Probed Yet'}
-        </span>
-      </div>
-
-      <div style="padding: 20px 22px;">
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;">
-          <!-- Summaries capability -->
-          <div style="padding: 16px; background: #11110f; border: 1px solid var(--border); border-radius: var(--radius-sm);">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
-              <div>
-                <strong style="display: block; font-size: 14px;">Summaries (Required Baseline)</strong>
-                <small style="color: var(--faint);">Daily totals, projects, languages, editors</small>
-              </div>
-              <span class="badge {sumCap?.status === 'available' ? 'work' : sumCap?.status === 'restricted' ? 'accent' : 'neutral'}">
-                {sumCap ? sumCap.status.toUpperCase() : 'UNTESTED'}
-              </span>
-            </div>
-            <p style="margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5;">
-              Primary source of truth for daily grand totals.
-              {#if sumCap?.lastSuccessAt}
-                Last confirmed at {new Date(sumCap.lastSuccessAt).toLocaleString()}.
-              {:else}
-                Run the safe discovery command to probe this capability.
-              {/if}
-            </p>
-          </div>
-
-          <!-- Durations capability -->
-          <div style="padding: 16px; background: #11110f; border: 1px solid var(--border); border-radius: var(--radius-sm);">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
-              <div>
-                <strong style="display: block; font-size: 14px;">Durations (Optional)</strong>
-                <small style="color: var(--faint);">Granular entity start and end intervals</small>
-              </div>
-              <span class="badge {durCap?.status === 'available' ? 'work' : durCap?.status === 'restricted' ? 'accent' : 'neutral'}">
-                {durCap ? durCap.status.toUpperCase() : 'UNTESTED'}
-              </span>
-            </div>
-            <p style="margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5;">
-              {#if durCap?.status === 'restricted'}
-                Restricted on upstream plan ({durCap.restrictionCode ?? 'HTTP 402/403'}). Engine degrades to partial sync gracefully.
-              {:else if durCap?.status === 'available'}
-                Available and active for granular duration calculation.
-              {:else}
-                Subject to account plan tier. Evaluated during safe discovery.
-              {/if}
-            </p>
-          </div>
-
-          <!-- Heartbeats capability -->
-          <div style="padding: 16px; background: #11110f; border: 1px solid var(--border); border-radius: var(--radius-sm);">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
-              <div>
-                <strong style="display: block; font-size: 14px;">Heartbeats (Optional)</strong>
-                <small style="color: var(--faint);">Raw write events, AI sessions, and tokens</small>
-              </div>
-              <span class="badge {hbCap?.status === 'available' ? 'work' : hbCap?.status === 'restricted' ? 'accent' : 'neutral'}">
-                {hbCap ? hbCap.status.toUpperCase() : 'UNTESTED'}
-              </span>
-            </div>
-            <p style="margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5;">
-              {#if hbCap?.status === 'restricted'}
-                Restricted on upstream plan ({hbCap.restrictionCode ?? 'HTTP 402/403'}). Full heartbeats can be imported via dump archives.
-              {:else if hbCap?.status === 'available'}
-                Available for fine-grained heartbeat ingestion.
-              {:else}
-                Subject to account plan tier. Evaluated during safe discovery.
-              {/if}
-            </p>
-          </div>
-        </div>
-      </div>
+    <!-- KPI Summary Metrics -->
+    <section class="metrics" aria-label="Sync engine status overview">
+      <MetricCard
+        label="WakaTime Connection"
+        value={readiness?.oauthConnected ? 'Connected' : 'Disconnected'}
+        subtext={readiness?.reconnectRequired ? 'Reconnect required' : readiness?.oauthConnected ? 'Tokens ready' : 'Auth required'}
+        badge={readiness?.reconnectRequired ? 'Reconnect' : readiness?.oauthConnected ? 'Active' : 'Setup'}
+        badgeVariant={readiness?.reconnectRequired ? 'accent' : readiness?.oauthConnected ? 'work' : 'neutral'}
+      />
+      <MetricCard
+        label="Active Execution"
+        value={activeProgress?.activeRun ? `#${activeProgress.activeRun.id}` : 'Idle'}
+        subtext={activeProgress?.activeRun ? `${activeProgress.activeRun.daysSynced} / ${activeProgress.activeRun.dayCount} dates` : `${runs.length} runs recorded`}
+        badge={activeProgress?.activeRun ? 'Running' : 'Ready'}
+        badgeVariant={activeProgress?.activeRun ? 'work' : 'neutral'}
+      />
+      <MetricCard
+        label="Automated Schedule"
+        value={schedule?.schedulingEnabled ? 'Enabled' : 'Disabled'}
+        subtext={schedule?.schedulingEnabled ? (nextDueTime ? 'Cadence active' : 'Waiting') : 'Manual only'}
+        badge={schedule?.schedulingEnabled ? 'Active' : 'Off'}
+        badgeVariant={schedule?.schedulingEnabled ? 'safe' : 'neutral'}
+      />
+      <MetricCard
+        label="Identity Registry"
+        value={registry?.distinctEditors ? `${registry.distinctEditors} Editors` : 'Published'}
+        subtext={registry?.lastRefreshedAt ? 'Labels up to date' : 'Initial state'}
+        badge={registry?.isRefreshing ? 'Refreshing' : 'Current'}
+        badgeVariant={registry?.isRefreshing ? 'work' : 'neutral'}
+      />
     </section>
-  </div>
 
-  <!-- Real Sync Runs History -->
-  <div style="max-width: 1180px; margin: 0 auto 24px;">
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <p class="eyebrow">Execution Log</p>
-          <h2>Recorded Sync Runs</h2>
-        </div>
-        <span class="badge neutral">{sync.syncRuns.length} runs</span>
-      </div>
+    <div style="max-width: 1180px; margin: 0 auto;">
+      <!-- Readiness, Timezone, Schedule & Degradation Banners -->
+      <SyncReadinessBanner
+        {readiness}
+        {schedule}
+        {degradation}
+        {sourceTimezone}
+        {lastAcceptedSuccessAt}
+      />
 
-      <div class="table-wrap">
-        <table class="data-table" aria-label="Sync runs table">
-          <thead>
-            <tr>
-              <th scope="col">Run ID</th>
-              <th scope="col">Started At</th>
-              <th scope="col">Trigger</th>
-              <th scope="col">Date Range</th>
-              <th scope="col">Days Synced / Failed</th>
-              <th scope="col">Status</th>
-              <th scope="col" style="text-align: right;">Advisories</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#if sync.syncRuns.length === 0}
-              <tr>
-                <td colspan="7" style="text-align: center; padding: 36px 16px; color: var(--faint);">
-                  No sync runs recorded in database. Run discovery or sync commands via the CLI.
-                </td>
-              </tr>
-            {:else}
-              {#each sync.syncRuns as run}
-                <tr>
-                  <td><code>#{run.id}</code></td>
-                  <td style="font-size: 12px; white-space: nowrap;">
-                    {new Date(run.startedAt).toLocaleString()}
-                  </td>
-                  <td>
-                    <span class="badge neutral">{run.trigger}</span>
-                  </td>
-                  <td style="font-size: 12px; font-family: ui-monospace, monospace;">
-                    {run.rangeStartDate ?? '—'} to {run.rangeEndDate ?? '—'}
-                  </td>
-                  <td style="font-size: 12px;">
-                    <strong>{run.daysSynced} synced</strong>
-                    {#if run.daysFailed > 0}
-                      <span style="color: var(--danger);">({run.daysFailed} failed)</span>
-                    {/if}
-                  </td>
-                  <td>
-                    <span class="badge {run.status === 'succeeded' ? 'safe' : run.status === 'partial' ? 'accent' : 'danger'}">
-                      {run.status.toUpperCase()}
-                    </span>
-                  </td>
-                  <td style="text-align: right;">
-                    {#if run.advisoryCodes.length > 0}
-                      <button
-                        type="button"
-                        class="button ghost sm"
-                        onclick={() => openAdvisories(run.id, run.advisoryCodes)}
-                        aria-label="View advisories for run {run.id}"
-                      >
-                        <AlertCircle size={13} style="color: var(--warning);" />
-                        <span>{run.advisoryCodes.length} advisory</span>
-                      </button>
-                    {:else}
-                      <span style="color: var(--faint); font-size: 11px;">None</span>
-                    {/if}
-                  </td>
-                </tr>
-              {/each}
-            {/if}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  </div>
+      <!-- Active / Queued Progress -->
+      <SyncActiveProgress
+        {activeProgress}
+        rateLimitedUntil={degradation?.rateLimitedUntil}
+        {busy}
+        onCancel={handleCancelRun}
+      />
 
-  <!-- Real Sync Days History -->
-  {#if sync.syncDays.length > 0}
-    <div style="max-width: 1180px; margin: 0 auto 24px;">
-      <section class="panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Day-Level State</p>
-            <h2>Recorded Sync Days</h2>
-          </div>
-          <span class="badge neutral">{sync.syncDays.length} days</span>
-        </div>
+      <!-- Operational Actions: Sync Now, Backfill, Compare, Schedule Toggle -->
+      <SyncControls
+        {csrfToken}
+        schedulingEnabled={schedule?.schedulingEnabled ?? false}
+        {sourceTimezone}
+        {busy}
+        onSyncNow={handleSyncNow}
+        onBackfill={handleBackfill}
+        onCompare={handleCompare}
+        onToggleSchedule={handleToggleSchedule}
+        onBindConnection={handleBindConnection}
+      />
 
-        <div class="table-wrap">
-          <table class="data-table" aria-label="Sync days table">
-            <thead>
-              <tr>
-                <th scope="col">Date</th>
-                <th scope="col">Status</th>
-                <th scope="col">Summaries</th>
-                <th scope="col">Durations</th>
-                <th scope="col">Heartbeats</th>
-                <th scope="col">Total Recorded Time</th>
-                <th scope="col" style="text-align: right;">Heartbeats Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each sync.syncDays as day}
-                <tr>
-                  <td style="font-family: ui-monospace, monospace; font-size: 12px;">
-                    <strong>{day.date}</strong>
-                  </td>
-                  <td>
-                    <span class="badge {day.status === 'succeeded' ? 'safe' : day.status === 'partial' ? 'accent' : 'danger'}">
-                      {day.status.toUpperCase()}
-                    </span>
-                  </td>
-                  <td>
-                    <span style="font-size: 11px; color: {day.summariesStatus === 'succeeded' ? 'var(--work)' : 'var(--faint)'};">
-                      {day.summariesStatus ?? '—'}
-                    </span>
-                  </td>
-                  <td>
-                    <span style="font-size: 11px; color: {day.durationsStatus === 'succeeded' ? 'var(--work)' : 'var(--faint)'};">
-                      {day.durationsStatus ?? '—'}
-                    </span>
-                  </td>
-                  <td>
-                    <span style="font-size: 11px; color: {day.heartbeatsStatus === 'succeeded' ? 'var(--work)' : 'var(--faint)'};">
-                      {day.heartbeatsStatus ?? '—'}
-                    </span>
-                  </td>
-                  <td>
-                    <span style="font-weight: 500;">{day.formattedDuration}</span>
-                  </td>
-                  <td style="text-align: right; font-family: ui-monospace, monospace; font-size: 12px;">
-                    {day.heartbeatCount.toLocaleString()}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      <!-- Bounded Run History Table -->
+      <SyncRunsTable
+        {runs}
+        {selectedRunId}
+        {busy}
+        onSelectRun={handleSelectRun}
+        onRetryRun={handleRetryRun}
+      />
+
+      <!-- User-Agent Registry Card -->
+      <SyncRegistryCard
+        {registry}
+        {busy}
+        onRefreshRegistry={handleRefreshRegistry}
+      />
     </div>
+
+    <!-- Selected Run Details Modal -->
+    <SyncRunDetailModal
+      runDetail={selectedRunDetail}
+      loading={runDetailLoading}
+      error={runDetailError}
+      {busy}
+      onClose={handleCloseRunModal}
+      onPageChange={(p) => loadRunDetail(selectedRunId!, p, true)}
+      onRetryDate={handleRetryDate}
+      onAnnounce={announce}
+    />
   {/if}
 </AppShell>
-
-<!-- Advisories Modal for real runs -->
-<Modal
-  open={advisoriesModalOpen}
-  title="Sync Run #{selectedRunId} Advisories"
-  description="Diagnostic codes recorded by the capability policy engine."
-  onclose={() => (advisoriesModalOpen = false)}
->
-  <div style="display: flex; flex-direction: column; gap: 10px;">
-    {#each selectedRunAdvisories as code}
-      <div style="padding: 10px 14px; background: #11110f; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 12px; display: flex; align-items: flex-start; gap: 8px;">
-        <AlertCircle size={16} style="color: var(--warning); flex-shrink: 0; margin-top: 2px;" />
-        <span style="font-family: ui-monospace, monospace; color: var(--text);">{code}</span>
-      </div>
-    {/each}
-  </div>
-
-  {#snippet footer()}
-    <button
-      type="button"
-      class="button primary"
-      onclick={() => (advisoriesModalOpen = false)}
-    >
-      Close
-    </button>
-  {/snippet}
-</Modal>

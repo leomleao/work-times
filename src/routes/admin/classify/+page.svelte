@@ -69,7 +69,14 @@
 
   function formatSelectorDisplay(type: SelectorType | string, value: string): string {
     if (type === 'machine' && machineNames[value]) return machineNames[value];
-    if (type === 'editor' && editorNames[value]) return editorNames[value];
+    if (type === 'editor') {
+      if (editorNames[value]) return editorNames[value];
+      const isUuid =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ||
+        /^[0-9a-f]{32}$/i.test(value) ||
+        /uuid/i.test(value);
+      return isUuid ? `Unresolved editor (${value})` : value;
+    }
     return value;
   }
 
@@ -1019,7 +1026,11 @@
                     <span class="badge neutral">{rule.selector_type}</span>
                   </td>
                   <td>
-                    <code style="font-size: 12px; color: var(--text);">{rule.display_value || formatSelectorDisplay(rule.selector_type, rule.selector_value)}</code>
+                    <code
+                      style="font-size: 12px; color: var(--text);"
+                      title={rule.selector_type === 'editor' ? rule.selector_value : undefined}
+                      aria-label={rule.selector_type === 'editor' ? `Editor selector: ${rule.selector_value}` : undefined}
+                    >{rule.display_value || formatSelectorDisplay(rule.selector_type, rule.selector_value)}</code>
                   </td>
                   <td>
                     {#if rule.match_mode === 'glob'}

@@ -1,6 +1,7 @@
 <script lang="ts">
   import AppShell from '$lib/components/AppShell.svelte';
   import MetricCard from '$lib/components/MetricCard.svelte';
+  import QualityBadge from '$lib/components/sync/QualityBadge.svelte';
   import type { PageData } from './$types';
   import {
     Activity,
@@ -22,6 +23,8 @@
 
   let { data } = $props<{ data: PageData }>();
   let activity = $derived(data.activity);
+  let dateQuality = $derived(data.dateQuality);
+  let dateQualityMap = $derived(data.dateQualityMap ?? {});
 
   function getEntityIcon(type: string) {
     switch (type) {
@@ -596,6 +599,50 @@
     </form>
   </div>
 
+  <!-- Date Quality Projection Banner -->
+  {#if dateQuality}
+    <div
+      class="panel"
+      style="max-width: 1180px; margin: 0 auto 16px; padding: 12px 18px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; background: var(--panel-raised);"
+      data-testid="activity-date-quality-banner"
+    >
+      <div style="display: flex; align-items: center; gap: 12px; font-size: 13px; flex-wrap: wrap;">
+        <span style="color: var(--faint);">Date Quality ({dateQuality.date}):</span>
+        <QualityBadge
+          status={dateQuality.qualityStatus}
+          isStale={dateQuality.isStale}
+          isProvisional={dateQuality.isProvisional}
+          disposition={dateQuality.disposition}
+        />
+        {#if dateQuality.isStale}
+          <span style="font-size: 12px; color: var(--accent);">
+            (Archive data is stale)
+          </span>
+        {/if}
+        {#if dateQuality.isProvisional}
+          <span style="font-size: 12px; color: var(--personal);">
+            (Current-day provisional)
+          </span>
+        {/if}
+        {#if dateQuality.disposition === 'DETAIL_DOWNGRADE' || dateQuality.disposition === 'preserved' || dateQuality.qualityStatus === 'archived_detail_preserved'}
+          <span style="font-size: 12px; color: var(--warning);">
+            (Archived detail preserved: summary downgrade)
+          </span>
+        {/if}
+        {#if dateQuality.degradedLayers && dateQuality.degradedLayers.length > 0}
+          <span style="font-size: 12px; color: var(--accent);">
+            Degraded layers: {dateQuality.degradedLayers.join(', ')}
+          </span>
+        {/if}
+      </div>
+      {#if dateQuality.lastSyncedAt}
+        <small style="color: var(--muted); font-size: 11px;">
+          Last verified: {new Date(dateQuality.lastSyncedAt).toLocaleString()}
+        </small>
+      {/if}
+    </div>
+  {/if}
+
   <!-- Slices Table -->
   <div style="max-width: 1180px; margin: 0 auto 20px;">
     <section class="panel">
@@ -645,9 +692,20 @@
             {:else}
               {#each activity.items as row}
                 {@const Icon = getEntityIcon(row.entityType)}
+                {@const rowQuality = dateQualityMap[row.date] || (row.qualityStatus ? { qualityStatus: row.qualityStatus, isStale: row.isStale, isProvisional: row.isProvisional, disposition: row.disposition } : null)}
                 <tr>
                   <td style="white-space: nowrap; font-family: ui-monospace, monospace; font-size: 12px;">
-                    {row.date}
+                    <div>{row.date}</div>
+                    {#if rowQuality}
+                      <div style="margin-top: 3px;">
+                        <QualityBadge
+                          status={rowQuality.qualityStatus}
+                          isStale={rowQuality.isStale}
+                          isProvisional={rowQuality.isProvisional}
+                          disposition={rowQuality.disposition}
+                        />
+                      </div>
+                    {/if}
                   </td>
                   <td style="white-space: nowrap;">
                     <strong style="color: var(--text); font-size: 13px;">{row.formattedDuration}</strong>
@@ -666,6 +724,11 @@
                       >
                         {row.entity}
                       </span>
+                      {#if row.entity === row.projectName && (row.entityType === 'unattributed' || (row as any).kind === 'project_summary')}
+                        <span class="badge neutral" style="font-size: 9px; padding: 1px 5px;" title="Coarse project summary without entity breakdown. Unclassified by default.">
+                          Coarse
+                        </span>
+                      {/if}
                     </div>
                   </td>
                   <td>
