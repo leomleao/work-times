@@ -388,4 +388,3 @@ describe('MCP Configuration Recipes Module', () => {
     });
   });
 });
-

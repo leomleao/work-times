@@ -141,4 +141,3 @@ describe('/api/admin/sync-settings route', () => {
     });
   });
 });
-

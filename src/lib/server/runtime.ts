@@ -712,4 +712,3 @@ export const runtime: ServerRuntime = new Proxy({} as ServerRuntime, {
     return Reflect.getOwnPropertyDescriptor(target, prop);
   }
 });
-

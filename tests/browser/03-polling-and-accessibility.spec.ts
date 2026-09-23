@@ -404,5 +404,3 @@ test.describe('P8B: Active Polling, Concurrency, Focus, and Accessibility', () =
     await expect(modal).not.toBeVisible();
   });
 });
-
-

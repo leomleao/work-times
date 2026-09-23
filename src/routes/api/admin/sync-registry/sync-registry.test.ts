@@ -196,4 +196,3 @@ describe('/api/admin/sync-registry/refresh route', () => {
     expect(data.code).toBe('SYNC_STATE_UNAVAILABLE');
   });
 });
-

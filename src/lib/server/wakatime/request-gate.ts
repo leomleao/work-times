@@ -246,4 +246,3 @@ export function getApplicationRequestGate(): WakaTimeRequestGate {
 export function resetApplicationRequestGate(gate?: WakaTimeRequestGate): void {
   sharedApplicationRequestGate = gate;
 }
-

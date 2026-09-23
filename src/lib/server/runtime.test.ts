@@ -777,4 +777,3 @@ describe('Lifecycle and Ownership Contracts (P7)', () => {
     });
   });
 });
-

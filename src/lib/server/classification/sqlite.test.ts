@@ -1213,4 +1213,3 @@ describe('Wildcard Rules, Consolidation & Telemetry Digest (TC-10, TC-11, TC-12)
     testDb.close();
   });
 });
-
