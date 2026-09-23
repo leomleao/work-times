@@ -27,8 +27,17 @@ export function seedCleanTestState(): void {
       DELETE FROM user_agent_registry;
       DELETE FROM projects;
       DELETE FROM source_imports;
+      DELETE FROM api_keys;
       DELETE FROM app_settings WHERE key LIKE 'sync.%';
     `);
+
+    // Ensure active API key for MCP configuration
+    db.prepare(`
+      INSERT OR REPLACE INTO api_keys
+        (id, name, token_prefix, token_hash, scopes, created_at)
+      VALUES
+        ('test-key-1', 'Test Agent Key', 'wtk_test123', 'hash-test123', '["activity:read"]', '2026-09-01T00:00:00.000Z')
+    `).run();
 
     // Ensure account settings with Europe/London
     db.prepare(`

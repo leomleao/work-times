@@ -106,4 +106,48 @@ test.describe('P8B: Classify Preservation, Editor Registry Labels, Privacy, and 
     await page.click('button:has-text("Active Rules")');
     await expect(page.locator('h2:has-text("All Classification Rules")')).toBeVisible();
   });
+
+  test('executes preserved classify workflow: previews rule impact, verifies deterministic two-step modal, and commits rule', async ({ page }) => {
+    await loginAsAdmin(page, '/admin/classify?tab=rules');
+
+    // 1. Verify initial active rules list contains seeded rule
+    await expect(page.locator('h2:has-text("All Classification Rules")')).toBeVisible();
+    await expect(page.locator('text=Work Times Project')).toBeVisible();
+
+    // 2. Open Edit Rule modal for "Work Times Project"
+    const editBtn = page.locator('button[aria-label="Edit rule Work Times Project"]');
+    await expect(editBtn).toBeVisible();
+    await editBtn.click();
+
+    // Verify Edit Rule modal is open
+    const editModal = page.locator('#edit-rule-form');
+    await expect(editModal).toBeVisible();
+
+    // Modify priority to 25
+    const priorityInput = page.locator('#edit-rule-priority');
+    await priorityInput.fill('25');
+
+    // Submit for impact preview
+    const previewBtn = page.locator('button:has-text("Preview Rule Update")');
+    await previewBtn.click();
+
+    // 3. Two-Step Confirmation Modal must appear
+    const confirmModal = page.locator('dialog, [role="dialog"]').filter({ hasText: 'Confirm Rule Application' });
+    await expect(confirmModal).toBeVisible();
+    await expect(confirmModal).toContainText('Proposed Rule Action');
+    await expect(confirmModal).toContainText('UPDATE');
+    await expect(confirmModal).toContainText('Update Rule #rule-project-work');
+    await expect(confirmModal).toContainText('Telemetry Category Shifts');
+
+    // 4. Confirm & Apply Rule
+    const confirmApplyBtn = confirmModal.locator('button:has-text("Confirm & Apply Rule")');
+    await expect(confirmApplyBtn).toBeVisible();
+    await confirmApplyBtn.click();
+
+    // 5. Verify modal closes and updated priority 25 is rendered in the active rules table
+    await expect(confirmModal).not.toBeVisible();
+    await expect(page.locator('h2:has-text("All Classification Rules")')).toBeVisible();
+    const updatedRow = page.locator('tr').filter({ hasText: 'Work Times Project' });
+    await expect(updatedRow).toContainText('25');
+  });
 });

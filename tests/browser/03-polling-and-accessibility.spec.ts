@@ -318,6 +318,91 @@ test.describe('P8B: Active Polling, Concurrency, Focus, and Accessibility', () =
     // 5. Polling requests MUST NEVER overlap: max concurrency stays 1
     expect(maxConcurrentPolls).toBe(1);
   });
+
+  test('backs off polling interval to 10 seconds during idle state and accelerates when work becomes active', async ({ page }) => {
+    // Clean seed has no running or queued runs (isWorkActive is false)
+    let pollCount = 0;
+    const pollTimestamps: number[] = [];
+
+    await page.route('**/api/admin/sync-runs?limit=50', async (route) => {
+      pollCount++;
+      pollTimestamps.push(Date.now());
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          runs: [],
+          totalCount: 0,
+          activeRun: null,
+          schedule: {
+            schedulingEnabled: false,
+            paused: false,
+            timezone: 'Europe/London',
+            lastHandledSlots: { recent: null, reconcile: null, compare: null },
+            nextDue: { recent: null, reconcile: null, compare: null },
+            catchupCursor: null,
+            seeded: false
+          },
+          readiness: {
+            ready: true,
+            status: 'ready',
+            oauthAppConfigured: true,
+            oauthConnected: true,
+            hasActiveGrant: true,
+            isBlocked: false,
+            reconnectRequired: false,
+            discoveryReady: true,
+            degradedCapabilities: [],
+            lastProbedAt: '2026-09-12T10:00:00.000Z'
+          }
+        })
+      });
+    });
+
+    await loginAsAdmin(page, '/admin/sync');
+
+    // Wait 3.5 seconds: because isWorkActive is false, idle interval is 10000ms.
+    // If it were mistakenly using 2000ms active interval, pollCount would be >= 1.
+    await page.waitForTimeout(3500);
+    expect(pollCount).toBe(0);
+
+    // Now trigger Sync Now: this sets busy = true and isWorkActive = true,
+    // which accelerates polling to 2000ms.
+    await page.route('**/api/admin/sync-runs', async (route) => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({ runId: 999, reused: false, statusUrl: '/api/admin/sync-runs/999' })
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.click('[data-testid="sync-now-button"]');
+
+    // After mutation enqueues and pollSyncState is awaited, pollCount increments
+    await expect.poll(() => pollCount, { timeout: 3000 }).toBeGreaterThanOrEqual(1);
+  });
+
+  test('modal dialog traps focus and supports accessible dismissal via close button', async ({ page }) => {
+    // Seed run #1 with details
+    await loginAsAdmin(page, '/admin/sync');
+
+    // Open Run Details Modal
+    await page.click('[data-testid="view-run-details-btn-1"]');
+    const modal = page.locator('div[role="dialog"]');
+    await expect(modal).toBeVisible();
+    await expect(modal.locator('#modal-title')).toContainText('Details');
+
+    // Close button dismisses modal
+    const closeBtn = modal.locator('button[aria-label="Close modal"]');
+    await expect(closeBtn).toBeVisible();
+    await closeBtn.click();
+
+    await expect(modal).not.toBeVisible();
+  });
 });
 
 

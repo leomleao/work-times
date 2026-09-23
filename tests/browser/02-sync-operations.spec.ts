@@ -320,4 +320,272 @@ test.describe('P8B: Sync Operations, Controls, Validation, and Retries', () => {
     const backfillKey3 = capturedSyncRequests[5].idempotencyKey;
     expect(backfillKey3).not.toBe(backfillKey1);
   });
+
+  test('toggles automated scheduling off and cancels bind connection modal safely', async ({ page }) => {
+    await loginAsAdmin(page, '/admin/sync');
+
+    const scheduleInput = page.locator('[data-testid="schedule-toggle-input"]');
+    // 1. Enable scheduling
+    await scheduleInput.click();
+    await expect(page.locator('[data-testid="live-announcement"]')).toContainText('Automated scheduling enabled');
+    await expect(scheduleInput).toBeChecked();
+
+    // 2. Disable scheduling
+    await scheduleInput.click();
+    await expect(page.locator('[data-testid="live-announcement"]')).toContainText('Automated scheduling disabled');
+    await expect(scheduleInput).not.toBeChecked();
+
+    // 3. Test Bind Modal Cancel
+    await page.click('[data-testid="bind-connection-btn"]');
+    const bindNotice = page.locator('text=Acknowledge Account Binding');
+    await expect(bindNotice).toBeVisible();
+
+    // Click Cancel
+    await page.click('button:has-text("Cancel")');
+    await expect(bindNotice).not.toBeVisible();
+    // Live announcement should not announce binding
+    await expect(page.locator('[data-testid="live-announcement"]')).not.toContainText('bound to archive identity');
+  });
+
+  test('validates summary compare date inputs strictly, preserves values, and enqueues compare run', async ({ page }) => {
+    await loginAsAdmin(page, '/admin/sync');
+
+    // Open Summary Compare form
+    await page.click('[data-testid="toggle-compare-form"]');
+    const compareForm = page.locator('[data-testid="compare-form"]');
+    await expect(compareForm).toBeVisible();
+
+    const startInput = page.locator('[data-testid="compare-start-input"]');
+    const endInput = page.locator('[data-testid="compare-end-input"]');
+    const errLocator = page.locator('[data-testid="compare-error"]');
+
+    // 1. Inverted range: start > end
+    await startInput.fill('2026-09-10');
+    await endInput.fill('2026-09-01');
+    await page.click('[data-testid="submit-compare-btn"]');
+    await expect(errLocator).toContainText('Start date must be before or equal to end date');
+    // Preserves values
+    await expect(startInput).toHaveValue('2026-09-10');
+    await expect(endInput).toHaveValue('2026-09-01');
+
+    // 2. Future date
+    await startInput.fill('2099-01-01');
+    await endInput.fill('2099-01-02');
+    await page.click('[data-testid="submit-compare-btn"]');
+    await expect(errLocator).toContainText('Date range cannot include future dates');
+
+    // 3. Exceeds 366 days
+    await startInput.fill('2024-01-01');
+    await endInput.fill('2025-02-01');
+    await page.click('[data-testid="submit-compare-btn"]');
+    await expect(errLocator).toContainText('Date range cannot exceed 366 days');
+
+    // 4. Successful compare submission
+    let comparePayload: any = null;
+    await page.route('**/api/admin/sync-runs', async (route) => {
+      if (route.request().method() === 'POST') {
+        comparePayload = route.request().postDataJSON();
+        await route.fulfill({
+          status: 202,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            runId: 105,
+            reused: false,
+            statusUrl: '/api/admin/sync-runs/105'
+          })
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await startInput.fill('2026-09-01');
+    await endInput.fill('2026-09-05');
+    await page.click('[data-testid="submit-compare-btn"]');
+
+    await expect(page.locator('[data-testid="live-announcement"]')).toContainText(
+      'Comparison run #105 (2026-09-01 to 2026-09-05) enqueued'
+    );
+    expect(comparePayload?.mode).toBe('compare');
+    expect(comparePayload?.rangeStartDate).toBe('2026-09-01');
+    expect(comparePayload?.rangeEndDate).toBe('2026-09-05');
+    expect(comparePayload?.idempotencyKey).toBeTruthy();
+  });
+
+  test('retries individual failed date from run details modal with accurate target payload', async ({ page }) => {
+    // Seed run 40 with failed day 2026-09-12
+    const db = getTestDb();
+    try {
+      db.prepare(`
+        INSERT INTO sync_runs
+          (id, mode, trigger, status, day_count, days_synced, days_failed, started_at, finished_at)
+        VALUES
+          (40, 'recent', 'manual', 'partial', 1, 0, 1, '2026-09-12T12:00:00.000Z', '2026-09-12T12:00:02.000Z')
+      `).run();
+      db.prepare(`
+        INSERT INTO sync_days
+          (id, sync_run_id, date, status, disposition, summaries_status, durations_status, heartbeats_status, total_seconds, heartbeat_count, synced_at, error_message)
+        VALUES
+          (41, 40, '2026-09-12', 'failed', 'rejected', 'failed', 'failed', 'failed', 0, 0, '2026-09-12T12:00:02.000Z', 'DETAIL_DOWNGRADE')
+      `).run();
+    } finally {
+      db.close();
+    }
+
+    await loginAsAdmin(page, '/admin/sync');
+
+    // Open Run #40 details modal
+    await page.click('[data-testid="view-run-details-btn-40"]');
+    await expect(page.locator('[data-testid="diag-code-2026-09-12"]')).toContainText('DETAIL_DOWNGRADE');
+
+    // Intercept single date retry
+    let retryDatePayload: any = null;
+    await page.route('**/api/admin/sync-runs/40/retry', async (route) => {
+      retryDatePayload = route.request().postDataJSON();
+      await route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          runId: 42,
+          reused: false,
+          parentRunId: 40,
+          retryDates: ['2026-09-12'],
+          statusUrl: '/api/admin/sync-runs/42'
+        })
+      });
+    });
+
+    const retryDateBtn = page.locator('[data-testid="retry-date-btn-2026-09-12"]');
+    await expect(retryDateBtn).toBeVisible();
+    await retryDateBtn.click();
+
+    await expect(page.locator('[data-testid="live-announcement"]')).toContainText(
+      'Retry enqueued for date 2026-09-12 (Run #42)'
+    );
+    expect(retryDatePayload?.targetDate).toBe('2026-09-12');
+  });
+
+  test('handles active run cancellation error gracefully without unhandled exceptions', async ({ page }) => {
+    // Seed an active run #35
+    const db = getTestDb();
+    try {
+      db.prepare(`
+        INSERT INTO sync_runs
+          (id, mode, trigger, status, range_start_date, range_end_date, day_count, days_synced, days_failed, started_at)
+        VALUES
+          (35, 'recent', 'manual', 'running', '2026-09-11', '2026-09-12', 2, 0, 0, '2026-09-12T11:00:00.000Z')
+      `).run();
+    } finally {
+      db.close();
+    }
+
+    await loginAsAdmin(page, '/admin/sync');
+    await expect(page.locator('[data-testid="active-progress-panel"]')).toBeVisible();
+
+    // Mock cancellation failure
+    await page.route('**/api/admin/sync-runs/35/cancel', async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'RUN_LOCK_HELD', error: 'Internal lock error' })
+      });
+    });
+
+    await page.click('[data-testid="cancel-active-run-btn"]');
+
+    const errBanner = page.locator('[data-testid="page-error-banner"]');
+    await expect(errBanner).toBeVisible();
+    await expect(errBanner).toContainText('Failed to cancel run #35');
+    await expect(page.locator('[data-testid="live-announcement"]')).toContainText('Error: Failed to cancel run #35');
+  });
+
+  test('handles user-agent registry refresh error with safe fallback', async ({ page }) => {
+    await loginAsAdmin(page, '/admin/sync');
+
+    await page.route('**/api/admin/sync-registry/refresh', async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 'REGISTRY_UPSTREAM_ERROR',
+          error: '<img src=x onerror=alert(1)>Internal DB crash'
+        })
+      });
+    });
+
+    await page.click('[data-testid="refresh-registry-btn"]');
+
+    const errBanner = page.locator('[data-testid="page-error-banner"]');
+    await expect(errBanner).toBeVisible();
+    await expect(errBanner).toContainText('Failed to initiate registry refresh');
+
+    // Verify raw error text does not leak
+    const pageHtml = await page.content();
+    expect(pageHtml).not.toContain('<img src=x onerror=alert(1)>');
+    expect(pageHtml).not.toContain('Internal DB crash');
+  });
+
+  test('regression: presents truthful fresh/first-run state (Connect WakaTime, unknown timezone, Not refreshed registry) and source-local boundary', async ({ page }) => {
+    // Clean all tables so DB represents a truly fresh initial state:
+    // - no wakatime_oauth_connection
+    // - no account_settings (no timezone)
+    // - no user_agent_registry
+    const db = getTestDb();
+    try {
+      db.pragma('foreign_keys = OFF');
+      db.exec(`
+        DELETE FROM wakatime_oauth_connection;
+        DELETE FROM account_settings;
+        DELETE FROM user_agent_registry;
+        DELETE FROM sync_days;
+        DELETE FROM sync_runs;
+        DELETE FROM sync_layer_state;
+        DELETE FROM daily_totals;
+        DELETE FROM day_project_entity_slices;
+      `);
+    } finally {
+      db.pragma('foreign_keys = ON');
+      db.close();
+    }
+
+    await loginAsAdmin(page, '/admin/sync');
+
+    // 1. Truthful readiness banner: Connect WakaTime (NOT reconnect required)
+    const disconnectedBanner = page.locator('[data-testid="banner-oauth-disconnected"]');
+    await expect(disconnectedBanner).toBeVisible();
+    await expect(disconnectedBanner).toContainText('WakaTime is not connected yet');
+    const connectLink = disconnectedBanner.locator('a[href="/integrations/wakatime"]');
+    await expect(connectLink).toBeVisible();
+    await expect(connectLink).toContainText('Connect WakaTime');
+    // Ensure reconnect banner is NOT shown
+    await expect(page.locator('[data-testid="banner-reconnect-required"]')).not.toBeVisible();
+
+    // 2. Truthful unknown timezone: operational status bar displays "Timezone: —" (not "UTC")
+    const tzEl = page.locator('span:text("Timezone:")').locator('..');
+    await expect(tzEl).toBeVisible();
+    await expect(tzEl.locator('strong')).toHaveText('—');
+    await expect(tzEl).not.toContainText('UTC');
+
+    // 3. Truthful unrefreshed registry:
+    // - SyncRegistryCard badge shows "Not refreshed" (not "Published")
+    // - MetricCard shows "Not refreshed" and "Pending"
+    const registryCard = page.locator('[data-testid="sync-registry-panel"]');
+    await expect(registryCard).toBeVisible();
+    await expect(registryCard.locator('.badge')).toContainText('Not refreshed');
+
+    const registryMetric = page.locator('.metric-card').filter({ hasText: 'Identity Registry' });
+    await expect(registryMetric).toBeVisible();
+    await expect(registryMetric).toContainText('Not refreshed');
+    await expect(registryMetric).toContainText('Pending');
+
+    // 4. Source-local future-date boundary test:
+    // When sourceTimezone is unavailable, backfill validation warns that verified source timezone is unavailable
+    await page.click('[data-testid="toggle-backfill-form"]');
+    await page.fill('[data-testid="backfill-start-input"]', '2026-09-01');
+    await page.fill('[data-testid="backfill-end-input"]', '2026-09-02');
+    await page.click('[data-testid="submit-backfill-btn"]');
+    await expect(page.locator('[data-testid="backfill-error"]')).toContainText(
+      'Verified source timezone is unavailable'
+    );
+  });
 });

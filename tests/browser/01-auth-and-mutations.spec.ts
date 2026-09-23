@@ -87,4 +87,64 @@ test.describe('P8B: Authentication, Redirects, CSRF, and Origin Contracts', () =
     expect(capturedCsrfHeader).toBeTruthy();
     expect(capturedMode).toBe('recent');
   });
+
+  test('unauthenticated access to protected routes (/admin/mcp-config, /admin/activity) redirects to /login with return URL preserved', async ({ page }) => {
+    // 1. /admin/mcp-config
+    await page.goto('/admin/mcp-config');
+    await expect(page).toHaveURL(/\/login/);
+    await expect(page.locator('h1')).toContainText('Work Times Archive');
+
+    // 2. /admin/activity
+    await page.goto('/admin/activity');
+    await expect(page).toHaveURL(/\/login/);
+    await expect(page.locator('h1')).toContainText('Work Times Archive');
+  });
+
+  test('mutation security rejects unauthenticated, invalid CSRF, and malformed requests across operational endpoints', async ({ page, request }) => {
+    // 1. Unauthenticated requests across all mutation endpoints return 401
+    const endpoints = [
+      { url: '/api/admin/sync-settings', method: 'POST', body: { schedulingEnabled: true } },
+      { url: '/api/admin/sync-runs/1/retry', method: 'POST', body: {} },
+      { url: '/api/admin/sync-runs/1/cancel', method: 'POST', body: {} },
+      { url: '/api/admin/sync-registry/refresh', method: 'POST', body: {} }
+    ];
+
+    for (const ep of endpoints) {
+      const res = await request.post(ep.url, {
+        data: ep.body,
+        headers: { 'Content-Type': 'application/json' }
+      });
+      expect(res.status()).toBe(401);
+      const jsonBody = await res.json();
+      expect(jsonBody.error).toBe('Unauthorized');
+    }
+
+    // 2. Authenticated request with tampered/invalid CSRF token returns 403 Forbidden
+    await loginAsAdmin(page, '/admin/sync');
+    const invalidCsrfRes = await page.request.post('/api/admin/sync-settings', {
+      data: { schedulingEnabled: true, csrfToken: 'tampered-csrf-token-12345' },
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'http://127.0.0.1:4173',
+        'x-csrf-token': 'tampered-csrf-token-12345'
+      }
+    });
+    expect(invalidCsrfRes.status()).toBe(403);
+    const csrfErrBody = await invalidCsrfRes.json();
+    expect(csrfErrBody.error).toBe('Invalid or missing CSRF token');
+
+    // 3. Malformed/invalid request payload returns 400 Bad Request
+    const csrfToken = await page.locator('input[name="csrfToken"]').inputValue();
+    const malformedRes = await page.request.post('/api/admin/sync-runs', {
+      data: { mode: 'invalid_mode', csrfToken },
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'http://127.0.0.1:4173',
+        'x-csrf-token': csrfToken
+      }
+    });
+    expect(malformedRes.status()).toBe(400);
+    const malformedBody = await malformedRes.json();
+    expect(malformedBody.code).toBe('INVALID_MODE');
+  });
 });

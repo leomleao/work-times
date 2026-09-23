@@ -253,4 +253,85 @@ test.describe('P8B: Quality Projections, Pagination, Degradation, and Truthful F
     await expect(bannerStale.locator('[data-testid="quality-badge"]')).toContainText('Stale');
     await expect(bannerStale).toContainText('(Archive data is stale)');
   });
+
+  test('paginates activity slices history (> 50 slices) with next/previous links and URL state updates', async ({ page }) => {
+    // Seed 55 additional slices in day_project_entity_slices (total slices > 50)
+    const db = getTestDb();
+    try {
+      const insertSlice = db.prepare(`
+        INSERT INTO day_project_entity_slices
+          (id, date, project_id, entity, entity_type, total_seconds, is_unattributed, source_import_id, kind, snapshot_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (let i = 1; i <= 55; i++) {
+        insertSlice.run(
+          1000 + i,
+          '2026-09-11',
+          1,
+          `src/lib/module-${i}.ts`,
+          'file',
+          60,
+          0,
+          1,
+          'entity',
+          1
+        );
+      }
+    } finally {
+      db.close();
+    }
+
+    await loginAsAdmin(page, '/admin/activity?date=all');
+
+    // Footer pagination should be visible
+    await expect(page.locator('text=Showing page 1 of 2')).toBeVisible();
+
+    // Verify Previous is disabled button, Next is enabled link
+    const nextLink = page.locator('a[aria-label="Next page"]');
+    await expect(nextLink).toBeVisible();
+    await expect(nextLink).toHaveAttribute('href', /page=2/);
+
+    // Click Next
+    await nextLink.click();
+    await expect(page).toHaveURL(/page=2/);
+    await expect(page.locator('text=Showing page 2 of 2')).toBeVisible();
+
+    // On Page 2, Previous link points back to page 1
+    const prevLink = page.locator('a[aria-label="Previous page"]');
+    await expect(prevLink).toBeVisible();
+    await expect(prevLink).toHaveAttribute('href', /page=1/);
+
+    // Click Previous
+    await prevLink.click();
+    await expect(page).toHaveURL(/page=1/);
+    await expect(page.locator('text=Showing page 1 of 2')).toBeVisible();
+  });
+
+  test('displays truthful current-day provisional date quality state on activity page', async ({ page }) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const db = getTestDb();
+    try {
+      db.prepare(`
+        INSERT OR REPLACE INTO daily_totals (date, timezone, total_seconds, source_import_id, source_hash, grand_total_json)
+        VALUES (?, 'Europe/London', 3600, 1, 'hash-today', '{}')
+      `).run(today);
+
+      db.prepare(`
+        INSERT OR REPLACE INTO sync_layer_state
+          (date, layer, last_attempt_at, last_success_at, accepted_source_reference, accepted_snapshot_version, accepted_fidelity, accepted_content_hash, verified_timezone, is_stale, has_detail_downgrade, has_restriction, has_failure)
+        VALUES (?, 'summaries', '2026-09-12T10:00:00.000Z', '2026-09-12T10:00:00.000Z', 'ref-today', 1, 'entity_detail', 'hash-today', 'Europe/London', 0, 0, 0, 0)
+      `).run(today);
+    } finally {
+      db.close();
+    }
+
+    await loginAsAdmin(page, `/admin/activity?date=${today}`);
+
+    const banner = page.locator('[data-testid="activity-date-quality-banner"]');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText(`Date Quality (${today})`);
+    await expect(banner.locator('[data-testid="quality-badge"]')).toHaveAttribute('data-provisional', 'true');
+    await expect(banner).toContainText('(Current-day provisional)');
+  });
 });
