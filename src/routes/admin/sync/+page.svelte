@@ -63,7 +63,7 @@
   let activeProgress = $derived(sync?.activeProgress ?? null);
   let registry = $derived(sync?.registry ?? null);
   let runs = $derived(sync?.runs ?? []);
-  let sourceTimezone = $derived(sync?.sourceTimezone ?? 'UTC');
+  let sourceTimezone = $derived(sync?.sourceTimezone ?? null);
   let lastAcceptedSuccessAt = $derived(sync?.lastAcceptedSuccessAt ?? null);
 
   let nextDueTime = $derived.by(() => {
@@ -687,9 +687,9 @@
       />
       <MetricCard
         label="Identity Registry"
-        value={registry?.distinctEditors ? `${registry.distinctEditors} Editors` : 'Published'}
-        subtext={registry?.lastRefreshedAt ? 'Labels up to date' : 'Initial state'}
-        badge={registry?.isRefreshing ? 'Refreshing' : 'Current'}
+        value={registry?.distinctEditors ? `${registry.distinctEditors} Editors` : registry?.lastRefreshedAt ? '0 Editors' : 'Not refreshed'}
+        subtext={registry?.lastRefreshedAt ? 'Labels published' : 'Refresh to load labels'}
+        badge={registry?.isRefreshing ? 'Refreshing' : registry?.lastRefreshedAt ? 'Current' : 'Pending'}
         badgeVariant={registry?.isRefreshing ? 'work' : 'neutral'}
       />
     </section>

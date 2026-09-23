@@ -74,7 +74,7 @@
         </p>
       </div>
     </div>
-  {:else if readiness?.reconnectRequired || !readiness?.oauthConnected}
+  {:else if readiness?.reconnectRequired}
     <div class="notice warning" role="status" data-testid="banner-reconnect-required">
       <AlertTriangle size={18} style="flex-shrink: 0; color: var(--warning);" />
       <div>
@@ -83,6 +83,19 @@
           Upstream token expired, revoked, or requires re-authorization.
           <a href="/integrations/wakatime" style="color: var(--text); text-decoration: underline; margin-left: 6px;">
             Re-authorize connection
+          </a>
+        </p>
+      </div>
+    </div>
+  {:else if !readiness?.oauthConnected}
+    <div class="notice info" role="status" data-testid="banner-oauth-disconnected">
+      <Key size={18} style="flex-shrink: 0; color: var(--accent);" />
+      <div>
+        <strong>WakaTime is not connected yet.</strong>
+        <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted);">
+          Connect WakaTime before syncing this archive.
+          <a href="/integrations/wakatime" style="color: var(--text); text-decoration: underline; margin-left: 6px;">
+            Connect WakaTime
           </a>
         </p>
       </div>

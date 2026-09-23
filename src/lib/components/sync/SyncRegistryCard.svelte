@@ -53,7 +53,7 @@
       <h2>User-Agent & Editor Registry</h2>
     </div>
     <span class="badge {refreshing ? 'work' : 'neutral'}">
-      {refreshing ? 'Refreshing…' : 'Published'}
+      {refreshing ? 'Refreshing…' : registry?.lastRefreshedAt ? 'Published' : 'Not refreshed'}
     </span>
   </div>
 

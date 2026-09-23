@@ -15,7 +15,7 @@
   let {
     csrfToken,
     schedulingEnabled = false,
-    sourceTimezone = 'UTC',
+    sourceTimezone = null,
     busy = false,
     onSyncNow,
     onBackfill,
@@ -47,6 +47,25 @@
   let compareError = $state<string | null>(null);
 
   let bindConfirmOpen = $state(false);
+
+  function todayInSourceTimezone(): string | null {
+    if (!sourceTimezone) return null;
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: sourceTimezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).formatToParts(new Date());
+      const value = (type: 'year' | 'month' | 'day') => parts.find((part) => part.type === type)?.value;
+      const year = value('year');
+      const month = value('month');
+      const day = value('day');
+      return year && month && day ? `${year}-${month}-${day}` : null;
+    } catch {
+      return null;
+    }
+  }
 
   // Pure calendar validation helper
   function validateDateRange(startStr: string, endStr: string): string | null {
@@ -80,8 +99,8 @@
     }
 
     // Check future date against source timezone / today
-    const now = new Date();
-    const todayStr = now.toISOString().slice(0, 10);
+    const todayStr = todayInSourceTimezone();
+    if (!todayStr) return 'Verified source timezone is unavailable';
     if (endStr > todayStr) {
       return 'Date range cannot include future dates';
     }
