@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { runtime, getRuntime, createRuntime, RUNTIME_SYMBOL } from '$lib/server/runtime';
 import { openTestDatabase } from '$lib/server/db/connection';
 import { parsePublicUrl } from '$lib/server/config';
+import { runNodeScript } from './helpers';
 
 describe('P10A2 Process Evidence: Singleton Identity, Dev HMR, & Scheduling Guards', () => {
   it('guarantees one runtime and coordinator singleton across repeated calls', () => {
@@ -56,18 +57,63 @@ describe('P10A2 Process Evidence: Singleton Identity, Dev HMR, & Scheduling Guar
     testDb.close();
   });
 
-  it('simulates Dev HMR module reload: getRuntime preserves instance from globalThis[RUNTIME_SYMBOL]', () => {
-    const originalInstance = getRuntime();
+  it('exercises actual ESM module re-evaluation/reload path and shows one runtime and coordinator survive', () => {
+    // Child-process verification: prove top-level module re-execution in a clean Node environment
+    // where mod1 and mod2 create separate module records and separate exported Proxy objects,
+    // but share the exact same runtime and coordinator instances via Symbol.for('work-times.runtime').
+    //
+    // Untestable boundary note:
+    // In production, Node does not run HMR (a process restart or signal is used). In development,
+    // Vite dev HMR invalidates and re-executes module records with timestamped query parameters.
+    // Inside Vitest's runner, Vite's AST plugin restricts arbitrary template-literal dynamic imports,
+    // so we execute the actual ESM module re-evaluation via a dedicated child process script.
+    // This faithfully exercises that exact re-execution path across distinct module evaluations.
+    const childScript = `
+      (async () => {
+        const mod1 = await import('./src/lib/server/runtime.js');
+        const r1 = mod1.getRuntime();
+        const coord1 = r1.coordinator;
+        const sched1 = r1.scheduler;
+        const db1 = r1.db;
 
-    // Verify global symbol registration
-    expect((globalThis as Record<symbol, unknown>)[RUNTIME_SYMBOL]).toBe(originalInstance);
+        // Force a second distinct ESM module evaluation by appending a unique query string
+        const mod2 = await import('./src/lib/server/runtime.js?hmr-test-reload=' + Date.now());
+        const r2 = mod2.getRuntime();
+        const coord2 = r2.coordinator;
+        const sched2 = r2.scheduler;
+        const db2 = r2.db;
 
-    // Simulate HMR where module-level variable is reinitialized to a new context but global symbol persists
-    const preserved = (globalThis as Record<symbol, unknown>)[RUNTIME_SYMBOL];
-    expect(preserved).toBe(originalInstance);
+        console.log(JSON.stringify({
+          distinctModuleRecords: mod1 !== mod2,
+          distinctProxies: mod1.runtime !== mod2.runtime,
+          sameRuntime: r1 === r2,
+          sameCoordinator: coord1 === coord2,
+          sameScheduler: sched1 === sched2,
+          sameDb: db1 === db2,
+          mod2ProxyCoordMatches: mod2.runtime.coordinator === coord1,
+          mod2ProxySchedMatches: mod2.runtime.scheduler === sched1
+        }));
+      })().catch((err) => {
+        console.error(err);
+        process.exit(1);
+      });
+    `;
 
-    // Calling getRuntime returns the preserved global instance
-    expect(getRuntime()).toBe(originalInstance);
+    const res = runNodeScript(childScript);
+    expect(res.status).toBe(0);
+    const result = JSON.parse(res.stdout.trim());
+
+    // Both module records evaluated fresh
+    expect(result.distinctModuleRecords).toBe(true);
+    expect(result.distinctProxies).toBe(true);
+
+    // One runtime and coordinator survived across the reload
+    expect(result.sameRuntime).toBe(true);
+    expect(result.sameCoordinator).toBe(true);
+    expect(result.sameScheduler).toBe(true);
+    expect(result.sameDb).toBe(true);
+    expect(result.mod2ProxyCoordMatches).toBe(true);
+    expect(result.mod2ProxySchedMatches).toBe(true);
   });
 
   it('verifies proxy export forwards all property reads, introspection, and methods to singleton', () => {

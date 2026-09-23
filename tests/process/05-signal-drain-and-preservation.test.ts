@@ -188,7 +188,42 @@ describe('P10A2 Process Evidence: Bounded Signal Drain, Queue Preservation, DB C
       await isolated.lifecycle.start();
       expect(isolated.lifecycle.getReadiness().ready).toBe(true);
 
-      // Enqueue first run (which will be claimed/interrupted)
+      let workerStartedResolve!: () => void;
+      const workerStartedPromise = new Promise<void>((r) => {
+        workerStartedResolve = r;
+      });
+      let observedAbort = false;
+
+      // Arrange deterministic active work using a controlled fake worker
+      (isolated.coordinator as unknown as {
+        executeDayWorker: (options: any) => Promise<any>;
+      }).executeDayWorker = async (options) => {
+        workerStartedResolve();
+        // Hold execution deterministically until signal abort is triggered on shutdown
+        await new Promise<void>((resolve) => {
+          if (options.signal?.aborted) {
+            observedAbort = true;
+            return resolve();
+          }
+          options.signal?.addEventListener('abort', () => {
+            observedAbort = true;
+            resolve();
+          });
+        });
+
+        return {
+          date: options.date,
+          status: 'interrupted',
+          disposition: 'rejected',
+          advisoryCodes: [],
+          candidate: {} as never,
+          summariesStatus: 'failed',
+          heartbeatsStatus: 'skipped',
+          durationsStatus: 'skipped'
+        };
+      };
+
+      // Enqueue first run (which enters active worker execution and waits)
       const req1: RunRequest = {
         mode: 'recent',
         trigger: 'manual',
@@ -198,7 +233,10 @@ describe('P10A2 Process Evidence: Bounded Signal Drain, Queue Preservation, DB C
       };
       const { runId: runId1 } = await isolated.coordinator.enqueue(req1);
 
-      // Enqueue second run (which stays queued behind the first)
+      // Await deterministic worker engagement
+      await workerStartedPromise;
+
+      // Enqueue second run (which is guaranteed to remain queued behind the active first run)
       const req2: RunRequest = {
         mode: 'recent',
         trigger: 'manual',
@@ -208,18 +246,33 @@ describe('P10A2 Process Evidence: Bounded Signal Drain, Queue Preservation, DB C
       };
       const { runId: runId2 } = await isolated.coordinator.enqueue(req2);
 
-      // Graceful stop
+      // Graceful stop: aborts active worker and preserves queued work
       const stopStart = Date.now();
       await isolated.lifecycle.stop('shutdown', 20_000);
       expect(Date.now() - stopStart).toBeLessThan(20_000);
+      expect(observedAbort).toBe(true);
 
       // Verify DB closed on isolated instance
       expect(isolated.db.open).toBe(false);
 
-      // Reopen DB independently to verify state preservation
+      // Reopen DB independently to verify deterministic state preservation
       const inspectDb = openDatabase({ path: temp.dbPath, migrate: false });
       try {
-        // Run 2 must still exist with status 'queued'
+        // Run 1 was active and must be deterministically marked 'interrupted'
+        const run1Row = inspectDb
+          .prepare('SELECT id, status FROM sync_runs WHERE id = ?')
+          .get(runId1) as { id: number; status: string } | undefined;
+        expect(run1Row).toBeDefined();
+        expect(run1Row?.status).toBe('interrupted');
+
+        // Active day of run 1 must be deterministically marked 'interrupted'
+        const run1DayRow = inspectDb
+          .prepare('SELECT status FROM sync_days WHERE sync_run_id = ? AND status = ?')
+          .get(runId1, 'interrupted') as { status: string } | undefined;
+        expect(run1DayRow).toBeDefined();
+        expect(run1DayRow?.status).toBe('interrupted');
+
+        // Run 2 was queued behind active work and must remain preserved with status 'queued'
         const queuedRow = inspectDb
           .prepare('SELECT id, status, mode, idempotency_key FROM sync_runs WHERE id = ?')
           .get(runId2) as { id: number; status: string; mode: string; idempotency_key: string } | undefined;
@@ -229,12 +282,14 @@ describe('P10A2 Process Evidence: Bounded Signal Drain, Queue Preservation, DB C
         expect(queuedRow?.status).toBe('queued');
         expect(queuedRow?.idempotency_key).toBe('preservation-key-2');
 
-        // Run 1 was active and interrupted or completed cleanly
-        const run1Row = inspectDb
-          .prepare('SELECT id, status FROM sync_runs WHERE id = ?')
-          .get(runId1) as { id: number; status: string } | undefined;
-        expect(run1Row).toBeDefined();
-        expect(['queued', 'running', 'interrupted', 'succeeded', 'failed']).toContain(run1Row?.status);
+        // Dates for queued run must remain preserved with status 'pending'
+        const queuedDayRows = inspectDb
+          .prepare('SELECT status FROM sync_days WHERE sync_run_id = ?')
+          .all(runId2) as Array<{ status: string }>;
+        expect(queuedDayRows.length).toBeGreaterThan(0);
+        for (const day of queuedDayRows) {
+          expect(day.status).toBe('pending');
+        }
       } finally {
         inspectDb.close();
       }
@@ -252,16 +307,32 @@ describe('P10A2 Process Evidence: Bounded Signal Drain, Queue Preservation, DB C
         maxDirectImportBytes: 10 * 1024 * 1024
       });
 
+      // Configure controlled worker on recovered runtime to handle resumed queue execution
+      (recoveredRuntime.coordinator as unknown as {
+        executeDayWorker: (options: any) => Promise<any>;
+      }).executeDayWorker = async (options) => {
+        return {
+          date: options.date,
+          status: 'succeeded',
+          disposition: 'updated',
+          advisoryCodes: [],
+          candidate: {} as never,
+          summariesStatus: 'succeeded',
+          heartbeatsStatus: 'skipped',
+          durationsStatus: 'skipped'
+        };
+      };
+
       await recoveredRuntime.lifecycle.start();
       expect(recoveredRuntime.lifecycle.getReadiness().ready).toBe(true);
       expect(recoveredRuntime.lifecycle.getReadiness().recoveryComplete).toBe(true);
 
-      // Verify run 2 was preserved and resumed (status is queued or picked up as running)
+      // Verify run 2 was preserved and resumed across shutdown and recovery
       const afterRecoveryDb = recoveredRuntime.db;
       const preservedRow = afterRecoveryDb
         .prepare('SELECT id, status FROM sync_runs WHERE id = ?')
         .get(runId2) as { id: number; status: string } | undefined;
-      expect(['queued', 'running']).toContain(preservedRow?.status);
+      expect(['queued', 'running', 'succeeded']).toContain(preservedRow?.status);
 
       await recoveredRuntime.lifecycle.stop('shutdown', 5000);
       temp.cleanup();
