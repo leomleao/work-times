@@ -50,7 +50,7 @@ pnpm dev
 | `pnpm build` | Compiles SvelteKit application for production using `@sveltejs/adapter-node`. |
 | `pnpm start` | Boots the compiled production server (`node server/index.mjs`). |
 | `pnpm check` | Runs `svelte-kit sync` and `svelte-check` type analysis. |
-| `pnpm test` | Runs the Vitest test suite. |
+| `pnpm test` | Builds the production server, then runs the Vitest unit, contract, process, and integration suites. |
 | `pnpm test:watch` | Runs Vitest in interactive watch mode. |
 | `pnpm test:e2e` | Runs Playwright browser test suite. |
 | `pnpm db:migrate` | Executes the database migration CLI (`scripts/migrate.ts`). |
@@ -110,7 +110,7 @@ All runtime configuration is evaluated in `src/lib/server/config.ts` and `server
 | `WORK_TIMES_PORT` | — | `3002` | Host port mapping in `docker-compose.yml`. |
 
 > [!IMPORTANT]
-> Real recurring WakaTime API synchronization is **deferred** in this release. The OAuth connection and read-only capability discovery are implemented; no background polling scheduler is running yet.
+> Live sync and its scheduler are implemented, but recurring scheduling is **off by default**. Do not enable it merely because a connection or historical dump exists. Complete the staged rollout in §12 first. The local synthetic suite does not establish live WakaTime or production readiness.
 
 ### WakaTime OAuth App Registration
 
@@ -155,7 +155,7 @@ docker compose run --rm --build work-times-tools wakatime:discover --probe-date 
   - Response field names are filtered against explicit schema allowlists (`RECOGNIZED_RESPONSE_FIELDS`), redacting unexpected passthrough keys.
   - Reports strictly omit user IDs, emails, usernames, entity paths, project names, machines, download URLs, raw response bodies, and authorization headers.
 - **Soft Degradation**: Probing optional endpoints (durations and heartbeats) that return HTTP 402 or 403 records `status: "restricted"` with `restrictionCode: "HTTP_402"` or `"HTTP_403"` without failing discovery if baseline summaries succeed.
-- **Read-Only Invariant**: Probes existing data dumps via `GET /users/current/data_dumps` only; never triggers dump creation. Background incremental sync remains deferred.
+- **Read-Only Invariant**: Probes existing data dumps via `GET /users/current/data_dumps` only; never triggers dump creation or a sync run. With the web process running, treat this CLI and dump import as maintenance operations: stop the application first, because a separate process does not share its request gate or single-owner lock.
 - **Local Persistence**: Stores only the sanitized capability policy in `app_settings`; tokens and upstream response bodies are never written by discovery.
 
 ### Generating the Admin Password Hash
@@ -205,9 +205,7 @@ sed -i.bak "s|^SESSION_SECRET=.*|SESSION_SECRET=$(openssl rand -hex 32)|" .env &
 
 ## 4. Database Schema & Migrations
 
-Database migrations reside in the `migrations/` directory:
-- `migrations/001-import-schema.sql`: Tables for WakaTime daily dimensions, entities, heartbeats, and canonical dependencies.
-- `migrations/002-application-state.sql`: Tables for admin sessions, API keys, OAuth clients/authorizations, classification rules, allocations, and revision audit logs.
+Database migrations reside in the `migrations/` directory. Migrations 001–004 cover the imported archive and application state; 005–009 add live-sync lifecycle, source provenance, reconciliation-safe allocation identity, active heartbeat memberships, and per-layer freshness. Migrations are forward-only for this release; use a verified pre-migration backup for an incompatible code rollback.
 
 ### In-Process Automatic Migrations
 When Work Times boots, `openDatabase()` in `src/lib/server/db/connection.ts` discovers all pending migrations in ascending numeric order and executes them inside an isolated transaction. Already-applied migrations recorded in `schema_migrations` are safely skipped.
@@ -308,7 +306,7 @@ A local-development `docker-compose.yml` and production-ready multi-stage `Docke
 - **Local Networking**: Has no Traefik labels or external Docker network dependency.
 - **Local Credentials**: Loads direct secret values from the ignored `.env`; file-backed production secrets are deferred to the deployment definition.
 - **One-Shot Operator Tools**: The profile-gated `work-times-tools` service shares the named data volume and contains `tsx` plus the source CLI without bloating the web runtime image.
-- **No Background Sync**: Does not execute live recurring API sync or background polling workers.
+- **Single-Owner Background Sync**: The process owns the coordinator and scheduler, with scheduling disabled by default. Do not run a second owner or place the SQLite archive on a network filesystem; the process lock, WAL, and transaction guarantees assume one local filesystem owner.
 
 ### Docker Compose Service Definition
 The service is configured in `docker-compose.yml`:
@@ -532,6 +530,20 @@ Work Times provides an RFC-compliant OAuth 2.0 authorization server powering URL
 - **Constrained Dynamic Client Registration (`/oauth/register`)**: Supports automated agent registration for public clients. Constrained to prevent abuse: IP-based rate limiting (10 registrations per 15-minute window), strict redirect URI validation (must use `http://127.0.0.1`, `http://localhost`, or `https://`), and restricted client names.
 - **OAuth Client Management (`/admin/oauth-clients`)**: Administrators can review registered public and confidential clients, create confidential clients with one-time rendered secrets (`wcs_...`), and revoke clients along with all issued authorizations.
 
+### Live Sync Operator Workflow (`/admin/sync`)
+
+Keep scheduling disabled during first connection, migration, and manual review. For an imported archive, acknowledge that the connected WakaTime account is the same account as the archive before binding. A replaced connection requires a fresh acknowledgment. A verified source timezone and source-day boundaries are required; a mismatch stops acceptance rather than silently moving historical dates. An unconnected account, a reconnect-required account, and an unverified timezone are separate states in the UI.
+
+Manual recent sync checks today and yesterday in the source timezone. A manual backfill accepts at most 366 inclusive dates. The scheduler, once enabled, checks today/yesterday hourly, the previous 14 completed dates at 03:00 source time daily, and summary comparisons for the previous 90 completed dates Monday at 04:00 source time. Startup catch-up runs after recovery, selects at most 31 dates per run, and prioritizes recent gaps and retryable/unfinished dates. First enable seeds recent seven-day coverage. The durable queue is limited to ten nonterminal runs, and manual work takes priority over scheduled work without preempting an active date transaction.
+
+The shared upstream gate allows one in-flight request and at least one second between request starts. Each request, including body consumption, has a 30-second limit; a date has a five-minute budget. A full `Retry-After` is honored or deferred, not shortened. These are application safety limits, not asserted WakaTime plan limits. Stop the application before running separate discovery/import maintenance processes; they do not share the gate.
+
+Review run and per-date states (`queued`, `running`, `succeeded`, `partial`, `failed`, `cancelled`, `interrupted`) and layer states (`succeeded`, `failed`, `restricted`, `skipped`) separately. “Updated,” “checked unchanged,” “archived detail preserved,” and “restricted” mean different things. A verified zero day has a successful check; a missing day does not. Today remains provisional until a successful post-day-close check. Freshness is two hours for today/yesterday, 26 hours for the remaining 14-day reconciliation window, and eight days for the preceding 90-day comparison window. An unresolved mismatch, failure, or detail downgrade is stale regardless of age. Comparison freshness does not verify entity or heartbeat fidelity.
+
+Reconciliation assigns source totals rather than adding poll results onto earlier totals. Matching manual allocations keep their IDs and decisions, with duration changes audited. Removed slices detach their allocations (zero current contribution); a matching slice can reattach. Coarse-to-entity changes detach the coarse override for operator review instead of guessing how to distribute it. Heartbeat history and conflict variants remain retained, while active memberships determine current evidence. The editor registry publishes only a complete validated refresh; unresolved UUIDs remain explicit and registry labels never become classification selectors. A registry failure does not erase the last published mapping or block summary ingestion.
+
+Admin mutations require the interactive session, origin checks, and session-bound CSRF. An MCP bearer token cannot change sync settings, enqueue runs, cancel work, refresh the registry, or bind the account. The server acquires its single-owner lock and completes migration/recovery/readiness before listening. On SIGTERM/SIGINT it stops intake, drains active work and HTTP in order, and closes the database; do not force-kill during a normal upgrade unless the bounded shutdown fails.
+
 ---
 
 ## 10. Model Context Protocol (MCP) Configuration
@@ -550,21 +562,11 @@ Work Times implements a Streamable HTTP Model Context Protocol (MCP) server at `
 - `personal` activity and all personal and unclassified identifying details (projects, categories, languages, entities, and file paths) are strictly excluded from tool results.
 - Responses intentionally return aggregate unclassified-seconds warnings (`unclassifiedSeconds`, `hasUnclassified`) across the requested day or range to indicate incomplete classification coverage without leaking non-work activities or identities.
 - Exact file paths are excluded from evidence payloads to prevent accidental code location disclosure.
+- `dataQuality` is scoped to the requested dates and contains `asOf` (null if required coverage is missing), `hasMissingDays`, `hasStaleDays`, `hasLimitedDetail`, and allowlisted advisory codes. It does not contain account IDs, registry records, non-work identities, personal seconds, or raw upstream errors.
 
-### Client Configuration Example (Claude Desktop / Cursor / Orca)
-Add the following to your agent or desktop client's MCP configuration JSON:
-```json
-{
-  "mcpServers": {
-    "work-times": {
-      "url": "https://work-times.yourdomain.com/mcp",
-      "headers": {
-        "Authorization": "Bearer <generated-api-key>"
-      }
-    }
-  }
-}
-```
+### Client-Specific Setup
+
+Use `/admin/mcp-config` to select the actual client and authentication mode and copy its current recipe. Codex uses its TOML MCP configuration; Claude Code uses its own MCP JSON or command flow. Claude Desktop uses a remote URL-only OAuth connector and cannot use the page's bearer-header recipe. Generic clients may use `Authorization: Bearer <one-time API key>` only if they support custom headers. OAuth clients use `${PUBLIC_URL}/mcp` as the resource URL and complete interactive admin consent. Test bearer and OAuth connections independently; a successful local synthetic call does not prove a public reverse proxy or Cloudflare Access policy works.
 
 ---
 
@@ -621,7 +623,18 @@ Create an Access Application covering `work-times.yourdomain.com`.
 
 ## 12. Maintenance: Upgrades & Rollbacks
 
+### Staged Live-Sync Rollout
+
+1. Leave automated scheduling disabled. Record the running code/image version and the archive's current migration IDs, row counts, allocation IDs/detached flags, audit-revision counts, and `PRAGMA foreign_key_check` / `PRAGMA integrity_check` results. Take an online SQLite backup outside the live volume using §7, then restore that backup to a disposable database and verify its integrity and representative records. A file existing on disk is not proof it can be restored.
+2. Rehearse migrations 005–009 on the restored populated copy with scheduling disabled. Compare pre/post counts and IDs, detached allocations, append-only audit history, foreign keys, and integrity. Keep the untouched pre-migration backup. Do not use a live archive as the rehearsal target.
+3. Deploy the new code with scheduling still disabled. Verify readiness and single-process ownership, reconnect if needed, confirm the source timezone, and acknowledge same-account binding for an imported archive. Stop if the account or timezone cannot be verified. Inspect first-run Sync, Activity, Classify, and MCP setup states before requesting live work.
+4. Run one manual source-calendar day against the intended WakaTime connection. Review accepted versus observed source data, layer restrictions, preserved detail, verified zero versus missing dates, allocation revisions/detachments, and work-only MCP output. Then run a seven-day reconciliation and review any mismatch or retry state. Test one bearer MCP connection and one OAuth MCP connection on an appropriately isolated instance; verify the public ingress paths if this will be remote.
+5. Only after those checks, enable recurring scheduling and observe at least one hourly recent run. Scheduler clock/DST cases are covered locally by tests, but the live run still needs observation. Monitor queue depth, restriction/reconnect notices, freshness, and registry publication. A failed or unavailable live probe is a hold, not a successful rollout.
+
+Local evidence and exact commands are in [NEXT-MILESTONE-LEDGER.md](./NEXT-MILESTONE-LEDGER.md). The synthetic test suite, isolated browser review, populated backup/restore rehearsal, and Node 24 image build passed; live WakaTime, production migration/backup, public bearer/OAuth compatibility, deployment, and recurring schedule observation have **not** been completed. This is a locally implementation-complete candidate, not a G4 release pass.
+
 ### Upgrading Work Times
+Follow the staged checklist above for a first live-sync upgrade. The commands below are examples for the local Compose topology; use a versioned, off-volume destination and verify the copied backup before replacing any code or data.
 1. Take a snapshot backup of the SQLite database outside the volume:
    ```bash
    docker compose exec work-times node -e "
@@ -653,15 +666,14 @@ Create an Access Application covering `work-times.yourdomain.com`.
    ```
 
 ### Rolling Back
-1. Stop the application container:
+First disable recurring scheduling and allow the coordinator and HTTP requests to drain. Record any source observations and manual classification decisions made since the pre-upgrade backup; restoring it will remove those post-backup records. Export or reconcile them deliberately before restoration. If the old code is incompatible with the migrated schema, **do not** try an untested down-migration or start it against the new database. Stop the application and restore the verified pre-migration backup together with the matching old code/image. Keep the migrated database separately for recovery of post-backup observations and decisions.
+
+1. Stop the application container after draining:
    ```bash
    docker compose stop work-times
    ```
-2. Restore the pre-upgrade SQLite database backup into the named volume:
-   ```bash
-   docker compose cp ./backups/work-times-pre-upgrade.sqlite work-times:/data/work-times.sqlite
-   ```
-3. Restore ownership to UID 1000 (`node`) and restrict permissions:
+2. Verify the selected pre-upgrade backup by restoring and checking a disposable copy. Prepare a clean stopped database target so no WAL/SHM files from the migrated archive are paired with the old snapshot; retain a separate copy of the migrated state. Copy the verified backup into the named volume only after confirming the exact target and matching old image.
+3. Restore ownership to UID 1000 (`node`) and restrict permissions on the restored database:
    ```bash
    docker compose run --rm --entrypoint sh -u root work-times -c "
      chown -R 1000:1000 /data &&
@@ -669,7 +681,7 @@ Create an Access Application covering `work-times.yourdomain.com`.
      chmod 600 /data/work-times.sqlite*
    "
    ```
-4. Check out the previous stable git commit or image tag:
+4. Select the previous stable code commit or image tag that matches the backup schema:
    ```bash
    git checkout <previous-commit-hash>
    ```

@@ -28,8 +28,8 @@ Classification operates as an **immutable overlay** over raw imported WakaTime f
   4. Longest matching folder prefix.
 - Conflicting rules of equal precedence fall back safely to `unclassified` (`source: 'ambiguous'`).
 
-### 3. Dump-Backed Ingestion Engine & Verified Facts
-Work Times currently operates as a **dump-backed archive**. It parses and ingests official WakaTime historical exports:
+### 3. Historical Import and Live Synchronization
+Work Times parses and ingests official WakaTime historical exports:
 - Daily summary exports (`*-daily.json`): Aggregate totals, project breakdowns, categories, languages, and editors.
 - Raw heartbeat exports (`*-heatbeat .json` — including the upstream space typo): Fine-grained activity events (encompassing both write and non-write interactions) and machine telemetry.
 
@@ -47,8 +47,7 @@ Real export verification confirms the following aggregate baseline facts (no dum
 - **Identity Selectors**: 74,739 identity rows across the seven selector types.
 - **Mathematical Invariant**: Exact equality between daily total seconds and slice total seconds across all days (`work + personal + unclassified = daily_total_seconds`), with exactly one historical 900-second unattributed divergence between summary entities and daily grand total.
 
-> [!IMPORTANT]
-> Live background synchronization against the WakaTime REST API is **deferred** in this release. The application currently functions as a dump-backed archive; recurring polling reconciliation workers and background schedulers are not yet mounted. The WakaTime OAuth connection and safe read-only discovery command are available now.
+The live WakaTime sync coordinator, in-process scheduler, source-timezone calendar, and admin Sync page are implemented. Recurring scheduling is **off by default**; connecting WakaTime or importing a dump does not enable it. A populated archive requires an explicit same-account binding acknowledgment before live writes. A replaced connection must be rebound, and a source timezone mismatch pauses acceptance rather than rebucketing history. Local synthetic release evidence is complete, but live WakaTime, production migration, and recurring-run checks remain pending; see [the release evidence ledger](docs/NEXT-MILESTONE-LEDGER.md).
 
 ### 4. Safe Read-Only WakaTime Capability Discovery
 The discovery tool uses the encrypted WakaTime OAuth connection to probe plan-gated capabilities safely. Run `pnpm wakatime:discover` for a host-run app or `docker compose run --rm --build work-times-tools wakatime:discover` for local Docker:
@@ -71,6 +70,8 @@ Work Times provides a read-only Streamable HTTP Model Context Protocol (MCP) end
   - `get_work_summary`: Returns work-only seconds grouped by calendar day and project across a date range (`start` to `end`), along with aggregate unclassified warnings.
   - `get_work_evidence`: Returns work-only project, category, and language breakdowns for a specific `date` (and optional `project`) for timesheet preparation, along with aggregate unclassified warnings.
 - **Authentication**: Protected by Bearer token authorization (`Authorization: Bearer <token>`) requiring the `activity:read` scope. Clients authenticate using either a generated application API key (`wtk_...`) or an OAuth 2.0 access token (`wto_...`).
+- **Quality Contract**: Responses include bounded `dataQuality` for the requested dates: missing/stale/limited-detail flags, allowlisted advisory codes, and `asOf` only when coverage is complete. A verified zero day is distinct from a missing day. Current source-calendar day is provisional. Neither aggregate equality nor preserved archived detail is presented as newly verified entity or heartbeat evidence.
+- **Client Recipes**: `/admin/mcp-config` provides separate Codex, Claude Code, Claude Desktop, and generic instructions. Claude Desktop uses the remote OAuth connector rather than an unsupported bearer-header recipe. Keep one-time keys private and revoke any exposed key.
 
 ### 6. OAuth 2.0 Authorization Server & Authentication
 Work Times implements standards-compliant OAuth 2.0 authorization server routes:
@@ -229,7 +230,7 @@ The service includes a production-ready `Dockerfile` and a local-development `do
 - **Local Credentials**: Compose loads the ignored local `.env` directly. Keep the `*_FILE` variables empty and use the direct OAuth, admin-hash, and session-secret variables for this local container.
 - **Loopback Only**: The service binds to `127.0.0.1:3002` and has no reverse-proxy labels or external network dependency. Production proxy configuration will live in a separate deployment definition.
 - **One-Shot Tools Image**: The profile-gated `work-times-tools` service retains development tooling for operator commands while sharing the application database volume; it never starts with the web service.
-- **No Background Sync**: Live recurring background API synchronization is not active.
+- **Scheduling Off by Default**: The coordinator and scheduler are built into the single process, but recurring sync remains disabled until the staged rollout is complete and an administrator enables it.
 
 ```bash
 # Build and start container
@@ -287,7 +288,7 @@ docker compose exec work-times rm /data/work-times-backup.sqlite
 ## Testing & Quality Assurance
 
 ```bash
-# Run unit and contract test suites with Vitest
+# Build the production server, then run unit, contract, process and integration tests with Vitest
 pnpm test
 
 # Run Svelte and TypeScript static type analysis

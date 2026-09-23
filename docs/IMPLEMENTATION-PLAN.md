@@ -1,14 +1,14 @@
 # Work Times — Architecture and Implementation Plan
 
-Status: core release implemented; next milestone planned (see [NEXT-MILESTONE.md](./NEXT-MILESTONE.md))
+Status: next-milestone implementation complete locally; live release gate pending (see [NEXT-MILESTONE-LEDGER.md](./NEXT-MILESTONE-LEDGER.md))
 
-Last updated: 2026-09-09
+Last updated: 2026-09-23
 
 Next-milestone execution authority: [NEXT-MILESTONE.md](./NEXT-MILESTONE.md).
 Its reviewed reconciliation contracts, dependency DAG, work ownership, and gates
 supersede the prospective sync design below where they differ. See also the
 [original-plan assessment](./NEXT-MILESTONE-REVIEW.md). Implementation gates
-remain pending; this planning update does not enable background sync.
+include a pending live G4; this planning update does not enable recurring scheduling.
 
 Implementation alignment decisions:
 
@@ -18,9 +18,9 @@ Implementation alignment decisions:
   WakaTime capability discovery CLI (`pnpm wakatime:discover` on the host or the
   profile-gated `work-times-tools` service for Docker), work-only Streamable HTTP
   MCP server at /mcp, and multi-stage Docker packaging.
-- Live recurring background API synchronization and future timeline visualization
-  charts remain deferred to a later release milestone; the service functions as a
-  dump-backed archive.
+- Live API synchronization, a durable coordinator, and a recurring scheduler are
+  implemented, with scheduling off by default pending staged live validation.
+  Interactive timeline visualization charts remain deferred.
 - Use Svelte 5 and SvelteKit with `@sveltejs/adapter-node` wrapped in a custom
   Node entry point (`server/index.mjs`) hosting the SvelteKit request handler,
   native JSON admin API endpoints, Streamable HTTP MCP at `/mcp`, and OAuth routes
@@ -117,8 +117,8 @@ WakaTime client and not a multi-user employee-monitoring product.
 ### In scope
 
 - Historical import from WakaTime daily and heartbeat data dumps.
-- Incremental read-only WakaTime API synchronization (deferred to a later milestone; this
-  release ships safe read-only capability discovery only).
+- Incremental read-only WakaTime API synchronization, with recurring scheduling
+  disabled until operator rollout and live validation.
 - WakaTime-compatible daily totals and breakdowns.
 - Raw activity evidence for detailed local queries.
 - Daily, weekly, and arbitrary date-range analysis.
@@ -426,8 +426,8 @@ Use one TypeScript/Node application and one Docker runtime container:
 
 - HTTP server for the SvelteKit admin UI, admin JSON API, OAuth endpoints,
   Streamable HTTP MCP endpoint at `/mcp`, and minimal health endpoint.
-- In-process scheduler for incremental synchronization (deferred — not mounted in this
-  release; see section 7.3).
+- In-process scheduler for incremental synchronization, mounted but off by default
+  until an administrator enables it after staged validation (see section 7.3).
 - SQLite database in WAL mode for concurrent sync writes and MCP/admin reads.
 - Guarded native JSON importer for the current dump sizes, behind a parser
   interface that permits a streaming implementation when evidence requires it.
@@ -435,8 +435,8 @@ Use one TypeScript/Node application and one Docker runtime container:
   and mounted within the custom Node entry point (`server/index.mjs`). This single
   Node process serves the SvelteKit SSR frontend, static assets, native JSON
   admin API endpoints, OAuth endpoints, and Streamable HTTP MCP at `/mcp`; no separate
-  frontend service. The in-process background sync scheduler is designed for this same
-  process but is deferred and not started in this release.
+  frontend service. The in-process background sync scheduler runs in this same
+  process but does not schedule recurring work by default.
 - Dark-first Svelte Bits-inspired UI architecture: built with Svelte 5 runes,
   accessible primitive foundations (bits-ui / Svelte Bits design principles),
   dense data tables, responsive layouts, and an extensible component-based
@@ -890,9 +890,8 @@ the learned shape; real values are never committed.
 
 ### 7.3 Incremental sync policy
 
-**Status: Deferred — design only.** No scheduler, catch-up worker, or recurring
-reconciliation is mounted in this release; the service runs as a dump-backed archive.
-The policy below records the original intended design. The reviewed
+**Status: Implemented locally; recurring scheduling off by default.** The policy
+below records the original intended design, while the reviewed
 [next-milestone plan](./NEXT-MILESTONE.md) defines accepted versus observed
 snapshots, fidelity-aware reconciliation, preservation of manual decisions,
 and the implementation gates that supersede this preliminary policy.
@@ -922,11 +921,11 @@ remain interpretable.
 
 ### 7.4 Plan-aware capability degradation
 
-**Status: Partially implemented.** Independent per-capability probing and soft `402`/`403`
+**Status: Implemented locally; live capability compatibility pending.** Independent per-capability probing and soft `402`/`403`
 degradation are implemented in `pnpm wakatime:discover`, which records
 `status: "restricted"` with `restrictionCode: "HTTP_402"` or `"HTTP_403"` without failing an
 otherwise successful run. The scheduled retry cadence, per-layer freshness tracking, and
-MCP freshness reporting described below depend on the deferred sync scheduler.
+MCP freshness reporting described below are implemented; their live source behavior is not yet verified.
 
 The supplied account metadata reports neither Basic nor Premium features.
 WakaTime API availability may therefore differ by endpoint: recent summaries
@@ -1008,8 +1007,8 @@ explicit OAuth consent flow.
 
 #### Overview
 
-**Status: Implemented against real SQLite data**, minus the scheduler and last-sync rows,
-which stay empty while background synchronization is deferred.
+**Status: Implemented against real SQLite data.** Scheduler and last-sync rows remain
+empty until the operator enables scheduling or requests a manual sync.
 
 - process, database, scheduler, and WakaTime connectivity status
 - last successful sync and current run
@@ -1045,11 +1044,10 @@ every WakaTime chart.
 
 #### Synchronization
 
-**Status: Deferred.** `/admin/sync` is mounted and reads real SQLite state — the
-`sync_runs` and `sync_days` history tables, the recorded capability-policy state, whether a
-WakaTime key is configured, and an explicit `backgroundSyncDeferred` flag. The scheduled-sync
-controls below depend on the deferred background scheduler and are not operational in this
-release, so the view is read-only and normally empty until a sync milestone ships.
+**Status: Implemented locally; live rollout pending.** `/admin/sync` reads the durable
+run/date/layer state, capability policy, connection binding, verified source timezone,
+freshness, and registry publication state. It supports the controls below under
+session, origin, and CSRF protections. Recurring scheduling remains off by default.
 
 - enable/disable scheduled synchronization
 - edit allowed schedule settings
@@ -1379,7 +1377,8 @@ role isolation. The single process performs this startup sequence:
 2. acquire the application/startup lock;
 3. apply versioned migrations transactionally;
 4. run integrity/configuration checks;
-5. start the scheduler (deferred — not started in this release);
+5. recover durable work, establish coordinator ownership and readiness, and start
+   the scheduler loop (recurring scheduling remains off by default);
 6. bind the HTTP listener.
 
 A migration failure exits non-zero before any route becomes reachable. The
@@ -1560,7 +1559,8 @@ email or write scope is requested.
 - Bounded non-PII report: max 10 dump items with truncation indicator, safe mapped dump types and statuses, allowlisted response schema field names, zero PII or credentials.
 - Soft degradation: HTTP 402/403 restrictions on durations or heartbeats record `status: "restricted"` without failing overall discovery if summaries succeed.
 - Read-only dump listing via `GET /users/current/data_dumps` without creating dumps.
-- Background recurring synchronization and polling scheduler remain explicitly deferred.
+- The later live-sync milestone implemented recurring scheduling; it remains disabled
+  by default and has not yet been validated against a live account.
 
 ### Phase 3 — Admin authentication, SvelteKit UI foundation, and classification engine
 **Status: Complete**
@@ -1750,11 +1750,11 @@ The core release milestone is implemented, verified, and operational:
 5. **Safe Read-Only Discovery**: `pnpm wakatime:discover` is available for host runs, and `docker compose run --rm --build work-times-tools wakatime:discover` targets the local Docker database.
 6. **Docker Deployment**: Hardened multi-stage container with native compilation and in-process migrations.
 
-### Next milestone (active planning):
+### Next milestone (implemented locally; live G4 pending):
 
-The following features have been promoted from deferred status to active
-development planning. Full design, dependency DAG, and phased implementation
-details are in [NEXT-MILESTONE.md](./NEXT-MILESTONE.md):
+The following features are implemented and have synthetic local release evidence.
+The frozen design and dependency DAG remain in [NEXT-MILESTONE.md](./NEXT-MILESTONE.md),
+while actual gate results and limitations are in [NEXT-MILESTONE-LEDGER.md](./NEXT-MILESTONE-LEDGER.md):
 
 1. **MCP Config Page** — admin UI page (`/admin/mcp-config`) with terminal-style
    copyable agent connection snippets for Claude Desktop, Claude Code, Codex,
@@ -1763,8 +1763,12 @@ details are in [NEXT-MILESTONE.md](./NEXT-MILESTONE.md):
    the existing token provider, source-neutral normalization, fidelity-aware
    reconciliation, preserved classification decisions, durable run coordination,
    an in-process scheduler, authoritative editor labels, and operational admin
-   controls. Promotes §7.3 and §14 bullet 2. The handoff contains eleven work
-   packages, five verification gates, and explicit shared-file ownership.
+   controls. Recurring scheduling stays off by default. Populated archives require
+   same-account binding acknowledgment; source-timezone verification and layered
+   freshness distinguish checked, preserved, restricted, zero, and missing data.
+   Synthetic migration/backup/restore, process, browser, work-only MCP, and Node 24
+   checks passed. Live WakaTime, production migration/backup, public bearer/OAuth,
+   deployment, and hourly schedule observation remain pending; do not call G4 passed.
 
 ### Deferred for future milestones:
 - Interactive scrubbable timeline visualizations and chord/sankey project distribution charts.
