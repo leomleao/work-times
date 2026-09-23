@@ -96,17 +96,27 @@ export function _createPostHandler(runtimeSurface: AdminSyncRuntimeSurface): Req
       return json({ error: 'schedulingEnabled must be a boolean', code: 'INVALID_SETTINGS' }, { status: 400 });
     }
 
-    let conn: { bound_archive_identity: string | null } | undefined;
+    let conn: { generation: number; access_token_sealed: string } | undefined;
+    let archive: { wakatime_user_id: string } | undefined;
     if (body.bindCurrentConnection === true) {
       try {
         conn = db
-          .prepare(`SELECT bound_archive_identity FROM wakatime_oauth_connection WHERE id = 1`)
-          .get() as { bound_archive_identity: string | null } | undefined;
+          .prepare(`SELECT generation, access_token_sealed FROM wakatime_oauth_connection WHERE id = 1`)
+          .get() as typeof conn;
+        archive = db
+          .prepare(`SELECT wakatime_user_id FROM account_settings LIMIT 1`)
+          .get() as typeof archive;
       } catch (err) {
         return json({ error: 'Sync state unavailable', code: 'SYNC_STATE_UNAVAILABLE' }, { status: 503 });
       }
 
-      if (!conn || !conn.bound_archive_identity || conn.bound_archive_identity.trim().length === 0) {
+      if (!conn?.access_token_sealed) {
+        return json(
+          { error: 'WakaTime connection unavailable', code: 'NO_CONNECTION' },
+          { status: 400 }
+        );
+      }
+      if (!archive?.wakatime_user_id?.trim()) {
         return json(
           { error: 'Archive identity unavailable', code: 'ARCHIVE_IDENTITY_UNAVAILABLE' },
           { status: 400 }
@@ -128,8 +138,14 @@ export function _createPostHandler(runtimeSurface: AdminSyncRuntimeSurface): Req
     if (body.bindCurrentConnection === true) {
       const oauthRepo = new SqliteWakaTimeOAuthConnectionRepository(db);
       try {
-        oauthRepo.rebind(conn!.bound_archive_identity!);
-      } catch {
+        oauthRepo.rebind(archive!.wakatime_user_id, conn!.generation);
+      } catch (err) {
+        if (err instanceof Error && err.message === 'STALE_CONNECTION_GENERATION') {
+          return json(
+            { error: 'WakaTime connection changed; reload and confirm again', code: 'CONNECTION_REPLACED' },
+            { status: 409 }
+          );
+        }
         return json(
           { error: 'Failed to rebind connection', code: 'REBIND_FAILED' },
           { status: 500 }

@@ -57,8 +57,14 @@ export class SqliteWakaTimeOAuthConnectionRepository {
           WHEN excluded.generation > wakatime_oauth_connection.generation THEN excluded.generation
           ELSE wakatime_oauth_connection.generation
         END,
-        bound_archive_identity = COALESCE(excluded.bound_archive_identity, wakatime_oauth_connection.bound_archive_identity),
-        rebound_at = COALESCE(excluded.rebound_at, wakatime_oauth_connection.rebound_at)
+        bound_archive_identity = CASE
+          WHEN excluded.generation > wakatime_oauth_connection.generation THEN excluded.bound_archive_identity
+          ELSE COALESCE(excluded.bound_archive_identity, wakatime_oauth_connection.bound_archive_identity)
+        END,
+        rebound_at = CASE
+          WHEN excluded.generation > wakatime_oauth_connection.generation THEN excluded.rebound_at
+          ELSE COALESCE(excluded.rebound_at, wakatime_oauth_connection.rebound_at)
+        END
     `);
 
     this.updateTokensCasStatement = db.prepare(`

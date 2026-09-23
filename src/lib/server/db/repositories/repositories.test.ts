@@ -786,6 +786,38 @@ describe('SQLite Repositories and Application State Schema', () => {
       expect(rebound?.reboundAt).toBe('2026-01-01T00:10:00.000Z');
     });
 
+    it('clears archive binding when a new OAuth connection generation replaces the old one', () => {
+      const repo = new SqliteWakaTimeOAuthConnectionRepository(db);
+      repo.upsert({
+        accessTokenSealed: 'sealed_tok_1',
+        refreshTokenSealed: 'sealed_ref_1',
+        tokenType: 'Bearer',
+        scopes: ['read_summaries'],
+        expiresAt: null,
+        connectedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z'
+      });
+      repo.rebind('user_waka_123', 1, '2026-01-01T00:10:00.000Z');
+
+      repo.upsert({
+        accessTokenSealed: 'sealed_tok_replacement',
+        refreshTokenSealed: 'sealed_ref_replacement',
+        tokenType: 'Bearer',
+        scopes: ['read_summaries'],
+        expiresAt: null,
+        connectedAt: '2026-01-02T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        generation: 3
+      });
+
+      expect(repo.get()).toMatchObject({
+        accessTokenSealed: 'sealed_tok_replacement',
+        generation: 3,
+        boundArchiveIdentity: null,
+        reboundAt: null
+      });
+    });
+
     it('enforces compare-and-set guards on token refresh and rejects stale generation CAS', () => {
       const repo = new SqliteWakaTimeOAuthConnectionRepository(db);
 

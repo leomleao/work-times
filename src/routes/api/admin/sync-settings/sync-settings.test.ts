@@ -92,8 +92,7 @@ describe('/api/admin/sync-settings route', () => {
       expect(dataOff.schedulingEnabled).toBe(false);
     });
 
-    it('returns 400 ARCHIVE_IDENTITY_UNAVAILABLE when bound_archive_identity is absent', async () => {
-      // Clear or set connection row with null bound_archive_identity
+    it('returns 400 NO_CONNECTION when no active connection can be bound', async () => {
       runtime.db.prepare(`DELETE FROM wakatime_oauth_connection WHERE id = 1`).run();
 
       const req = new Request('http://localhost:3000/api/admin/sync-settings', {
@@ -109,16 +108,43 @@ describe('/api/admin/sync-settings route', () => {
 
       expect(res.status).toBe(400);
       const data = await res.json();
-      expect(data.code).toBe('ARCHIVE_IDENTITY_UNAVAILABLE');
+      expect(data.code).toBe('NO_CONNECTION');
     });
 
-    it('rebinds connection when bindCurrentConnection is true and identity present', async () => {
-      // Ensure connection row exists
+    it('returns 400 ARCHIVE_IDENTITY_UNAVAILABLE when the archive has no account identity', async () => {
+      runtime.db.prepare('DELETE FROM account_settings').run();
       runtime.db
         .prepare(`
           INSERT INTO wakatime_oauth_connection (id, access_token_sealed, refresh_token_sealed, token_type, scopes, generation, bound_archive_identity, connected_at, updated_at)
-          VALUES (1, 'sealed', 'refresh', 'Bearer', '["email"]', 1, 'user_test', '2026-03-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z')
-          ON CONFLICT(id) DO UPDATE SET generation = 1, bound_archive_identity = 'user_test'
+          VALUES (1, 'sealed', 'refresh', 'Bearer', '["email"]', 1, NULL, '2026-03-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z')
+          ON CONFLICT(id) DO UPDATE SET generation = 1, bound_archive_identity = NULL
+        `)
+        .run();
+
+      const req = new Request('http://localhost:3000/api/admin/sync-settings', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-csrf-token': validCsrf },
+        body: JSON.stringify({ bindCurrentConnection: true })
+      });
+      const res = await POST({
+        locals: { admin: adminPrincipal, sessionToken: validSessionToken } as any,
+        request: req
+      } as any);
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('ARCHIVE_IDENTITY_UNAVAILABLE');
+    });
+
+    it('binds an unbound first connection to the recorded archive identity', async () => {
+      runtime.db.prepare('DELETE FROM account_settings').run();
+      runtime.db
+        .prepare('INSERT INTO account_settings (wakatime_user_id, timezone) VALUES (?, ?)')
+        .run('user_test', 'Europe/London');
+      runtime.db
+        .prepare(`
+          INSERT INTO wakatime_oauth_connection (id, access_token_sealed, refresh_token_sealed, token_type, scopes, generation, bound_archive_identity, connected_at, updated_at)
+          VALUES (1, 'sealed', 'refresh', 'Bearer', '["email"]', 1, NULL, '2026-03-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z')
+          ON CONFLICT(id) DO UPDATE SET generation = 1, bound_archive_identity = NULL
         `)
         .run();
 

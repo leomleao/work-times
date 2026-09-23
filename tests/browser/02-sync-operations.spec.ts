@@ -27,6 +27,47 @@ test.describe('P8B: Sync Operations, Controls, Validation, and Retries', () => {
     await expect(page.locator('[data-testid="live-announcement"]')).toContainText('bound to archive identity');
   });
 
+  test('binds a previously unbound connection to the imported archive without enabling scheduling', async ({ page }) => {
+    const db = getTestDb();
+    try {
+      db.prepare(`
+        UPDATE wakatime_oauth_connection
+        SET bound_archive_identity = NULL, rebound_at = NULL
+        WHERE id = 1
+      `).run();
+    } finally {
+      db.close();
+    }
+
+    await loginAsAdmin(page, '/admin/sync');
+    const scheduleInput = page.locator('[data-testid="schedule-toggle-input"]');
+    await expect(scheduleInput).not.toBeChecked();
+
+    await page.click('[data-testid="bind-connection-btn"]');
+    await expect(page.locator('text=Acknowledge Account Binding')).toBeVisible();
+    await page.click('[data-testid="confirm-bind-btn"]');
+    await expect(page.locator('[data-testid="live-announcement"]')).toContainText('bound to archive identity');
+
+    const after = getTestDb();
+    try {
+      const connection = after.prepare(`
+        SELECT generation, bound_archive_identity, rebound_at
+        FROM wakatime_oauth_connection WHERE id = 1
+      `).get() as { generation: number; bound_archive_identity: string | null; rebound_at: string | null };
+      const scheduling = after.prepare(`
+        SELECT value FROM app_settings WHERE key = 'sync.scheduling_enabled'
+      `).get() as { value: string };
+
+      expect(connection.generation).toBe(2);
+      expect(connection.bound_archive_identity).toBe('test-user-1');
+      expect(connection.rebound_at).not.toBeNull();
+      expect(scheduling.value).toBe('false');
+    } finally {
+      after.close();
+    }
+    await expect(scheduleInput).not.toBeChecked();
+  });
+
   test('validates date range inputs strictly and preserves date values on error', async ({ page }) => {
     await loginAsAdmin(page, '/admin/sync');
 
