@@ -663,6 +663,7 @@ export function reconcileDay(
 
             const unattributedId = existingProjMap.get('__unattributed__');
             for (const beat of hbDay.heartbeats) {
+              if (beat.entityType === 'url') continue;
               const beatProjId = beat.projectName ? (existingProjMap.get(beat.projectName) ?? null) : null;
               const normBeatEntity = normalizeEntity(beat.entity, beat.entityType);
 
@@ -1345,6 +1346,9 @@ export function reconcileDay(
         `);
 
         for (const beat of hbDay.heartbeats) {
+          // No URL summary slice exists; do not project URL evidence onto a
+          // residual slice's machine/editor classification identities.
+          if (beat.entityType === 'url') continue;
           const beatProjId = beat.projectName ? (projectMap.get(beat.projectName) ?? null) : null;
           const normBeatEntity = normalizeEntity(beat.entity, beat.entityType);
 

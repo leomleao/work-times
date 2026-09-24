@@ -866,6 +866,28 @@ describe('Ingest Stage A: Pure Normalization & Source Fidelity', () => {
       }
     });
 
+    it('retains URL heartbeats as URL evidence without domain coercion or duration', () => {
+      const result = normalizeHeartbeatDay(
+        { data: [{
+          id: '550e8400-e29b-41d4-a716-446655440000',
+          entity: 'https://Example.com/Path?query=Value',
+          type: 'url',
+          category: 'browsing',
+          user_agent_id: 'browser/1',
+          time: 1788868800
+        }] },
+        { date: '2026-09-08', timezone: 'UTC' }
+      );
+
+      expect(result.kind).toBe('complete');
+      if (result.kind !== 'complete') return;
+      expect(result.value.heartbeats[0]).toMatchObject({
+        entityType: 'url',
+        entity: 'https://Example.com/Path?query=Value'
+      });
+      expect(result.value.heartbeats[0]).not.toHaveProperty('duration');
+    });
+
     it('rejects non-string dependencies with UNSUPPORTED_HEARTBEAT_DEPENDENCY', () => {
       const result = normalizeHeartbeatDay(
         { data: [{ ...UNSUPPORTED_HEARTBEATS_RAW.invalidDependencies, time: 1788868800, category: 'coding', user_agent_id: 'ua-1' }] },

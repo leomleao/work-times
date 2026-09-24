@@ -110,6 +110,58 @@ describe('runMigrations', () => {
   });
 });
 
+describe('URL heartbeat evidence migration', () => {
+  it('preserves populated heartbeat evidence and child relationships under foreign keys', () => {
+    const db = new Database(':memory:');
+    configurePragmas(db, { wal: false });
+    for (const migration of listMigrations(MIGRATIONS_DIR).filter((m) => m.sequence < 10)) {
+      db.transaction(() => {
+        db.exec(readFileSync(join(MIGRATIONS_DIR, migration.filename), 'utf8'));
+        db.prepare('INSERT INTO schema_migrations (filename) VALUES (?)').run(migration.filename);
+      })();
+    }
+
+    db.exec(`
+      INSERT INTO source_imports (id, source_type, source_hash, byte_size)
+      VALUES (1, 'heartbeat_dump', 'hash', 1);
+      INSERT INTO heartbeats
+        (id, external_id, occurred_at_us, occurred_at, local_date, entity, entity_type,
+         category, user_agent_id, canonical_hash, source_import_id)
+      VALUES (42, 'hb-file', 1, '2026-01-01T00:00:00Z', '2026-01-01', '/a.ts', 'file',
+              'coding', 'editor/1', 'digest', 1);
+      INSERT INTO heartbeat_dependencies (id, heartbeat_id, name, position)
+      VALUES (55, 42, 'sqlite', 0);
+      INSERT INTO heartbeat_memberships (date, heartbeat_id, active)
+      VALUES ('2026-01-01', 42, 1);
+    `);
+
+    expect(runMigrations(db, MIGRATIONS_DIR)).toEqual(['010-url-heartbeat-evidence.sql']);
+    expect(db.prepare('SELECT id, external_id, entity_type, canonical_hash FROM heartbeats WHERE id = 42').get())
+      .toEqual({ id: 42, external_id: 'hb-file', entity_type: 'file', canonical_hash: 'digest' });
+    expect(db.prepare('SELECT id, heartbeat_id, name, position FROM heartbeat_dependencies').all())
+      .toEqual([{ id: 55, heartbeat_id: 42, name: 'sqlite', position: 0 }]);
+    expect(db.prepare('SELECT date, heartbeat_id, active FROM heartbeat_memberships').all())
+      .toEqual([{ date: '2026-01-01', heartbeat_id: 42, active: 1 }]);
+    db.prepare(`
+      INSERT INTO heartbeats
+        (id, external_id, occurred_at_us, occurred_at, local_date, entity, entity_type,
+         category, user_agent_id, canonical_hash, source_import_id)
+      VALUES (43, 'hb-url', 2, '2026-01-01T00:00:01Z', '2026-01-01',
+              'https://Example.com/Path', 'url', 'browsing', 'browser/1', 'url-digest', 1)
+    `).run();
+    expect(() => db.prepare(`
+      INSERT INTO heartbeats
+        (external_id, occurred_at_us, occurred_at, local_date, entity, entity_type,
+         category, user_agent_id, canonical_hash, source_import_id)
+      VALUES ('hb-bad', 3, '2026-01-01T00:00:02Z', '2026-01-01',
+              'bad', 'widget', 'coding', 'editor/1', 'bad-digest', 1)
+    `).run()).toThrow(/CHECK constraint failed/);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+    expect(db.pragma('integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+    db.close();
+  });
+});
+
 describe('configurePragmas', () => {
   it('enables foreign key enforcement', () => {
     const db = new Database(':memory:');
@@ -291,14 +343,15 @@ describe('the shipped schema', () => {
         VALUES (1, 'sealed_access', 'sealed_refresh', '["read_summaries"]', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
     `);
 
-    // Run forward migrations 005-009
+    // Run all remaining forward migrations.
     const applied = runMigrations(db, MIGRATIONS_DIR);
     expect(applied).toEqual([
       '005-sync-lifecycle.sql',
       '006-reconciliation-overlay.sql',
       '007-user-agent-registry.sql',
       '008-connection-lifecycle.sql',
-      '009-slice-semantic-identity.sql'
+      '009-slice-semantic-identity.sql',
+      '010-url-heartbeat-evidence.sql'
     ]);
 
     // Verify foreign key integrity with 0 violations
@@ -412,7 +465,7 @@ describe('Milestone P1: Slice semantic identity (migration 009)', () => {
     const db = createPopulated008Database();
 
     const applied = runMigrations(db, MIGRATIONS_DIR);
-    expect(applied).toEqual(['009-slice-semantic-identity.sql']);
+    expect(applied).toEqual(['009-slice-semantic-identity.sql', '010-url-heartbeat-evidence.sql']);
 
     // Foreign key check passes with 0 errors
     expect(db.pragma('foreign_key_check')).toEqual([]);

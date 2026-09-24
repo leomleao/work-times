@@ -131,6 +131,29 @@ describe('Milestone P3 Stage B: Transactional Reconciliation Engine', () => {
     expect(secondDigest).toBe(firstDigest);
   });
 
+  it('stores URL heartbeat evidence without creating a URL slice or classification identity', () => {
+    const candidate = createDetailedCandidate();
+    candidate.heartbeats = normalizeHeartbeatDay([{
+      id: HB_UUID_2,
+      time: 1789038000,
+      entity: 'https://Example.com/Path',
+      type: 'url',
+      category: 'browsing',
+      project: 'project-alpha',
+      machine_name_id: 'browser-machine',
+      user_agent_id: 'browser/1'
+    }], { date: candidate.date, timezone: candidate.timezone });
+
+    const result = reconcileDay(db, candidate);
+    expect(result.dayStatus).toBe('succeeded');
+    expect(db.prepare('SELECT entity, entity_type FROM heartbeats WHERE external_id = ?').get(HB_UUID_2))
+      .toEqual({ entity: 'https://Example.com/Path', entity_type: 'url' });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM day_project_entity_slices WHERE entity_type = 'url'").get())
+      .toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM slice_identities WHERE source = 'heartbeat'").get())
+      .toEqual({ n: 0 });
+  });
+
   // --------------------------------------------------------------------------
   // 2. Allocations Preservation: Duration Change, Detach, Audit, Reattach
   // --------------------------------------------------------------------------

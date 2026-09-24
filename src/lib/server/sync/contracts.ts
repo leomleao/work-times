@@ -224,7 +224,7 @@ export interface NormalizedHeartbeatEvent {
   occurredAt: string; // ISO 8601 UTC
   localDate: string; // YYYY-MM-DD enclosing date
   entity: string;
-  entityType: 'file' | 'app' | 'domain';
+  entityType: 'file' | 'app' | 'domain' | 'url';
   category: string;
   projectName: string | null;
   branch: string | null;

@@ -199,6 +199,12 @@ describe('validateHeartbeat', () => {
     expect(() => validateHeartbeat({ ...beat, type: 'widget' }, '2026-01-01', 0)).toThrow(/'type'/);
   });
 
+  it('accepts URL heartbeat evidence without changing summary entity types', () => {
+    const parsed = validateHeartbeat({ ...beat, type: 'url', entity: 'https://Example.com/Path' }, '2026-01-01', 0);
+    expect(parsed.type).toBe('url');
+    expect(parsed.entity).toBe('https://Example.com/Path');
+  });
+
   it('zero-fills the AI token counters', () => {
     const parsed = validateHeartbeat(beat, '2026-01-01', 0);
     expect(parsed.ai_input_tokens).toBe(0);

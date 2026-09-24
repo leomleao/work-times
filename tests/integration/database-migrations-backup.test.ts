@@ -288,20 +288,21 @@ describe('Integration: Populated 001-004 Migrations, SQLite Backup & Verified Re
     sourceDb.close();
   });
 
-  it('upgrades populated 001-004 database through all migrations 005-009, preserving IDs, counts, and FKs', () => {
+  it('upgrades populated 001-004 database through all migrations 005-010, preserving IDs, counts, and FKs', () => {
     const db = createPopulated001To004Database(sourceDbPath);
 
-    // Apply pending migrations (005 through 009)
+    // Apply pending migrations (005 through 010)
     const applied = runMigrations(db, MIGRATIONS_DIR);
     expect(applied).toEqual([
       '005-sync-lifecycle.sql',
       '006-reconciliation-overlay.sql',
       '007-user-agent-registry.sql',
       '008-connection-lifecycle.sql',
-      '009-slice-semantic-identity.sql'
+      '009-slice-semantic-identity.sql',
+      '010-url-heartbeat-evidence.sql'
     ]);
 
-    // 1. Verify schema migrations table has all 9 migrations
+    // 1. Verify schema migrations table has all 10 migrations
     const recorded = db
       .prepare('SELECT filename FROM schema_migrations ORDER BY filename ASC')
       .all() as Array<{ filename: string }>;
@@ -314,7 +315,8 @@ describe('Integration: Populated 001-004 Migrations, SQLite Backup & Verified Re
       '006-reconciliation-overlay.sql',
       '007-user-agent-registry.sql',
       '008-connection-lifecycle.sql',
-      '009-slice-semantic-identity.sql'
+      '009-slice-semantic-identity.sql',
+      '010-url-heartbeat-evidence.sql'
     ]);
 
     // 2. Strict SQLite foreign key and integrity verification
@@ -415,7 +417,7 @@ describe('Integration: Populated 001-004 Migrations, SQLite Backup & Verified Re
     expect(db.pragma('integrity_check')).toEqual([{ integrity_check: 'ok' }]);
     expect(db.pragma('foreign_key_check')).toEqual([]);
 
-    expect(db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get()).toEqual({ c: 9 });
+    expect(db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get()).toEqual({ c: 10 });
     expect(db.prepare('SELECT COUNT(*) AS c FROM day_project_entity_slices').get()).toEqual({ c: 5 });
     expect(db.prepare('SELECT COUNT(*) AS c FROM daily_time_allocations').get()).toEqual({ c: 2 });
 

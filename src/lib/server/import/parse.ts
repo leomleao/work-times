@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { redactPath } from './canonical.js';
-import { ENTITY_TYPES, type EntityType } from '../db/schema.js';
+import { ENTITY_TYPES, HEARTBEAT_ENTITY_TYPES, type EntityType, type HeartbeatEntityType } from '../db/schema.js';
 
 /**
  * Default ceiling for reading a dump into memory with `JSON.parse`.
@@ -303,7 +303,7 @@ function validateBreakdownItem(value: unknown, where: string): BreakdownItem {
 export interface RawHeartbeat {
   id: string;
   entity: string;
-  type: EntityType;
+  type: HeartbeatEntityType;
   category: string;
   project: string | null;
   branch: string | null;
@@ -362,7 +362,7 @@ export function validateHeartbeat(value: unknown, date: string, index: number): 
   }
 
   const type = beat.type;
-  if (!isEntityType(type)) {
+  if (!isHeartbeatEntityType(type)) {
     throw new DumpValidationError(`${where} has an unknown 'type'`);
   }
 
@@ -424,6 +424,10 @@ export function validateHeartbeat(value: unknown, date: string, index: number): 
 
 function isEntityType(value: unknown): value is EntityType {
   return typeof value === 'string' && (ENTITY_TYPES as readonly string[]).includes(value);
+}
+
+function isHeartbeatEntityType(value: unknown): value is HeartbeatEntityType {
+  return typeof value === 'string' && (HEARTBEAT_ENTITY_TYPES as readonly string[]).includes(value);
 }
 
 function requireObject(value: unknown, where: string): Record<string, unknown> {

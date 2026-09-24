@@ -552,7 +552,9 @@ function executeImport(context: RunContext): ImportReport {
       // belongs to. When the daily export has no matching entity row (the
       // sparse days that record heartbeats but zero seconds), it lands on the
       // day's unattributed slice rather than being discarded.
-      const sliceId =
+      // URL heartbeats have no summary slice type. Retain them as evidence,
+      // but do not attach their identities to an unrelated or residual slice.
+      const sliceId = beat.type === 'url' ? undefined :
         (beat.project === null ? undefined : sliceIndex.get(sliceKey(beat.project, entity))) ??
         unattributedSliceId ??
         undefined;

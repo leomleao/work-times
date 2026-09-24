@@ -36,6 +36,10 @@ export type Dimension = (typeof DIMENSIONS)[number];
 export const ENTITY_TYPES = ['file', 'app', 'domain'] as const;
 export type EntityType = (typeof ENTITY_TYPES)[number];
 
+/** Raw heartbeat evidence also includes URLs; summary slices do not. */
+export const HEARTBEAT_ENTITY_TYPES = [...ENTITY_TYPES, 'url'] as const;
+export type HeartbeatEntityType = (typeof HEARTBEAT_ENTITY_TYPES)[number];
+
 /** Slice entity types add the synthetic residual bucket. */
 export const SLICE_ENTITY_TYPES = [...ENTITY_TYPES, 'unattributed'] as const;
 export type SliceEntityType = (typeof SLICE_ENTITY_TYPES)[number];
@@ -198,7 +202,7 @@ export interface HeartbeatRow {
   occurred_at: string;
   local_date: string;
   entity: string;
-  entity_type: EntityType;
+  entity_type: HeartbeatEntityType;
   category: string;
   project_id: number | null;
   project_name: string | null;

@@ -307,14 +307,14 @@ export function normalizeHeartbeatDay(
     seenHeartbeats.set(id, canonicalHash);
 
     const rawType = item.type;
-    if (rawType !== 'app' && rawType !== 'domain' && rawType !== 'file') {
+    if (rawType !== 'app' && rawType !== 'domain' && rawType !== 'file' && rawType !== 'url') {
       return {
         kind: 'failed',
         code: RECONCILE_CODES.UNSUPPORTED_HEARTBEAT_ENVELOPE,
         retryAt: null
       };
     }
-    const entityType: 'file' | 'app' | 'domain' = rawType;
+    const entityType: NormalizedHeartbeatEvent['entityType'] = rawType;
 
     // Category validation: do not synthesize 'coding'
     const rawCategory = item.category;
