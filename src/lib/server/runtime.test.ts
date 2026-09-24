@@ -9,6 +9,7 @@ import { runtime, createRuntime, getRuntime, FsExtProcessLock, InMemoryProcessLo
 import { openTestDatabase, openDatabase } from '$lib/server/db/connection';
 import { parsePublicUrl } from '$lib/server/config';
 import { LIFECYCLE_SYMBOL, type RunRequest } from '$lib/server/sync/contracts';
+import { WakaTimeClient } from '$lib/server/wakatime/client';
 
 function getAvailablePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -92,6 +93,7 @@ describe('server runtime singleton', () => {
     );
 
     expect(testRuntime.config.adminUsername).toBe('testadmin');
+    expect((testRuntime.coordinator as unknown as { client: unknown }).client).toBeInstanceOf(WakaTimeClient);
     const createdKey = await testRuntime.apiKeys.create({
       name: 'test-key',
       scopes: ['activity:read']
@@ -248,7 +250,7 @@ describe('Lifecycle and Ownership Contracts (P7)', () => {
       },
       testDb,
       {
-        // No wakatimeClient provided (upstream unavailable)
+        // Default client is lazy, so unavailable upstream cannot block readiness.
         wakatimeClient: undefined
       }
     );

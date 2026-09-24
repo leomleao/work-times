@@ -34,7 +34,7 @@ import {
   type ProcessLock,
   type RuntimeReadiness as ContractRuntimeReadiness
 } from '$lib/server/sync/contracts';
-import type { WakaTimeClient } from '$lib/server/wakatime/client';
+import { WakaTimeClient } from '$lib/server/wakatime/client';
 
 export const RUNTIME_SYMBOL = Symbol.for('work-times.runtime');
 
@@ -367,10 +367,19 @@ export function createRuntime(
 
   const sessionSecret = config.sessionSecret ?? randomBytes(32).toString('hex');
 
+  // Keep OAuth repository initialization lazy until a live request is made.
+  // Production must always have a client; tests may inject a deterministic one.
+  const wakatimeClient = options?.wakatimeClient ?? new WakaTimeClient({
+    tokenProvider: {
+      getAccessToken: (signal) => getWakaTimeOAuth().getAccessToken(signal),
+      refreshAccessToken: (signal) => getWakaTimeOAuth().refreshAccessToken(signal)
+    }
+  });
+
   const coordinator = new SyncCoordinator({
     db: dbProxy,
     repository: syncRepo,
-    client: options?.wakatimeClient,
+    client: wakatimeClient,
     classification: {
       invalidateIdentityCaches: () => getClassification().invalidateIdentityCaches(),
       clearCaches: () => getClassification().clearCaches()
