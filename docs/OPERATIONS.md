@@ -109,6 +109,10 @@ All runtime configuration is evaluated in `src/lib/server/config.ts` and `server
 | `WAKATIME_OAUTH_CLIENT_SECRET` | `WAKATIME_OAUTH_CLIENT_SECRET_FILE` | *None* | App Secret used only for server-side token exchange, refresh, and revocation. |
 | `WORK_TIMES_PORT` | — | `3002` | Host port mapping in `docker-compose.yml`. |
 
+Open the admin UI at the exact `PUBLIC_URL` origin. For example, when it is
+`http://localhost:3002`, do not switch to `http://127.0.0.1:3002`: the login
+form's POST origin will differ and SvelteKit will reject it as cross-site.
+
 > [!IMPORTANT]
 > Live sync and its scheduler are implemented, but recurring scheduling is **off by default**. Do not enable it merely because a connection or historical dump exists. Complete the staged rollout in §12 first. The local synthetic suite does not establish live WakaTime or production readiness.
 
@@ -631,7 +635,7 @@ Create an Access Application covering `work-times.yourdomain.com`.
 4. Run one manual source-calendar day against the intended WakaTime connection. Review accepted versus observed source data, layer restrictions, preserved detail, verified zero versus missing dates, allocation revisions/detachments, and work-only MCP output. Then run a seven-day reconciliation and review any mismatch or retry state. Test one bearer MCP connection and one OAuth MCP connection on an appropriately isolated instance; verify the public ingress paths if this will be remote.
 5. Only after those checks, enable recurring scheduling and observe at least one hourly recent run. Scheduler clock/DST cases are covered locally by tests, but the live run still needs observation. Monitor queue depth, restriction/reconnect notices, freshness, and registry publication. A failed or unavailable live probe is a hold, not a successful rollout.
 
-Local evidence and exact commands are in [NEXT-MILESTONE-LEDGER.md](./NEXT-MILESTONE-LEDGER.md). The synthetic test suite, isolated browser review, populated backup/restore rehearsal, and Node 24 image build passed; live WakaTime, production migration/backup, public bearer/OAuth compatibility, deployment, and recurring schedule observation have **not** been completed. This is a locally implementation-complete candidate, not a G4 release pass.
+Local evidence and exact commands are in [NEXT-MILESTONE-LEDGER.md](./NEXT-MILESTONE-LEDGER.md). The synthetic test suite, isolated browser review, populated backup/restore rehearsal, and Node 24 image build passed. A bounded live probe on 18 September reached WakaTime but remained partial: the source summary was coarser than the archived detail and live heartbeats included the documented `url` entity type, which the current archive schema cannot represent. Seven-day reconciliation, public bearer/OAuth compatibility, and recurring schedule observation are on hold. This is not a G4 release pass.
 
 ### Upgrading Work Times
 Follow the staged checklist above for a first live-sync upgrade. The commands below are examples for the local Compose topology; use a versioned, off-volume destination and verify the copied backup before replacing any code or data.
