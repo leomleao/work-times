@@ -1,8 +1,15 @@
 <script lang="ts">
+  import { invalidateAll } from '$app/navigation';
   import AppShell from '$lib/components/AppShell.svelte';
   import MetricCard from '$lib/components/MetricCard.svelte';
   import Modal from '$lib/components/Modal.svelte';
-  import type { ActionData, PageData } from './$types';
+  import {
+    cancelUpload,
+    uploadFileChunks,
+    uploadRequest,
+    type UploadSummary
+  } from '$lib/client/import-upload';
+  import type { PageData } from './$types';
   import {
     AlertCircle,
     AlertTriangle,
@@ -17,9 +24,108 @@
     XCircle
   } from '@lucide/svelte';
 
-  let { data, form } = $props<{ data: PageData; form?: ActionData | null }>();
+  let { data } = $props<{ data: PageData }>();
   let imports = $derived(data.imports);
   let uploading = $state(false);
+  let uploadPhase = $state<'idle' | 'preparing' | 'daily' | 'heartbeats' | 'processing'>('idle');
+  let dailyProgress = $state(0);
+  let heartbeatProgress = $state(0);
+  let uploadError = $state<string | null>(null);
+  let uploadResult = $state<UploadSummary | null>(null);
+  let validatedId = $state<string | null>(null);
+  let validatedDaily: File | null = null;
+  let validatedHeartbeats: File | null = null;
+  let dailyInput: HTMLInputElement;
+  let heartbeatInput: HTMLInputElement;
+
+  function clearValidated() {
+    if (validatedId && data.csrfToken) void cancelUpload(data.csrfToken, validatedId).catch(() => {});
+    validatedId = null;
+    validatedDaily = null;
+    validatedHeartbeats = null;
+    dailyProgress = 0;
+    heartbeatProgress = 0;
+    uploadError = null;
+    uploadResult = null;
+  }
+
+  async function submitUpload(mode: 'validate' | 'import') {
+    if (uploading) return;
+
+    const daily = dailyInput.files?.[0];
+    const heartbeats = heartbeatInput.files?.[0];
+    if (!daily || !heartbeats) {
+      uploadError = 'Select both the daily and heartbeat JSON files.';
+      return;
+    }
+    if (!data.csrfToken) {
+      uploadError = 'Your session expired. Sign in again and retry.';
+      return;
+    }
+    if (daily.size > data.maxImportBytes || heartbeats.size > data.maxImportBytes) {
+      uploadError = `Each JSON file must be no larger than ${data.maxImportMiB} MiB.`;
+      return;
+    }
+
+    uploading = true;
+    uploadError = null;
+    uploadResult = null;
+    let id: string | null = null;
+
+    try {
+      if (validatedId && validatedDaily === daily && validatedHeartbeats === heartbeats) {
+        id = validatedId;
+        dailyProgress = 100;
+        heartbeatProgress = 100;
+      } else {
+        uploadPhase = 'preparing';
+        dailyProgress = 0;
+        heartbeatProgress = 0;
+        const started = await uploadRequest<{ id: string; chunkBytes: number }>(data.csrfToken, {
+          action: 'start',
+          dailySize: daily.size,
+          heartbeatSize: heartbeats.size
+        });
+        id = started.id;
+        uploadPhase = 'daily';
+        await uploadFileChunks(daily, 'daily', id, started.chunkBytes, data.csrfToken, (percent) => {
+          dailyProgress = percent;
+        });
+        uploadPhase = 'heartbeats';
+        await uploadFileChunks(heartbeats, 'heartbeats', id, started.chunkBytes, data.csrfToken, (percent) => {
+          heartbeatProgress = percent;
+        });
+      }
+
+      uploadPhase = 'processing';
+      const response = await uploadRequest<{ upload: UploadSummary }>(data.csrfToken, {
+        action: 'finish',
+        id,
+        mode
+      });
+      uploadResult = response.upload;
+      if (mode === 'validate' && !response.upload.alreadyImported) {
+        validatedId = id;
+        validatedDaily = daily;
+        validatedHeartbeats = heartbeats;
+      } else {
+        validatedId = null;
+        validatedDaily = null;
+        validatedHeartbeats = null;
+        if (mode === 'validate') void cancelUpload(data.csrfToken, id).catch(() => {});
+        if (mode === 'import') void invalidateAll().catch(() => {});
+      }
+    } catch (error) {
+      uploadError = error instanceof Error ? error.message : 'The upload failed. Please retry.';
+      if (id) void cancelUpload(data.csrfToken, id).catch(() => {});
+      validatedId = null;
+      validatedDaily = null;
+      validatedHeartbeats = null;
+    } finally {
+      uploading = false;
+      uploadPhase = 'idle';
+    }
+  }
 
   // Warnings modal state for real import warnings
   let warningsModalOpen = $state(false);
@@ -101,49 +207,72 @@
     <div class="upload-body">
       <p>
         Select the daily and heartbeat JSON files from the same WakaTime export. They are sent over
-        this site's HTTPS connection, processed on your server, and removed from temporary storage
-        after validation or import. Each file may be up to {data.maxImportMiB} MiB.
+        this site's HTTPS connection in small requests, avoiding the proxy's combined-upload limit.
+        Each file may be up to {data.maxImportMiB} MiB. Validated files stay temporarily on the server
+        so you can import them without uploading again; they are removed after import or expiry.
       </p>
 
-      {#if form?.error}
-        <div class="notice danger" role="alert">{form.error}</div>
+      {#if uploadError}
+        <div class="notice danger" role="alert">{uploadError}</div>
       {/if}
-      {#if form?.upload}
+      {#if uploadResult}
         <div class="notice safe" role="status">
-          {#if form.upload.alreadyImported}
+          {#if uploadResult.alreadyImported}
             These exact exports were already imported; no changes were made.
-          {:else if form.upload.dryRun}
-            Validation passed. No data was written.
+          {:else if uploadResult.dryRun}
+            Validation passed. No data was written. You can import these files without uploading again.
           {:else}
             Import complete.
           {/if}
-          {form.upload.dayCount.toLocaleString()} days and {form.upload.heartbeatCount.toLocaleString()}
-          heartbeats from {form.upload.rangeStartDate} to {form.upload.rangeEndDate}.
-          {#if form.upload.warningCount > 0}
-            {form.upload.warningCount.toLocaleString()}
-            {form.upload.warningCount === 1 ? 'warning was' : 'warnings were'} found.
+          {uploadResult.dayCount.toLocaleString()} days and {uploadResult.heartbeatCount.toLocaleString()}
+          heartbeats from {uploadResult.rangeStartDate} to {uploadResult.rangeEndDate}.
+          {#if uploadResult.warningCount > 0}
+            {uploadResult.warningCount.toLocaleString()}
+            {uploadResult.warningCount === 1 ? 'warning was' : 'warnings were'} found.
           {/if}
         </div>
       {/if}
 
-      <form method="POST" action="?/upload" enctype="multipart/form-data" onsubmit={() => (uploading = true)}>
-        <input type="hidden" name="csrfToken" value={data.csrfToken ?? ''} />
+      <div class="upload-form">
         <div class="upload-fields">
           <label>
             <span>Daily JSON export</span>
-            <input type="file" name="daily" accept=".json,application/json" required />
+            <input bind:this={dailyInput} type="file" accept=".json,application/json" disabled={uploading} onchange={clearValidated} />
           </label>
           <label>
             <span>Heartbeat JSON export</span>
-            <input type="file" name="heartbeats" accept=".json,application/json" required />
+            <input bind:this={heartbeatInput} type="file" accept=".json,application/json" disabled={uploading} onchange={clearValidated} />
           </label>
         </div>
+        {#if uploading || dailyProgress > 0 || heartbeatProgress > 0}
+          <div class="upload-progress" role="group" aria-label="File upload progress">
+            <div class="progress-row">
+              <div class="progress-label"><strong>Daily JSON</strong><span>{dailyProgress}%</span></div>
+              <progress aria-label="Daily JSON upload" value={dailyProgress} max="100"></progress>
+            </div>
+            <div class="progress-row">
+              <div class="progress-label"><strong>Heartbeat JSON</strong><span>{heartbeatProgress}%</span></div>
+              <progress aria-label="Heartbeat JSON upload" value={heartbeatProgress} max="100"></progress>
+            </div>
+          </div>
+        {/if}
         <div class="upload-actions">
-          <button class="button secondary" type="submit" name="mode" value="validate">Validate only</button>
-          <button class="button primary" type="submit" name="mode" value="import">Import files</button>
-          {#if uploading}<span role="status">Uploading and processing — keep this page open…</span>{/if}
+          <button class="button secondary" type="button" disabled={uploading} onclick={() => submitUpload('validate')}>Validate only</button>
+          <button class="button primary" type="button" disabled={uploading} onclick={() => submitUpload('import')}>
+            {validatedId ? 'Import validated files' : 'Import files'}
+          </button>
+          {#if uploading}
+            <span role="status">
+              {#if uploadPhase === 'preparing'}Preparing upload…
+              {:else if uploadPhase === 'daily'}Uploading daily JSON…
+              {:else if uploadPhase === 'heartbeats'}Uploading heartbeat JSON…
+              {:else}Transfer complete. Processing archive…{/if}
+              Keep this page open.
+            </span>
+          {/if}
         </div>
-      </form>
+        <noscript>Browser upload requires JavaScript. Use the CLI importer described below instead.</noscript>
+      </div>
     </div>
   </section>
 
@@ -355,6 +484,12 @@
   .upload-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   .upload-fields label { display: grid; gap: 9px; color: var(--text); font-size: 12px; font-weight: 650; }
   .upload-fields input { width: 100%; padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel-sunken); color: var(--muted); }
+  .upload-fields input:disabled { opacity: 0.6; }
+  .upload-progress { display: grid; gap: 13px; margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-sunken); }
+  .progress-row { display: grid; gap: 7px; }
+  .progress-label { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+  .progress-label strong { color: var(--text); font-weight: 650; }
+  .progress-row progress { width: 100%; height: 9px; accent-color: var(--accent); }
   .upload-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
   .upload-actions span { color: var(--muted); font-size: 12px; }
   @media (max-width: 650px) { .upload-fields { grid-template-columns: 1fr; } }

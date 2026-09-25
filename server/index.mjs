@@ -14,10 +14,9 @@ if (!process.env.ORIGIN && process.env.PUBLIC_URL) {
   process.env.ORIGIN = process.env.PUBLIC_URL;
 }
 
-// The browser dump importer accepts two exports of up to 96 MiB each. The
-// adapter's default 512 KiB request limit would reject them before the route
-// can enforce its own per-file bounds. Operators can override this ceiling.
-process.env.BODY_SIZE_LIMIT ??= '200M';
+// Browser uploads are capped at 4 MiB per request. The adapter's default
+// 512 KiB limit would reject a chunk before the route can enforce its bounds.
+process.env.BODY_SIZE_LIMIT ??= '8M';
 
 const { handler } = await import('../build/handler.js');
 

@@ -35,7 +35,7 @@ Work Times parses and ingests official WakaTime historical exports:
 
 The ingestion engine deduplicates heartbeats idempotently by UUID, calculates canonical dependency hashes (`deps_hash`), redacts personal identifiers to short SHA-256 fingerprints in logs, and enforces a direct-parse memory safety ceiling (`MAX_DIRECT_IMPORT_BYTES`, default 96 MB).
 
-Administrators can upload both JSON exports together at `/admin/imports`, validate them without writing, then import them into the archive. Each file is limited by `MAX_DIRECT_IMPORT_BYTES`; temporary upload copies are removed after processing. The Node server sets `BODY_SIZE_LIMIT` to `200M` by default so the two-file form can pass through the adapter, and operators can override it. The offline `pnpm import:dumps` command remains available for exports too large for the reverse proxy's request limit.
+Administrators can select both JSON exports at `/admin/imports`. The browser sends each file in 4 MiB chunks with separate progress indicators, avoiding a combined request that exceeds a reverse proxy's upload limit. Validation does not write to the archive; validated files can then be imported without re-uploading. Staged files are session-bound and removed after import, failure, or one hour of inactivity. Each file is limited by `MAX_DIRECT_IMPORT_BYTES`; the Node server's default `BODY_SIZE_LIMIT` is `8M` to admit one chunk while bounding other requests. The offline `pnpm import:dumps` command remains available.
 
 #### Verified Dataset Metrics (Historical Archive)
 Real export verification confirms the following aggregate baseline facts (no dump filenames, emails, hashes, paths, identities, or secrets):
