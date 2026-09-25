@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openTestDatabase } from '../db/connection.js';
+import { SqliteClassificationService } from '../classification/sqlite.js';
 import { HeartbeatConflictError, importDumps, type ImportReport } from './importer.js';
 import { DumpTooLargeError, DumpValidationError } from './parse.js';
 
@@ -68,6 +69,17 @@ describe('importDumps', () => {
     expect(report.activeDayCount).toBe(5);
     expect(report.projectCount).toBe(3);
     expect(count('SELECT COUNT(*) AS n FROM daily_totals')).toBe(7);
+  });
+
+  it('activates dump heartbeat evidence for machine and editor suggestions', async () => {
+    await importFixtures();
+
+    expect(count('SELECT COUNT(*) AS n FROM heartbeat_memberships WHERE active = 1'))
+      .toBe(count('SELECT COUNT(*) AS n FROM heartbeats'));
+
+    const suggestions = new SqliteClassificationService(db).getUnclassifiedSuggestions({ limitPerType: 10 });
+    expect(suggestions.some((suggestion) => suggestion.selectorType === 'machine')).toBe(true);
+    expect(suggestions.some((suggestion) => suggestion.selectorType === 'editor')).toBe(true);
   });
 
   it('takes every official second from the daily dump, never from heartbeats', async () => {

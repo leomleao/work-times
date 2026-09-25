@@ -590,7 +590,8 @@ describe('Consolidate Rules CLI (scripts/consolidate-rules.ts)', () => {
         '008-connection-lifecycle.sql',
         '009-slice-semantic-identity.sql',
         '010-url-heartbeat-evidence.sql',
-        '011-url-summary-entities.sql'
+        '011-url-summary-entities.sql',
+        '012-seed-dump-heartbeat-memberships.sql'
       ]);
 
       // - Target has match_mode column

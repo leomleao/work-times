@@ -288,10 +288,10 @@ describe('Integration: Populated 001-004 Migrations, SQLite Backup & Verified Re
     sourceDb.close();
   });
 
-  it('upgrades populated 001-004 database through all migrations 005-011, preserving IDs, counts, and FKs', () => {
+  it('upgrades populated 001-004 database through all migrations 005-012, preserving IDs, counts, and FKs', () => {
     const db = createPopulated001To004Database(sourceDbPath);
 
-    // Apply pending migrations (005 through 011)
+    // Apply pending migrations (005 through 012)
     const applied = runMigrations(db, MIGRATIONS_DIR);
     expect(applied).toEqual([
       '005-sync-lifecycle.sql',
@@ -300,10 +300,11 @@ describe('Integration: Populated 001-004 Migrations, SQLite Backup & Verified Re
       '008-connection-lifecycle.sql',
       '009-slice-semantic-identity.sql',
       '010-url-heartbeat-evidence.sql',
-      '011-url-summary-entities.sql'
+      '011-url-summary-entities.sql',
+      '012-seed-dump-heartbeat-memberships.sql'
     ]);
 
-    // 1. Verify schema migrations table has all 11 migrations
+    // 1. Verify schema migrations table has all 12 migrations
     const recorded = db
       .prepare('SELECT filename FROM schema_migrations ORDER BY filename ASC')
       .all() as Array<{ filename: string }>;
@@ -318,7 +319,8 @@ describe('Integration: Populated 001-004 Migrations, SQLite Backup & Verified Re
       '008-connection-lifecycle.sql',
       '009-slice-semantic-identity.sql',
       '010-url-heartbeat-evidence.sql',
-      '011-url-summary-entities.sql'
+      '011-url-summary-entities.sql',
+      '012-seed-dump-heartbeat-memberships.sql'
     ]);
 
     // 2. Strict SQLite foreign key and integrity verification
@@ -419,7 +421,7 @@ describe('Integration: Populated 001-004 Migrations, SQLite Backup & Verified Re
     expect(db.pragma('integrity_check')).toEqual([{ integrity_check: 'ok' }]);
     expect(db.pragma('foreign_key_check')).toEqual([]);
 
-    expect(db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get()).toEqual({ c: 11 });
+    expect(db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get()).toEqual({ c: 12 });
     expect(db.prepare('SELECT COUNT(*) AS c FROM day_project_entity_slices').get()).toEqual({ c: 5 });
     expect(db.prepare('SELECT COUNT(*) AS c FROM daily_time_allocations').get()).toEqual({ c: 2 });
 

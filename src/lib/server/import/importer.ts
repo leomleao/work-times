@@ -539,6 +539,10 @@ function executeImport(context: RunContext): ImportReport {
         ).lastInsertRowid
       );
 
+      // Dump evidence is the active baseline until a live heartbeat snapshot
+      // replaces this day's membership set during reconciliation.
+      statements.insertMembership.run(day.date, heartbeatId);
+
       statements.insertVariant.run(
         beat.id, canonicalHash, stableStringify(canonicalPayload), 'canonical', heartbeatImportId
       );
@@ -816,6 +820,7 @@ interface Statements {
   insertDailyTotal: Database.Statement;
   insertSlice: Database.Statement;
   insertHeartbeat: Database.Statement;
+  insertMembership: Database.Statement;
   insertVariant: Database.Statement;
   bumpHeartbeatOccurrence: Database.Statement;
   bumpVariantOccurrence: Database.Statement;
@@ -866,6 +871,11 @@ function prepareStatements(db: Database.Database): Statements {
           ai_line_changes, human_line_changes, ai_input_tokens, ai_cached_input_tokens,
           ai_output_tokens, ai_prompt_length, canonical_hash, source_import_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ),
+    insertMembership: db.prepare(
+      `INSERT INTO heartbeat_memberships (date, heartbeat_id, active)
+       VALUES (?, ?, 1)
+       ON CONFLICT(date, heartbeat_id) DO NOTHING`
     ),
     insertVariant: db.prepare(
       `INSERT INTO heartbeat_variants (external_id, canonical_hash, raw_json, conflict_state, source_import_id)

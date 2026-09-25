@@ -137,7 +137,8 @@ describe('URL heartbeat evidence migration', () => {
 
     expect(runMigrations(db, MIGRATIONS_DIR)).toEqual([
       '010-url-heartbeat-evidence.sql',
-      '011-url-summary-entities.sql'
+      '011-url-summary-entities.sql',
+      '012-seed-dump-heartbeat-memberships.sql'
     ]);
     expect(db.prepare('SELECT id, external_id, entity_type, canonical_hash FROM heartbeats WHERE id = 42').get())
       .toEqual({ id: 42, external_id: 'hb-file', entity_type: 'file', canonical_hash: 'digest' });
@@ -174,6 +175,44 @@ describe('URL heartbeat evidence migration', () => {
     `).run()).toThrow(/CHECK constraint failed/);
     expect(db.pragma('foreign_key_check')).toEqual([]);
     expect(db.pragma('integrity_check')).toEqual([{ integrity_check: 'ok' }]);
+    db.close();
+  });
+});
+
+describe('dump heartbeat membership backfill', () => {
+  it('activates missing dump days without reviving superseded evidence', () => {
+    const db = new Database(':memory:');
+    configurePragmas(db, { wal: false });
+    for (const migration of listMigrations(MIGRATIONS_DIR).filter((m) => m.sequence < 12)) {
+      db.transaction(() => {
+        db.exec(readFileSync(join(MIGRATIONS_DIR, migration.filename), 'utf8'));
+        db.prepare('INSERT INTO schema_migrations (filename) VALUES (?)').run(migration.filename);
+      })();
+    }
+
+    db.exec(`
+      INSERT INTO source_imports (id, source_type, source_hash, byte_size)
+      VALUES (1, 'heartbeat_dump', 'dump', 1), (2, 'api_heartbeats', 'api', 1);
+      INSERT INTO heartbeats
+        (id, external_id, occurred_at_us, occurred_at, local_date, entity, entity_type,
+         category, user_agent_id, canonical_hash, source_import_id)
+      VALUES
+        (1, 'missing', 1, '2026-01-01T00:00:00Z', '2026-01-01', '/a', 'file', 'coding', 'editor', 'a', 1),
+        (2, 'inactive', 2, '2026-01-02T00:00:00Z', '2026-01-02', '/b', 'file', 'coding', 'editor', 'b', 1),
+        (3, 'synced', 3, '2026-01-03T00:00:00Z', '2026-01-03', '/c', 'file', 'coding', 'editor', 'c', 1),
+        (4, 'api', 4, '2026-01-01T00:00:00Z', '2026-01-01', '/d', 'file', 'coding', 'editor', 'd', 2);
+      INSERT INTO heartbeat_memberships (date, heartbeat_id, active)
+      VALUES ('2026-01-02', 2, 0);
+      INSERT INTO sync_layer_state (date, layer, accepted_snapshot_version)
+      VALUES ('2026-01-03', 'heartbeats', 1);
+    `);
+
+    expect(runMigrations(db, MIGRATIONS_DIR)).toEqual(['012-seed-dump-heartbeat-memberships.sql']);
+    expect(db.prepare('SELECT date, heartbeat_id, active FROM heartbeat_memberships ORDER BY date').all()).toEqual([
+      { date: '2026-01-01', heartbeat_id: 1, active: 1 },
+      { date: '2026-01-02', heartbeat_id: 2, active: 0 }
+    ]);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
     db.close();
   });
 });
@@ -368,7 +407,8 @@ describe('the shipped schema', () => {
       '008-connection-lifecycle.sql',
       '009-slice-semantic-identity.sql',
       '010-url-heartbeat-evidence.sql',
-      '011-url-summary-entities.sql'
+      '011-url-summary-entities.sql',
+      '012-seed-dump-heartbeat-memberships.sql'
     ]);
 
     // Verify foreign key integrity with 0 violations
@@ -485,7 +525,8 @@ describe('Milestone P1: Slice semantic identity (migration 009)', () => {
     expect(applied).toEqual([
       '009-slice-semantic-identity.sql',
       '010-url-heartbeat-evidence.sql',
-      '011-url-summary-entities.sql'
+      '011-url-summary-entities.sql',
+      '012-seed-dump-heartbeat-memberships.sql'
     ]);
 
     // Foreign key check passes with 0 errors
