@@ -51,7 +51,7 @@ export interface ClassificationRule extends ClassificationRuleLike {
 export interface ClassifiableSlice {
   id: string;
   project: string | null;
-  entityType: 'file' | 'app' | 'domain' | 'unattributed';
+  entityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
   entity: string;
   machineIds: readonly string[];
   editors: readonly string[];

@@ -663,7 +663,6 @@ export function reconcileDay(
 
             const unattributedId = existingProjMap.get('__unattributed__');
             for (const beat of hbDay.heartbeats) {
-              if (beat.entityType === 'url') continue;
               const beatProjId = beat.projectName ? (existingProjMap.get(beat.projectName) ?? null) : null;
               const normBeatEntity = normalizeEntity(beat.entity, beat.entityType);
 
@@ -672,7 +671,9 @@ export function reconcileDay(
                 : null;
               const targetSliceId =
                 (sliceKey ? existingSliceIdByKey.get(sliceKey) : undefined) ??
-                (unattributedId !== undefined ? existingSliceIdByKey.get(computeSliceKey(unattributedId, '__unattributed__', 'unattributed', 'unattributed_residual')) : undefined);
+                (beat.entityType === 'url' || unattributedId === undefined
+                  ? undefined
+                  : existingSliceIdByKey.get(computeSliceKey(unattributedId, '__unattributed__', 'unattributed', 'unattributed_residual')));
 
               if (targetSliceId !== undefined) {
                 if (beat.machineNameId) {
@@ -1346,9 +1347,6 @@ export function reconcileDay(
         `);
 
         for (const beat of hbDay.heartbeats) {
-          // No URL summary slice exists; do not project URL evidence onto a
-          // residual slice's machine/editor classification identities.
-          if (beat.entityType === 'url') continue;
           const beatProjId = beat.projectName ? (projectMap.get(beat.projectName) ?? null) : null;
           const normBeatEntity = normalizeEntity(beat.entity, beat.entityType);
 
@@ -1358,7 +1356,9 @@ export function reconcileDay(
             : null;
           const targetSliceId =
             (sliceKey ? sliceIdByKey.get(sliceKey) : undefined) ??
-            sliceIdByKey.get(computeSliceKey(projectMap.get('__unattributed__')!, '__unattributed__', 'unattributed', 'unattributed_residual'));
+            (beat.entityType === 'url'
+              ? undefined
+              : sliceIdByKey.get(computeSliceKey(projectMap.get('__unattributed__')!, '__unattributed__', 'unattributed', 'unattributed_residual')));
 
           if (targetSliceId !== undefined) {
             if (beat.machineNameId) {

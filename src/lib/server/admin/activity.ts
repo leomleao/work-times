@@ -54,7 +54,7 @@ export interface ActivitySliceItem {
   projectId: number;
   projectName: string;
   entity: string;
-  entityType: 'file' | 'app' | 'domain' | 'unattributed';
+  entityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
   totalSeconds: number;
   formattedDuration: string;
   isUnattributed: boolean;
@@ -101,7 +101,7 @@ export interface ActivityData {
     domain: string | null;
     folder: string | null;
     entity: string | null;
-    entityType: 'all' | 'file' | 'app' | 'domain' | 'unattributed';
+    entityType: 'all' | 'file' | 'app' | 'domain' | 'url' | 'unattributed';
   };
   metrics: {
     totalDurationSeconds: number;
@@ -144,7 +144,7 @@ export interface ValidatedActivityFilters {
   domain: string | null;
   folder: string | null;
   entity: string | null;
-  entityType: 'all' | 'file' | 'app' | 'domain' | 'unattributed';
+  entityType: 'all' | 'file' | 'app' | 'domain' | 'url' | 'unattributed';
   page: number;
   pageSize: number;
 }
@@ -412,11 +412,11 @@ export function validateActivityFilterQuery(
   if (!entityRes.ok) return entityRes;
   const entity = entityRes.val;
 
-  let entityType: 'all' | 'file' | 'app' | 'domain' | 'unattributed' = 'all';
+  let entityType: 'all' | 'file' | 'app' | 'domain' | 'url' | 'unattributed' = 'all';
   if (rawFilters.entityType !== undefined && rawFilters.entityType !== null && rawFilters.entityType !== '') {
     const et = String(rawFilters.entityType).trim().toLowerCase();
-    if (et !== 'all' && et !== 'file' && et !== 'app' && et !== 'domain' && et !== 'unattributed') {
-      return { ok: false, error: `Invalid entityType '${echoValue(rawFilters.entityType)}': must be 'all', 'file', 'app', 'domain', or 'unattributed'.` };
+    if (et !== 'all' && et !== 'file' && et !== 'app' && et !== 'domain' && et !== 'url' && et !== 'unattributed') {
+      return { ok: false, error: `Invalid entityType '${echoValue(rawFilters.entityType)}': must be 'all', 'file', 'app', 'domain', 'url', or 'unattributed'.` };
     }
     entityType = et as any;
   }

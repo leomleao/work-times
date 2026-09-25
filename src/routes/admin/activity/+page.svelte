@@ -33,6 +33,7 @@
       case 'app':
         return Laptop;
       case 'domain':
+      case 'url':
         return Globe;
       default:
         return FolderKanban;
@@ -303,6 +304,7 @@
               <option value="file" selected={activity.filters.entityType === 'file'}>Files</option>
               <option value="app" selected={activity.filters.entityType === 'app'}>Apps</option>
               <option value="domain" selected={activity.filters.entityType === 'domain'}>Domains</option>
+              <option value="url" selected={activity.filters.entityType === 'url'}>URLs</option>
               <option value="unattributed" selected={activity.filters.entityType === 'unattributed'}>Unattributed</option>
             </select>
           </div>

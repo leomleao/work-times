@@ -392,7 +392,7 @@ function executeImport(context: RunContext): ImportReport {
 
     totals.accountDimensionRows += writeAccountDimensions(batches, day, dailyImportId);
 
-    /** project name + entity to slice id, for attaching heartbeat identities. */
+    /** Project, entity, and source type to slice id for heartbeat identities. */
     const sliceIndex = new Map<string, number>();
     let entitySecondsForDay = 0;
 
@@ -444,7 +444,7 @@ function executeImport(context: RunContext): ImportReport {
       for (const entity of project.entities) {
         const entityType = entity.entity_type ?? 'file';
         const name = normalizeEntity(entity.name, entityType);
-        const key = sliceKey(project.name, name);
+        const key = sliceKey(project.name, name, entityType);
         const merged = sliceIndex.has(key);
         const { id: sliceId } = statements.insertSlice.get(
           day.date, projectId, name, entityType, 'entity', entity.total_seconds, entity.percent,
@@ -552,12 +552,13 @@ function executeImport(context: RunContext): ImportReport {
       // belongs to. When the daily export has no matching entity row (the
       // sparse days that record heartbeats but zero seconds), it lands on the
       // day's unattributed slice rather than being discarded.
-      // URL heartbeats have no summary slice type. Retain them as evidence,
-      // but do not attach their identities to an unrelated or residual slice.
-      const sliceId = beat.type === 'url' ? undefined :
-        (beat.project === null ? undefined : sliceIndex.get(sliceKey(beat.project, entity))) ??
-        unattributedSliceId ??
-        undefined;
+      // URL heartbeats attach only to a matching URL slice. Without one they
+      // remain raw evidence and never lend identities to a residual slice.
+      const matchingSliceId = beat.project === null
+        ? undefined
+        : sliceIndex.get(sliceKey(beat.project, entity, beat.type));
+      const sliceId = matchingSliceId ??
+        (beat.type === 'url' ? undefined : unattributedSliceId ?? undefined);
 
       if (sliceId !== undefined) {
         for (const identity of heartbeatSliceIdentities({
@@ -646,8 +647,8 @@ function executeImport(context: RunContext): ImportReport {
   };
 }
 
-function sliceKey(projectName: string, entity: string): string {
-  return `${projectName}\u0000${entity}`;
+function sliceKey(projectName: string, entity: string, entityType: string): string {
+  return `${projectName}\u0000${entity}\u0000${entityType}`;
 }
 
 /** Resolves project names to ids, creating rows and widening activity bounds. */

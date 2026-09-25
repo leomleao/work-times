@@ -142,7 +142,7 @@ export type SliceKind = 'entity' | 'project_summary' | 'unattributed_residual';
 export interface NormalizedSlice {
   projectName: string;
   entity: string;
-  entityType: 'file' | 'app' | 'domain' | 'unattributed';
+  entityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
   totalSeconds: number;
   kind: SliceKind;
   isUnattributed: boolean;
@@ -162,7 +162,7 @@ export interface NormalizedProjectSummary {
   hasEntityDetail: boolean;
   entities: Array<{
     name: string;
-    type: 'file' | 'app' | 'domain';
+    type: 'file' | 'app' | 'domain' | 'url';
     totalSeconds: number;
     percent?: number;
     projectRootCount?: number | null;
@@ -188,7 +188,7 @@ export interface NormalizedScopedDimension {
     | 'operating_system'
     | 'branch';
   name: string;
-  entityType?: 'file' | 'app' | 'domain' | null;
+  entityType?: 'file' | 'app' | 'domain' | 'url' | null;
   machineNameId?: string | null;
   totalSeconds: number;
   percent?: number | null;

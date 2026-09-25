@@ -153,6 +153,19 @@ describe('validateDailyDay', () => {
       )
     ).toThrow(/unknown entity type/);
   });
+
+  it('retains URL summary entities with their source type', () => {
+    const parsed = validateDailyDay({
+      ...day,
+      projects: [{
+        name: 'browser-project',
+        grand_total: { total_seconds: 10 },
+        entities: [{ name: 'https://example.com/path', total_seconds: 10, type: 'url' }]
+      }]
+    }, 0);
+    expect(parsed.projects[0].entities[0].entity_type).toBe('url');
+    expect(parsed.projects[0].entities[0].name).toBe('https://example.com/path');
+  });
 });
 
 describe('validateHeartbeat', () => {
@@ -199,7 +212,7 @@ describe('validateHeartbeat', () => {
     expect(() => validateHeartbeat({ ...beat, type: 'widget' }, '2026-01-01', 0)).toThrow(/'type'/);
   });
 
-  it('accepts URL heartbeat evidence without changing summary entity types', () => {
+  it('accepts URL heartbeat evidence', () => {
     const parsed = validateHeartbeat({ ...beat, type: 'url', entity: 'https://Example.com/Path' }, '2026-01-01', 0);
     expect(parsed.type).toBe('url');
     expect(parsed.entity).toBe('https://Example.com/Path');

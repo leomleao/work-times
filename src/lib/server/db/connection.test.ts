@@ -135,13 +135,29 @@ describe('URL heartbeat evidence migration', () => {
       VALUES ('2026-01-01', 42, 1);
     `);
 
-    expect(runMigrations(db, MIGRATIONS_DIR)).toEqual(['010-url-heartbeat-evidence.sql']);
+    expect(runMigrations(db, MIGRATIONS_DIR)).toEqual([
+      '010-url-heartbeat-evidence.sql',
+      '011-url-summary-entities.sql'
+    ]);
     expect(db.prepare('SELECT id, external_id, entity_type, canonical_hash FROM heartbeats WHERE id = 42').get())
       .toEqual({ id: 42, external_id: 'hb-file', entity_type: 'file', canonical_hash: 'digest' });
     expect(db.prepare('SELECT id, heartbeat_id, name, position FROM heartbeat_dependencies').all())
       .toEqual([{ id: 55, heartbeat_id: 42, name: 'sqlite', position: 0 }]);
     expect(db.prepare('SELECT date, heartbeat_id, active FROM heartbeat_memberships').all())
       .toEqual([{ date: '2026-01-01', heartbeat_id: 42, active: 1 }]);
+    db.exec(`
+      INSERT INTO projects (id, name) VALUES (2, 'browser-project');
+      INSERT INTO daily_dimension_totals
+        (date, scope, project_id, dimension, name, entity_type, total_seconds, source_import_id)
+      VALUES ('2026-01-01', 'project', 2, 'entity', 'https://example.com/path', 'url', 30, 1);
+      INSERT INTO day_project_entity_slices
+        (date, project_id, entity, entity_type, total_seconds, source_import_id)
+      VALUES ('2026-01-01', 2, 'https://example.com/path', 'url', 30, 1);
+      INSERT INTO daily_time_allocations
+        (id, date, project_id, entity, entity_type, kind, classification, allocated_seconds)
+      VALUES ('url-allocation', '2026-01-01', 2, 'https://example.com/path', 'url', 'entity', 'work', 30);
+    `);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
     db.prepare(`
       INSERT INTO heartbeats
         (id, external_id, occurred_at_us, occurred_at, local_date, entity, entity_type,
@@ -351,7 +367,8 @@ describe('the shipped schema', () => {
       '007-user-agent-registry.sql',
       '008-connection-lifecycle.sql',
       '009-slice-semantic-identity.sql',
-      '010-url-heartbeat-evidence.sql'
+      '010-url-heartbeat-evidence.sql',
+      '011-url-summary-entities.sql'
     ]);
 
     // Verify foreign key integrity with 0 violations
@@ -465,7 +482,11 @@ describe('Milestone P1: Slice semantic identity (migration 009)', () => {
     const db = createPopulated008Database();
 
     const applied = runMigrations(db, MIGRATIONS_DIR);
-    expect(applied).toEqual(['009-slice-semantic-identity.sql', '010-url-heartbeat-evidence.sql']);
+    expect(applied).toEqual([
+      '009-slice-semantic-identity.sql',
+      '010-url-heartbeat-evidence.sql',
+      '011-url-summary-entities.sql'
+    ]);
 
     // Foreign key check passes with 0 errors
     expect(db.pragma('foreign_key_check')).toEqual([]);

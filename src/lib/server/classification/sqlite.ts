@@ -64,7 +64,7 @@ export interface DailyTimeAllocationRecord {
   date: string;
   project_id: number;
   entity: string;
-  entity_type: 'file' | 'app' | 'domain' | 'unattributed';
+  entity_type: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
   kind: 'entity' | 'project_summary' | 'unattributed_residual';
   classification: RuleClassification;
   allocated_seconds: number;
@@ -100,7 +100,7 @@ export interface EvaluatedSlice {
   projectId: number;
   projectName: string | null;
   entity: string;
-  entityType: 'file' | 'app' | 'domain' | 'unattributed';
+  entityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
   totalSeconds: number;
   isUnattributed: boolean;
   machineIds: string[];
@@ -229,7 +229,7 @@ export interface CreateAllocationInput {
   date: string;
   projectId: number;
   entity: string;
-  entityType?: 'file' | 'app' | 'domain' | 'unattributed';
+  entityType?: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
   kind?: 'entity' | 'project_summary' | 'unattributed_residual';
   classification: RuleClassification;
   timesheetCode?: string | null;
@@ -545,7 +545,7 @@ export class SqliteClassificationService {
     date: string,
     projectId: number,
     entity: string,
-    entityType?: 'file' | 'app' | 'domain' | 'unattributed',
+    entityType?: 'file' | 'app' | 'domain' | 'url' | 'unattributed',
     kind?: 'entity' | 'project_summary' | 'unattributed_residual'
   ): DailyTimeAllocationRecord | null {
     if (entityType && kind) {
@@ -569,7 +569,7 @@ export class SqliteClassificationService {
          WHERE date = ? AND project_id = ? AND entity = ?`
       )
       .all(date, projectId, entity) as Array<{
-        entity_type: 'file' | 'app' | 'domain' | 'unattributed';
+        entity_type: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
         kind: 'entity' | 'project_summary' | 'unattributed_residual';
       }>;
 
@@ -1576,7 +1576,7 @@ export class SqliteClassificationService {
     }
 
     return this.db.transaction(() => {
-      let resolvedEntityType: 'file' | 'app' | 'domain' | 'unattributed';
+      let resolvedEntityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
       let resolvedKind: 'entity' | 'project_summary' | 'unattributed_residual';
       let sliceTotalSeconds: number;
 
@@ -1589,7 +1589,7 @@ export class SqliteClassificationService {
           )
           .get(input.date, input.projectId, input.entity, input.entityType, input.kind) as {
             total_seconds: number;
-            entity_type: 'file' | 'app' | 'domain' | 'unattributed';
+            entity_type: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
             kind: 'entity' | 'project_summary' | 'unattributed_residual';
           } | undefined;
 
@@ -1610,7 +1610,7 @@ export class SqliteClassificationService {
           )
           .all(input.date, input.projectId, input.entity) as Array<{
             total_seconds: number;
-            entity_type: 'file' | 'app' | 'domain' | 'unattributed';
+            entity_type: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
             kind: 'entity' | 'project_summary' | 'unattributed_residual';
           }>;
 
@@ -1937,7 +1937,7 @@ export class SqliteClassificationService {
     projectId: number;
     projectName: string | null;
     entity: string;
-    entityType: 'file' | 'app' | 'domain' | 'unattributed';
+    entityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
     totalSeconds: number;
     isUnattributed: boolean;
     allocation: DailyTimeAllocationRecord | null;
@@ -2106,14 +2106,16 @@ export class SqliteClassificationService {
       const editors = (idents?.editors ?? []).slice().sort();
 
       const isUnattributed = Boolean(s.is_unattributed || s.project_is_unattributed || s.kind === 'unattributed_residual');
-      const entityType: 'file' | 'app' | 'domain' | 'unattributed' =
+      const entityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed' =
         s.entity_type === 'app'
           ? 'app'
           : s.entity_type === 'domain'
             ? 'domain'
-            : s.entity_type === 'unattributed' || isUnattributed
-              ? 'unattributed'
-              : 'file';
+            : s.entity_type === 'url'
+              ? 'url'
+              : s.entity_type === 'unattributed' || isUnattributed
+                ? 'unattributed'
+                : 'file';
 
       const classifiableSlice: ClassifiableSlice = {
         id: String(s.id),
@@ -2156,7 +2158,7 @@ export class SqliteClassificationService {
       projectId: number;
       projectName: string | null;
       entity: string;
-      entityType: 'file' | 'app' | 'domain' | 'unattributed';
+      entityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed';
       totalSeconds: number;
       isUnattributed: boolean;
       allocation: DailyTimeAllocationRecord | null;
@@ -2181,14 +2183,16 @@ export class SqliteClassificationService {
           proj?.is_unattributed
         );
         const projectName = isUnattributed ? null : (proj?.name ?? null);
-        const entityType: 'file' | 'app' | 'domain' | 'unattributed' =
+        const entityType: 'file' | 'app' | 'domain' | 'url' | 'unattributed' =
           a.entity_type === 'app'
             ? 'app'
             : a.entity_type === 'domain'
               ? 'domain'
-              : a.entity_type === 'unattributed' || isUnattributed
-                ? 'unattributed'
-                : 'file';
+              : a.entity_type === 'url'
+                ? 'url'
+                : a.entity_type === 'unattributed' || isUnattributed
+                  ? 'unattributed'
+                  : 'file';
 
         let hash = 0;
         for (let i = 0; i < a.id.length; i++) {

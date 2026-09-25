@@ -181,7 +181,8 @@ export interface SliceIdentity {
 /**
  * Identities intrinsic to a day/project/entity slice, derivable from the daily
  * export alone: the project, and — for a file — its containing folder and its
- * exact path; for an app or domain, that identity.
+ * exact path; for an app or domain, that identity. URL slices retain their
+ * exact source URL as an entity identity, without being reduced to a domain.
  *
  * Machine and editor identities are NOT here: the daily export does not attach
  * them per entity. They arrive from matching heartbeats via
@@ -218,6 +219,11 @@ export function sliceIntrinsicIdentities(slice: {
       identities.push({ selectorType: 'folder_prefix', value: exact.slice(0, lastSlash) });
     }
     identities.push({ selectorType: 'entity', value: exact });
+  } else if (slice.entityType === 'url') {
+    identities.push({
+      selectorType: 'entity',
+      value: normalizeSelectorValue('entity', slice.entity)
+    });
   }
 
   return identities;

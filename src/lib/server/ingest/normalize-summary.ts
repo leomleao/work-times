@@ -108,19 +108,19 @@ function extractScopedDimensions(
           machineNameId = rawItem.machineNameId as string | null;
         }
 
-        let entityType: 'file' | 'app' | 'domain' | null = null;
+        let entityType: 'file' | 'app' | 'domain' | 'url' | null = null;
         const hasType = Object.prototype.hasOwnProperty.call(rawItem, 'type');
         const hasEntityType = Object.prototype.hasOwnProperty.call(rawItem, 'entity_type');
         if (hasType) {
           const t = rawItem.type;
-          if (t !== null && t !== 'file' && t !== 'app' && t !== 'domain') {
+          if (t !== null && t !== 'file' && t !== 'app' && t !== 'domain' && t !== 'url') {
             return { error: RECONCILE_CODES.INCOMPLETE_BODY, dimensions: [] };
           }
           entityType = (t as any) ?? null;
         }
         if (hasEntityType) {
           const t = rawItem.entity_type;
-          if (t !== null && t !== 'file' && t !== 'app' && t !== 'domain') {
+          if (t !== null && t !== 'file' && t !== 'app' && t !== 'domain' && t !== 'url') {
             return { error: RECONCILE_CODES.INCOMPLETE_BODY, dimensions: [] };
           }
           if (entityType === null) entityType = (t as any) ?? null;
@@ -514,14 +514,14 @@ export function normalizeSummaryDay(
           }
 
           const rawType = rawEnt.type ?? rawEnt.entity_type;
-          if (rawType !== 'app' && rawType !== 'domain' && rawType !== 'file') {
+          if (rawType !== 'app' && rawType !== 'domain' && rawType !== 'file' && rawType !== 'url') {
             return {
               kind: 'failed',
               code: RECONCILE_CODES.INCOMPLETE_BODY,
               retryAt: null
             };
           }
-          const entType: 'file' | 'app' | 'domain' = rawType;
+          const entType: 'file' | 'app' | 'domain' | 'url' = rawType;
 
           const normEntity = normalizeEntity(entName, entType);
           const entityKey = `${normEntity}\0${entType}`;

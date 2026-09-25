@@ -635,8 +635,8 @@ describe('Ingest Stage A: Pure Normalization & Source Fidelity', () => {
       }
     });
 
-    it('rejects unsupported summary entity type without coercing to file', () => {
-      const unsupportedEntity = {
+    it('preserves URL summary entities without coercing them to files or domains', () => {
+      const urlEntity = {
         data: [
           {
             date: '2026-09-08',
@@ -647,7 +647,7 @@ describe('Ingest Stage A: Pure Normalization & Source Fidelity', () => {
                 name: 'work-times',
                 total_seconds: 3600.0,
                 entities: [
-                  { name: 'https://example.com', total_seconds: 3600.0, type: 'url' } // Unsupported type!
+                  { name: 'https://example.com', total_seconds: 3600.0, type: 'url' }
                 ]
               }
             ]
@@ -655,14 +655,18 @@ describe('Ingest Stage A: Pure Normalization & Source Fidelity', () => {
         ]
       };
 
-      const result = normalizeSummaryDay(unsupportedEntity, {
+      const result = normalizeSummaryDay(urlEntity, {
         date: '2026-09-08',
         accountTimezone: 'Europe/London'
       });
 
-      expect(result.kind).toBe('failed');
-      if (result.kind === 'failed') {
-        expect(result.code).toBe(RECONCILE_CODES.INCOMPLETE_BODY);
+      expect(result.kind).toBe('complete');
+      if (result.kind === 'complete') {
+        expect(result.value.slices).toContainEqual(expect.objectContaining({
+          entity: 'https://example.com',
+          entityType: 'url',
+          totalSeconds: 3600
+        }));
       }
     });
   });
