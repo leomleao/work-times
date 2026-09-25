@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowRight, CheckCircle2, Database, KeyRound, LockKeyhole, ShieldCheck, Unplug } from '@lucide/svelte';
+  import { ArrowLeft, ArrowRight, CheckCircle2, Database, KeyRound, LockKeyhole, ShieldCheck, Unplug } from '@lucide/svelte';
   import type { ActionData, PageData } from './$types';
 
   let { data, form }: { data: PageData; form?: ActionData | null } = $props();
@@ -12,6 +12,9 @@
 
 <main class="integration-shell">
   <section class="integration-card">
+    <a class="back-link" href={data.isAdmin ? '/admin/sync' : '/'}>
+      <ArrowLeft size={15} /> {data.isAdmin ? 'Back to imports & sync' : 'Back to Work Times'}
+    </a>
     <div class="brand-row">
       <div class="brand-mark" aria-hidden="true">W</div>
       <div>
@@ -72,6 +75,12 @@
       {/if}
     </div>
 
+    {#if data.isAdmin}
+      <a class="button secondary import-link" href="/admin/imports">
+        <Database size={15} /> Import local JSON exports
+      </a>
+    {/if}
+
     {#if data.isAdmin && (!data.status.appConfigured || !data.status.encryptionReady)}
       <div class="setup-box">
         <strong>Server configuration needed</strong>
@@ -91,6 +100,8 @@
 <style>
   .integration-shell { min-height: 100vh; display: grid; place-items: center; padding: 32px 20px; background: radial-gradient(circle at 50% 0%, #1d1913 0, var(--bg) 48%); }
   .integration-card { width: min(720px, 100%); padding: clamp(26px, 5vw, 46px); border: 1px solid var(--border-strong); border-radius: 24px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: var(--shadow-lg); }
+  .back-link { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 24px; color: var(--muted); font-size: 12px; text-decoration: none; }
+  .back-link:hover, .back-link:focus-visible { color: var(--text); }
   .brand-row { display: flex; align-items: center; gap: 14px; }
   h1 { font-size: clamp(30px, 6vw, 48px); }
   .intro { margin: 22px 0; color: var(--muted); line-height: 1.65; }
@@ -102,6 +113,7 @@
   .connection-panel { display: flex; justify-content: space-between; gap: 18px; align-items: center; padding: 18px; border: 1px solid var(--border-strong); border-radius: 15px; background: var(--panel-raised); }
   .status-line { display: flex; align-items: center; gap: 9px; font-weight: 650; }
   .connection-panel small { display: block; margin-top: 5px; color: var(--muted); }
+  .import-link { margin-top: 14px; }
   .setup-box, .scope-box { margin-top: 14px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 13px; background: var(--panel-sunken); }
   .setup-box p, .scope-box p { color: var(--muted); font-size: 12px; line-height: 1.55; }
   .scope-box > div { display: flex; align-items: center; gap: 8px; }

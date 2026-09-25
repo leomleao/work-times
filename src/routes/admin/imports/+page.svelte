@@ -2,7 +2,7 @@
   import AppShell from '$lib/components/AppShell.svelte';
   import MetricCard from '$lib/components/MetricCard.svelte';
   import Modal from '$lib/components/Modal.svelte';
-  import type { PageData } from './$types';
+  import type { ActionData, PageData } from './$types';
   import {
     AlertCircle,
     AlertTriangle,
@@ -17,8 +17,9 @@
     XCircle
   } from '@lucide/svelte';
 
-  let { data } = $props<{ data: PageData }>();
+  let { data, form } = $props<{ data: PageData; form?: ActionData | null }>();
   let imports = $derived(data.imports);
+  let uploading = $state(false);
 
   // Warnings modal state for real import warnings
   let warningsModalOpen = $state(false);
@@ -68,13 +69,13 @@
     <MetricCard
       label="CLI Ingestion Tool"
       value="pnpm import:dumps"
-      subtext="Offline CLI parsing with PII redaction"
+      subtext="Offline alternative to browser upload"
       badge="Canonical"
       badgeVariant="neutral"
     />
     <MetricCard
       label="Direct Ingestion Limit"
-      value="96 MB"
+      value={`${data.maxImportMiB} MiB`}
       subtext="Configured via MAX_DIRECT_IMPORT_BYTES"
       badge="Configured"
       badgeVariant="safe"
@@ -86,6 +87,64 @@
       badge="Deterministic"
       badgeVariant="work"
     />
+  </section>
+
+  <section class="panel upload-panel" aria-labelledby="upload-heading">
+    <div class="panel-heading">
+      <div>
+        <p class="eyebrow">Browser upload</p>
+        <h2 id="upload-heading">Import WakaTime JSON exports</h2>
+      </div>
+      <span class="badge safe">Administrator only</span>
+    </div>
+
+    <div class="upload-body">
+      <p>
+        Select the daily and heartbeat JSON files from the same WakaTime export. They are sent over
+        this site's HTTPS connection, processed on your server, and removed from temporary storage
+        after validation or import. Each file may be up to {data.maxImportMiB} MiB.
+      </p>
+
+      {#if form?.error}
+        <div class="notice danger" role="alert">{form.error}</div>
+      {/if}
+      {#if form?.upload}
+        <div class="notice safe" role="status">
+          {#if form.upload.alreadyImported}
+            These exact exports were already imported; no changes were made.
+          {:else if form.upload.dryRun}
+            Validation passed. No data was written.
+          {:else}
+            Import complete.
+          {/if}
+          {form.upload.dayCount.toLocaleString()} days and {form.upload.heartbeatCount.toLocaleString()}
+          heartbeats from {form.upload.rangeStartDate} to {form.upload.rangeEndDate}.
+          {#if form.upload.warningCount > 0}
+            {form.upload.warningCount.toLocaleString()}
+            {form.upload.warningCount === 1 ? 'warning was' : 'warnings were'} found.
+          {/if}
+        </div>
+      {/if}
+
+      <form method="POST" action="?/upload" enctype="multipart/form-data" onsubmit={() => (uploading = true)}>
+        <input type="hidden" name="csrfToken" value={data.csrfToken ?? ''} />
+        <div class="upload-fields">
+          <label>
+            <span>Daily JSON export</span>
+            <input type="file" name="daily" accept=".json,application/json" required />
+          </label>
+          <label>
+            <span>Heartbeat JSON export</span>
+            <input type="file" name="heartbeats" accept=".json,application/json" required />
+          </label>
+        </div>
+        <div class="upload-actions">
+          <button class="button secondary" type="submit" name="mode" value="validate">Validate only</button>
+          <button class="button primary" type="submit" name="mode" value="import">Import files</button>
+          {#if uploading}<span role="status">Uploading and processing — keep this page open…</span>{/if}
+        </div>
+      </form>
+    </div>
   </section>
 
   <!-- Content Grid: Left Imports List, Right CLI Explanation -->
@@ -129,8 +188,7 @@
                       No source imports recorded yet
                     </p>
                     <p style="font-size: 12px; margin: 0; color: var(--faint); line-height: 1.5;">
-                      Run the CLI dump importer to ingest your historical WakaTime JSON exports.
-                      See the instructions on the right for command details.
+                      Upload both WakaTime JSON exports above, or use the CLI importer described on the right.
                     </p>
                   </div>
                 </td>
@@ -218,8 +276,8 @@
       <div style="padding: 22px; font-size: 13px; line-height: 1.6; color: var(--muted); display: flex; flex-direction: column; gap: 16px;">
         <p style="margin: 0;">
           WakaTime dump archives contain personal historical telemetry and single-user activity.
-          Work Times processes dumps locally on your machine via the CLI script to ensure zero sensitive
-          payload data or file paths are exposed over web endpoints.
+          The CLI is an offline alternative to browser upload. It reads dumps directly on the
+          machine holding the database, without sending them through the web application.
         </p>
 
         <div style="background: #11110f; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px;">
@@ -288,3 +346,16 @@
     </button>
   {/snippet}
 </Modal>
+
+<style>
+  .upload-panel { margin-bottom: 24px; }
+  .upload-body { padding: 22px; }
+  .upload-body > p { margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+  .upload-body .notice { margin-bottom: 18px; }
+  .upload-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .upload-fields label { display: grid; gap: 9px; color: var(--text); font-size: 12px; font-weight: 650; }
+  .upload-fields input { width: 100%; padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel-sunken); color: var(--muted); }
+  .upload-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .upload-actions span { color: var(--muted); font-size: 12px; }
+  @media (max-width: 650px) { .upload-fields { grid-template-columns: 1fr; } }
+</style>

@@ -4,7 +4,7 @@ import polka from 'polka';
 
 process.umask(0o077);
 
-if (existsSync('.env')) loadEnvFile('.env');
+if (process.env.NODE_ENV !== 'test' && existsSync('.env')) loadEnvFile('.env');
 
 // adapter-node needs the externally visible origin to validate form POSTs.
 // PUBLIC_URL is already the application's canonical origin, so keep the
@@ -13,6 +13,11 @@ if (existsSync('.env')) loadEnvFile('.env');
 if (!process.env.ORIGIN && process.env.PUBLIC_URL) {
   process.env.ORIGIN = process.env.PUBLIC_URL;
 }
+
+// The browser dump importer accepts two exports of up to 96 MiB each. The
+// adapter's default 512 KiB request limit would reject them before the route
+// can enforce its own per-file bounds. Operators can override this ceiling.
+process.env.BODY_SIZE_LIMIT ??= '200M';
 
 const { handler } = await import('../build/handler.js');
 
