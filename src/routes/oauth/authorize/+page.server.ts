@@ -194,6 +194,11 @@ export const load: PageServerLoad = async ({ url, locals }) => {
     throw redirect(303, `/login?redirectTo=${encodeURIComponent(returnTarget)}`);
   }
 
+  // The consent form submits to this origin, then redirects to the registered
+  // client's callback. Chromium applies form-action CSP to that redirect too.
+  // Pass only the validated callback origin to the response-header hook.
+  locals.oauthRedirectOrigin = new URL(validation.params.redirectUri).origin;
+
   return {
     client: {
       clientId: validation.params.client.clientId,

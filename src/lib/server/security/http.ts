@@ -70,3 +70,12 @@ export function setSecurityHeaders(headers: Headers): void {
   headers.set('X-Frame-Options', 'DENY');
   headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 }
+
+/** Allow a validated OAuth callback after the consent form's same-origin POST. */
+export function allowOAuthFormRedirect(headers: Headers, callbackOrigin: string): void {
+  const policy = headers.get('Content-Security-Policy');
+  if (!policy) return;
+  const directive = "form-action 'self'";
+  if (!policy.includes(directive)) return;
+  headers.set('Content-Security-Policy', policy.replace(directive, `${directive} ${callbackOrigin}`));
+}

@@ -570,7 +570,7 @@ Work Times implements a Streamable HTTP Model Context Protocol (MCP) server at `
 
 ### Client-Specific Setup
 
-Use `/admin/mcp-config` to select the actual client and authentication mode and copy its current recipe. Codex uses its TOML MCP configuration; Claude Code uses its own MCP JSON or command flow. Claude Desktop uses a remote URL-only OAuth connector and cannot use the page's bearer-header recipe. Generic clients may use `Authorization: Bearer <one-time API key>` only if they support custom headers. OAuth clients use `${PUBLIC_URL}/mcp` as the resource URL and complete interactive admin consent. Test bearer and OAuth connections independently; a successful local synthetic call does not prove a public reverse proxy or Cloudflare Access policy works.
+Use `/admin/mcp-config` to select the client and authentication mode and copy its current recipe. Codex uses TOML. The Claude Code recipe uses `mcp-remote` as a local stdio bridge to the streamable HTTP endpoint; current Claude Code also supports native HTTP, but the bridge is available when that connection fails. The Claude Desktop OAuth recipe adds the same bridge under `mcpServers` in `claude_desktop_config.json`; restart Desktop after editing it. Its separate cloud connector can be configured in Claude Settings and requires the server to be reachable from Anthropic infrastructure. Generic clients may use `Authorization: Bearer <one-time API key>` only if they support custom headers. OAuth clients use `${PUBLIC_URL}/mcp` as the resource URL and complete interactive admin consent. Test bearer and OAuth connections independently; a successful local synthetic call does not prove a public reverse proxy or Cloudflare Access policy works.
 
 ---
 

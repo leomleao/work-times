@@ -69,8 +69,8 @@
 
   const clients: Array<{ id: McpClientType; name: string; desc: string }> = [
     { id: 'codex', name: 'Codex CLI', desc: 'OpenAI Codex CLI using TOML configuration' },
-    { id: 'claude-code', name: 'Claude Code', desc: 'Claude Code CLI via .mcp.json HTTP configuration' },
-    { id: 'claude-desktop', name: 'Claude Desktop', desc: 'Remote MCP Connector with OAuth 2.0' },
+    { id: 'claude-code', name: 'Claude Code', desc: 'Local mcp-remote bridge to streamable HTTP' },
+    { id: 'claude-desktop', name: 'Claude Desktop', desc: 'Local OAuth bridge or cloud connector' },
     { id: 'generic', name: 'Generic MCP Client', desc: 'Standard streamable HTTP JSON-RPC 2.0' }
   ];
 
@@ -286,7 +286,7 @@
           </button>
         </div>
 
-        <!-- Recipe Warning (e.g. Claude Desktop Public Reachability) -->
+        <!-- Recipe Warning (e.g. Claude Desktop cloud connector limitations) -->
         {#if currentRecipe.warning}
           <div class="notice warning" role="alert">
             <AlertTriangle size={17} />

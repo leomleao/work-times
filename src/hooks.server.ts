@@ -2,6 +2,7 @@ import { json, redirect, type Handle, type ServerInit } from '@sveltejs/kit';
 import { runtime } from '$lib/server/runtime';
 import {
   ADMIN_SESSION_COOKIE,
+  allowOAuthFormRedirect,
   csrfTokenForSession,
   requestHasTrustedOrigin,
   setSecurityHeaders,
@@ -111,5 +112,8 @@ export const handle: Handle = async ({ event, resolve }) => {
 
   const response = await resolve(event);
   setSecurityHeaders(response.headers);
+  if (pathname === '/oauth/authorize' && method === 'GET' && event.locals.oauthRedirectOrigin) {
+    allowOAuthFormRedirect(response.headers, event.locals.oauthRedirectOrigin);
+  }
   return response;
 };

@@ -44,11 +44,11 @@ describe('MCP Configuration Recipes Module', () => {
       const evilUrl = 'https://evil.com/mcp?q="><script>alert(1)</script>&nl=\n';
       const jsonBearer = formatClaudeCodeBearerJson(evilUrl);
       const parsedBearer = JSON.parse(jsonBearer);
-      expect(parsedBearer.mcpServers['work-times'].url).toBe(evilUrl);
+      expect(parsedBearer.mcpServers['work-times'].args[2]).toBe(evilUrl);
 
       const jsonOAuth = formatClaudeCodeOAuthJson(evilUrl);
       const parsedOAuth = JSON.parse(jsonOAuth);
-      expect(parsedOAuth.mcpServers['work-times'].url).toBe(evilUrl);
+      expect(parsedOAuth.mcpServers['work-times'].args[2]).toBe(evilUrl);
     });
   });
 
@@ -96,42 +96,40 @@ describe('MCP Configuration Recipes Module', () => {
       expect(recipe.instructions.join(' ')).toContain('codex mcp login work-times');
     });
 
-    it('Claude Code Bearer recipe uses type http, URL, and Authorization header with literal ${WORK_TIMES_API_KEY}', () => {
+    it('Claude Code Bearer recipe uses mcp-remote HTTP bridge and environment-backed header', () => {
       const recipe = getRecipe('claude-code', 'bearer', httpsEndpoint);
       expect(recipe.format).toBe('json');
       const parsed = JSON.parse(recipe.snippet);
       expect(parsed.mcpServers['work-times']).toEqual({
-        type: 'http',
-        url: httpsEndpoint,
-        headers: {
-          Authorization: 'Bearer ${WORK_TIMES_API_KEY}'
-        }
+        command: 'npx',
+        args: ['-y', 'mcp-remote@latest', httpsEndpoint, '--transport', 'http-only', '--header', 'Authorization: Bearer ${WORK_TIMES_API_KEY}']
       });
       // The snippet itself must contain literal string "${WORK_TIMES_API_KEY}"
       expect(recipe.snippet).toContain('${WORK_TIMES_API_KEY}');
     });
 
-    it('Claude Code OAuth recipe is URL-only with no headers', () => {
+    it('Claude Code OAuth recipe uses the local mcp-remote HTTP bridge without headers', () => {
       const recipe = getRecipe('claude-code', 'oauth', httpsEndpoint);
       expect(recipe.format).toBe('json');
       const parsed = JSON.parse(recipe.snippet);
       expect(parsed.mcpServers['work-times']).toEqual({
-        type: 'http',
-        url: httpsEndpoint
+        command: 'npx',
+        args: ['-y', 'mcp-remote@latest', httpsEndpoint, '--transport', 'http-only']
       });
       expect(parsed.mcpServers['work-times'].headers).toBeUndefined();
       expect(recipe.snippet).not.toContain('headers');
       expect(recipe.snippet).not.toContain('Authorization');
     });
 
-    it('Claude Desktop OAuth recipe provides remote connector settings and public reachability warning', () => {
+    it('Claude Desktop OAuth recipe provides a local stdio bridge', () => {
       const recipe = getRecipe('claude-desktop', 'oauth', httpsEndpoint);
-      expect(recipe.snippet).toContain(httpsEndpoint);
-      expect(recipe.snippet).toContain('Work Times');
-      expect(recipe.warning).toBeDefined();
-      expect(recipe.warning).toMatch(/public reachability/i);
-      expect(recipe.warning).toMatch(/anthropic infrastructure/i);
-      expect(recipe.warning).toMatch(/not local.*json/i);
+      expect(recipe.format).toBe('json');
+      expect(recipe.filename).toBe('claude_desktop_config.json');
+      expect(JSON.parse(recipe.snippet).mcpServers['work-times']).toEqual({
+        command: 'npx',
+        args: ['-y', 'mcp-remote@latest', httpsEndpoint, '--transport', 'http-only']
+      });
+      expect(recipe.instructions.join(' ')).toContain('claude_desktop_config.json');
     });
 
     it('Claude Desktop Bearer recipe informs operator that remote connectors require OAuth 2.0', () => {
@@ -378,11 +376,11 @@ describe('MCP Configuration Recipes Module', () => {
       }
     });
 
-    it('Claude Code OAuth recipe instructions are exact JSON-only without shell command concatenation', () => {
+    it('Claude Code OAuth recipe instructions do not concatenate shell commands with the endpoint', () => {
       const recipe = getRecipe('claude-code', 'oauth', 'https://example.com/mcp');
       expect(recipe.format).toBe('json');
       // Must not contain shell add commands concatenated with endpoint
-      expect(recipe.instructions.join(' ')).not.toContain('claude mcp add');
+      expect(recipe.instructions.join(' ')).not.toContain('claude mcp add ');
       expect(recipe.instructions.some((i) => i.includes('.mcp.json'))).toBe(true);
       expect(recipe.command).toBeUndefined();
     });

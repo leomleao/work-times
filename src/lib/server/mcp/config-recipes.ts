@@ -141,18 +141,23 @@ export function formatCodexOAuthToml(endpoint: string): string {
 }
 
 /**
- * Formats Claude Code .mcp.json for Bearer token auth.
- * Uses type "http", URL, and Authorization header referencing literal ${WORK_TIMES_API_KEY}.
+ * Formats a local stdio bridge for Claude Code with Bearer token auth.
+ * mcp-remote expands the environment variable in the header argument.
  */
 export function formatClaudeCodeBearerJson(endpoint: string): string {
   const config = {
     mcpServers: {
       'work-times': {
-        type: 'http',
-        url: endpoint,
-        headers: {
-          Authorization: 'Bearer ${WORK_TIMES_API_KEY}'
-        }
+        command: 'npx',
+        args: [
+          '-y',
+          'mcp-remote@latest',
+          endpoint,
+          '--transport',
+          'http-only',
+          '--header',
+          'Authorization: Bearer ${WORK_TIMES_API_KEY}'
+        ]
       }
     }
   };
@@ -160,15 +165,14 @@ export function formatClaudeCodeBearerJson(endpoint: string): string {
 }
 
 /**
- * Formats Claude Code .mcp.json for OAuth.
- * OAuth is URL-only with no headers.
+ * Formats a local stdio bridge for Claude Code with browser OAuth.
  */
 export function formatClaudeCodeOAuthJson(endpoint: string): string {
   const config = {
     mcpServers: {
       'work-times': {
-        type: 'http',
-        url: endpoint
+        command: 'npx',
+        args: ['-y', 'mcp-remote@latest', endpoint, '--transport', 'http-only']
       }
     }
   };
@@ -176,15 +180,10 @@ export function formatClaudeCodeOAuthJson(endpoint: string): string {
 }
 
 /**
- * Formats Claude Desktop Remote Connector OAuth settings.
- * Claude Desktop remote connectors configure via UI settings, not local JSON.
+ * Formats a local Claude Desktop stdio bridge with browser OAuth.
  */
 export function formatClaudeDesktopOAuth(endpoint: string): string {
-  return [
-    `Connector Name: Work Times`,
-    `Endpoint URL: ${endpoint}`,
-    `Authentication: OAuth 2.0 (RFC 9728 Protected Resource Discovery)`
-  ].join('\n');
+  return formatClaudeCodeOAuthJson(endpoint);
 }
 
 /**
@@ -319,12 +318,14 @@ export function getRecipe(
           snippet: formatClaudeCodeBearerJson(endpoint),
           instructions: [
             'Set your full API key in your environment: export WORK_TIMES_API_KEY="wtk_..."',
-            'Save the configuration snippet into .mcp.json in your project directory (or ~/.claude.json).',
-            'Claude Code evaluates the literal ${WORK_TIMES_API_KEY} at runtime from your environment.',
+            'Add the work-times entry to .mcp.json in your project directory, or use claude mcp add-json for user scope.',
+            'mcp-remote expands ${WORK_TIMES_API_KEY} from the process environment and sends it as a Bearer header.',
             'Start Claude Code and verify tool availability.'
           ],
           notes: [
-            'The Authorization header references literal ${WORK_TIMES_API_KEY}; do not hardcode the secret into .mcp.json.',
+            'This stdio bridge connects to the streamable HTTP /mcp endpoint; it does not require an SSE endpoint.',
+            'Claude Code also supports native HTTP. Use this bridge if its native connection fails in your environment.',
+            'Do not hardcode the secret into .mcp.json.',
             'API key must possess the activity:read scope.',
             'Work Times MCP OAuth is distinct from upstream WakaTime sync OAuth.'
           ],
@@ -340,13 +341,14 @@ export function getRecipe(
           format: 'json',
           snippet: formatClaudeCodeOAuthJson(endpoint),
           instructions: [
-            'Add the URL-only configuration snippet above to your project .mcp.json (or ~/.claude.json).',
-            'Authenticate through the /mcp endpoint when Claude Code prompts you for browser OAuth approval.',
+            'Add the work-times entry to your project .mcp.json, or use claude mcp add-json for user scope.',
+            'Start Claude Code and let mcp-remote open the browser for OAuth approval.',
             'Approve the authorization request in Work Times.',
-            'Claude Code completes the OAuth flow and connects to /mcp.'
+            'mcp-remote completes OAuth and forwards Claude Code requests to /mcp.'
           ],
           notes: [
-            'OAuth configuration is URL-only; headers are omitted.',
+            'This stdio bridge connects to the streamable HTTP /mcp endpoint; it does not require an SSE endpoint.',
+            'Claude Code also supports native HTTP. Use this bridge if its native connection fails in your environment.',
             'API keys are optional when using OAuth.',
             'Work Times MCP OAuth is local agent authorization, separate from upstream WakaTime OAuth.'
           ],
@@ -356,31 +358,24 @@ export function getRecipe(
     }
 
     case 'claude-desktop': {
-      const publicWarning =
-        'Public Reachability Required: Claude Desktop remote connectors connect from Anthropic infrastructure. ' +
-        'Localhost (e.g. http://localhost:3002) is not reachable; the endpoint must be publicly accessible on the internet ' +
-        'over HTTPS (via public domain, reverse proxy, or Cloudflare Tunnel). Remote connectors configure through ' +
-        'Claude Desktop Settings, not local desktop JSON files.';
-
       if (authMethod === 'oauth') {
         return {
           client: 'claude-desktop',
           clientName: 'Claude Desktop',
           authMethod: 'oauth',
-          authMethodName: 'Remote Connector (OAuth 2.0)',
-          format: 'text',
+          authMethodName: 'Local Bridge (OAuth 2.0)',
+          filename: 'claude_desktop_config.json',
+          format: 'json',
           snippet: formatClaudeDesktopOAuth(endpoint),
-          warning: publicWarning,
           instructions: [
-            'Open Claude Desktop Settings > Developer > Remote MCP (or Connectors).',
-            'Add a new Remote MCP Connector with Name "Work Times" and the endpoint URL above.',
-            'Verify that your Work Times deployment has a publicly reachable HTTPS URL.',
-            'Click Connect and authorize Work Times in the browser popup when prompted.'
+            'Add the work-times entry under mcpServers in ~/Library/Application Support/Claude/claude_desktop_config.json (macOS). Preserve any existing entries.',
+            'Restart Claude Desktop so it starts the local mcp-remote bridge.',
+            'Authorize Work Times in the browser when mcp-remote opens it.'
           ],
           notes: [
-            'Claude Desktop remote connectors configure in the desktop UI, not through local claude_desktop_config.json.',
-            'Requires public internet reachability and valid TLS certificate.',
-            'API keys are not required for OAuth remote connectors.'
+            'This local bridge uses stdio in Claude Desktop and streamable HTTP to Work Times.',
+            'Claude Desktop cloud connectors are a separate option configured in Settings > Connectors; those require Anthropic to reach the endpoint.',
+            'API keys are not required for this OAuth bridge.'
           ],
           endpoint
         };

@@ -27,8 +27,9 @@ test.describe('P10A3: Client-Specific MCP Recipes, Clipboard Diagnostics, and Wo
     await page.click('label.client-card:has-text("Claude Code")');
     await expect(page.locator('.code-card')).toContainText('.mcp.json');
     await expect(codeBlock).toContainText('"mcpServers"');
-    await expect(codeBlock).toContainText('"type": "http"');
-    await expect(codeBlock).toContainText('"url": "http://127.0.0.1:4173/mcp"');
+    await expect(codeBlock).toContainText('"command": "npx"');
+    await expect(codeBlock).toContainText('mcp-remote@latest');
+    await expect(codeBlock).toContainText('http://127.0.0.1:4173/mcp');
 
     // 3. Switch Client: Claude Desktop (shows Remote Connector notice)
     await page.click('label.client-card:has-text("Claude Desktop")');
@@ -47,13 +48,20 @@ test.describe('P10A3: Client-Specific MCP Recipes, Clipboard Diagnostics, and Wo
     // Notice explains keys are optional for OAuth
     await expect(page.locator('.notice.info', { hasText: 'API keys are optional for OAuth' })).toBeVisible();
 
-    // 6. Switch back to Codex CLI with OAuth to verify OAuth login command
+    // 6. Desktop OAuth uses the local bridge in its JSON config.
+    await page.click('label.client-card:has-text("Claude Desktop")');
+    await expect(page.locator('.code-card')).toContainText('claude_desktop_config.json');
+    await expect(codeBlock).toContainText('mcp-remote@latest');
+    await expect(codeBlock).toContainText('http-only');
+    await expect(connectorNotice).toBeHidden();
+
+    // 7. Switch back to Codex CLI with OAuth to verify OAuth login command
     await page.click('label.client-card:has-text("Codex CLI")');
     const commandBox = page.locator('.command-box');
     await expect(commandBox).toBeVisible();
     await expect(commandBox).toContainText('codex mcp login work-times');
 
-    // 7. Keyboard Navigation across client cards
+    // 8. Keyboard Navigation across client cards
     const codexRadio = page.locator('input[name="mcp-client"][value="codex"]');
     await codexRadio.focus();
     await expect(codexRadio).toBeFocused();

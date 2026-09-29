@@ -6,6 +6,7 @@ declare global {
       admin: AdminPrincipal | null;
       sessionToken: string | null;
       csrfToken: string | null;
+      oauthRedirectOrigin?: string;
     }
 
     interface PageData {
