@@ -28,6 +28,19 @@ test.describe('P8B: Authentication, Redirects, CSRF, and Origin Contracts', () =
     await expect(page.locator('h1')).toContainText('Operational Sync & Capabilities');
   });
 
+  test('a login form left open in another tab redirects after the session is established', async ({ page, context }) => {
+    await page.goto('/login?redirectTo=%2Fadmin%2Fsync');
+    const otherTab = await context.newPage();
+    await loginAsAdmin(otherTab, '/admin/sync');
+
+    await page.fill('input[name="username"]', 'admin');
+    await page.fill('input[name="password"]', 'admin-password-123');
+    await page.click('button[type="submit"]');
+
+    await expect(page).toHaveURL(/\/admin\/sync/);
+    await expect(page.locator('h1')).toContainText('Operational Sync & Capabilities');
+  });
+
   test('direct mutation without valid CSRF or session is rejected with 401/403', async ({ page, request }) => {
     // Unauthenticated request
     const unauthRes = await request.post('/api/admin/sync-runs', {

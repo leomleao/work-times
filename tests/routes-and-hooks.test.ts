@@ -149,6 +149,71 @@ describe('Hooks & Route Protection', () => {
     }
   });
 
+  it('redirects a stale same-origin login form using the existing session without requiring CSRF', async () => {
+    const origAuth = runtime.adminAuth.authenticate;
+    (runtime.adminAuth as any).authenticate = async () => ({
+      username: 'admin',
+      sessionExpiresAt: new Date(Date.now() + 3600000).toISOString()
+    });
+
+    try {
+      const formData = new URLSearchParams({
+        redirectTo: '/admin/sync',
+        username: 'admin',
+        password: 'unused'
+      });
+      const { event } = createMockEvent({
+        url: 'http://localhost:3002/login?/login',
+        method: 'POST',
+        headers: {
+          origin: 'http://localhost:3002',
+          'content-type': 'application/x-www-form-urlencoded'
+        },
+        cookies: { [ADMIN_SESSION_COOKIE]: 'valid-admin-token' },
+        body: formData.toString()
+      });
+      const resolve = async () => new Response('login action should not run');
+
+      await expect(handle({ event, resolve })).rejects.toMatchObject({
+        status: 303,
+        location: '/admin/sync'
+      });
+    } finally {
+      runtime.adminAuth.authenticate = origAuth;
+    }
+  });
+
+  it('still rejects a cross-origin stale login form and a login logout without CSRF', async () => {
+    const origAuth = runtime.adminAuth.authenticate;
+    (runtime.adminAuth as any).authenticate = async () => ({
+      username: 'admin',
+      sessionExpiresAt: new Date(Date.now() + 3600000).toISOString()
+    });
+
+    try {
+      const crossOrigin = createMockEvent({
+        url: 'http://localhost:3002/login?/login',
+        method: 'POST',
+        headers: { origin: 'http://attacker-controlled-site.com' },
+        cookies: { [ADMIN_SESSION_COOKIE]: 'valid-admin-token' }
+      });
+      const logoutWithoutCsrf = createMockEvent({
+        url: 'http://localhost:3002/login?/logout',
+        method: 'POST',
+        headers: { origin: 'http://localhost:3002' },
+        cookies: { [ADMIN_SESSION_COOKIE]: 'valid-admin-token' }
+      });
+      const resolve = async () => new Response('action should not run');
+
+      expect((await handle({ event: crossOrigin.event, resolve })).status).toBe(403);
+      const logoutResponse = await handle({ event: logoutWithoutCsrf.event, resolve });
+      expect(logoutResponse.status).toBe(403);
+      expect(await logoutResponse.json()).toEqual({ error: 'Invalid or missing CSRF token' });
+    } finally {
+      runtime.adminAuth.authenticate = origAuth;
+    }
+  });
+
   it('rejects browser mutations with untrusted Origin', async () => {
     const { event } = createMockEvent({
       url: 'http://localhost:3002/login',

@@ -84,6 +84,25 @@ export const handle: Handle = async ({ event, resolve }) => {
       return response;
     }
 
+    // A login form can remain open in another tab after the browser acquires a
+    // session. It has no CSRF field because it was rendered unauthenticated.
+    // For that exact same-origin action, keep the existing session and redirect
+    // instead of treating the stale form as an authenticated mutation.
+    if (
+      event.locals.admin &&
+      pathname === '/login' &&
+      method === 'POST' &&
+      event.url.searchParams.has('/login')
+    ) {
+      let redirectTo: unknown = event.url.searchParams.get('redirectTo');
+      if (!redirectTo) {
+        try {
+          redirectTo = (await event.request.clone().formData()).get('redirectTo');
+        } catch {}
+      }
+      throw redirect(303, safeRedirect(redirectTo));
+    }
+
     if (event.locals.sessionToken) {
       let submittedCsrf: string | null = event.request.headers.get('x-csrf-token');
       if (!submittedCsrf) {
