@@ -9,6 +9,13 @@ const config = {
       out: 'build',
       precompress: true
     }),
+    // OAuth token, revocation, and registration accept form posts from native
+    // clients whose Origin can differ from this server's. SvelteKit's global
+    // form check runs before hooks, so the route-specific checks in
+    // hooks.server.ts enforce browser mutations instead.
+    csrf: {
+      trustedOrigins: ['*']
+    },
     // Let SvelteKit attach a fresh nonce to its inline hydration bootstrap.
     // A hand-written `script-src 'self'` header blocks that bootstrap and leaves
     // server-rendered controls inert in production.

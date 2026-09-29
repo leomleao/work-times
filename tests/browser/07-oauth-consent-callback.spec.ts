@@ -49,6 +49,24 @@ test('OAuth consent can redirect a browser to the registered loopback callback',
     await page.getByRole('button', { name: 'Approve & Authorize' }).click();
     await page.waitForURL(`${redirectUri}*`);
     await expect(page.getByText('OAuth callback received')).toBeVisible();
+
+    const code = new URL(page.url()).searchParams.get('code');
+    expect(code).toBeTruthy();
+    const token = await request.post('/oauth/token', {
+      form: {
+        grant_type: 'authorization_code',
+        client_id: clientId,
+        code: code!,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+        resource: 'http://127.0.0.1:4173/mcp'
+      },
+      headers: { Origin: callbackOrigin }
+    });
+    expect(token.status()).toBe(200);
+    const tokenBody = await token.json();
+    expect(tokenBody.access_token).toEqual(expect.any(String));
+    expect(tokenBody.token_type).toBe('Bearer');
   } finally {
     callback.close();
   }

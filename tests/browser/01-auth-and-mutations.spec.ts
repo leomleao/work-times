@@ -63,6 +63,13 @@ test.describe('P8B: Authentication, Redirects, CSRF, and Origin Contracts', () =
     expect(invalidOriginRes.status()).toBe(403);
     const invalidOriginBody = await invalidOriginRes.json();
     expect(invalidOriginBody.error).toContain('Cross-origin');
+
+    const invalidFormOriginRes = await page.request.post('/api/admin/sync-runs', {
+      form: { mode: 'recent' },
+      headers: { Origin: 'https://malicious-attacker.com' }
+    });
+    expect(invalidFormOriginRes.status()).toBe(403);
+    expect((await invalidFormOriginRes.json()).error).toBe('Cross-origin request rejected');
   });
 
   test('authenticated UI mutations pass valid session CSRF and execute successfully', async ({ page }) => {
